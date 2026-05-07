@@ -246,6 +246,7 @@ fn main() {
                 launcher_stats,
                 crash_stats,
                 backfill_stats,
+                parser_def_cache,
                 _tail_handle: parking_lot::Mutex::new(watcher),
                 _launcher_handle: parking_lot::Mutex::new(launcher_watcher),
             });
@@ -269,6 +270,7 @@ fn main() {
             commands::get_session_timeline,
             commands::list_transactions,
             commands::get_app_version,
+            commands::reparse_events,
             commands::get_source_stats,
             commands::get_storage_stats,
             commands::mark_event_as_noise,

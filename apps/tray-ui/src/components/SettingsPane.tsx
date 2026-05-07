@@ -15,6 +15,7 @@ import {
   TextInput,
   TrayCard,
 } from './tray/primitives';
+import { ReparseCard } from './ReparseCard';
 
 interface Props {
   config: Config;
@@ -250,6 +251,8 @@ export function SettingsPane({ config, onSave }: Props) {
           />
         </Field>
       </TrayCard>
+
+      <ReparseCard />
 
       <TrayCard
         title="Updates"

@@ -179,6 +179,14 @@ export interface StorageStats {
   db_size_bytes: number;
 }
 
+export interface ReparseStats {
+  examined: number;
+  updated: number;
+  kept_unmatched: number;
+  promoted_unknowns: number;
+  error: string | null;
+}
+
 export type TransactionKind = 'shop' | 'commodity_buy' | 'commodity_sell';
 export type TransactionStatus =
   | 'pending'
@@ -221,6 +229,9 @@ export const api = {
    * GitHub release tag. Distinct from Tauri's getVersion() which
    * returns the numeric tauri.conf.json version (MSI-friendly). */
   getAppVersion: () => invoke<string>('get_app_version'),
+  /** Re-run the current classifier over every stored event in place.
+   * Idempotent on a stable rule set; safe to invoke from a button. */
+  reparseEvents: () => invoke<ReparseStats>('reparse_events'),
   markEventAsNoise: (eventName: string) =>
     invoke<void>('mark_event_as_noise', { eventName }),
   refreshAccountInfo: () => invoke<AccountStatus>('refresh_account_info'),
