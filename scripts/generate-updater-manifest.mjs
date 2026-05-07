@@ -199,7 +199,15 @@ async function main() {
   }
   if (bundleVersions.size === 1) {
     const [bundleVersion] = bundleVersions;
-    if (bundleVersion !== version) {
+    // MSI rejects non-numeric pre-release identifiers ("-alpha", "-rc1"),
+    // so the Tauri bundler version (in tauri.conf.json) is intentionally
+    // a numeric-only prefix of the marketing/tag version. Accept both:
+    //   - exact match (tag and bundle are the same)
+    //   - bundle is the numeric core of the tag (tag may carry a
+    //     pre-release suffix the bundler couldn't keep)
+    const bundleMatches =
+      bundleVersion === version || version.replace(/-.*$/, "") === bundleVersion;
+    if (!bundleMatches) {
       stderr.write(
         `error: --version (${version}) does not match the version in bundle ` +
           `filenames (${bundleVersion}). Bump the workspace Cargo.toml version ` +
