@@ -8,6 +8,7 @@
 
 pub mod events;
 pub mod parser;
+pub mod transactions;
 pub mod validators;
 pub mod wire;
 
@@ -23,5 +24,6 @@ pub use parser::{
     classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
     LogLine, ParseStats,
 };
+pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
 pub use validators::{validate_event, ValidationError};
 pub use wire::{EventEnvelope, IngestBatch};
