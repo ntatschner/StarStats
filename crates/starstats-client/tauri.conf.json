@@ -39,7 +39,12 @@
     "publisher": "StarStats",
     "category": "Utility",
     "shortDescription": "Personal Star Citizen metrics",
-    "longDescription": "EAC-safe local capture of personal Star Citizen game stats. Reads only Game.log and authenticated robertsspaceindustries.com pages."
+    "longDescription": "EAC-safe local capture of personal Star Citizen game stats. Reads only Game.log and authenticated robertsspaceindustries.com pages.",
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["wix/upgrade_metadata.wxs"]
+      }
+    }
   },
   "plugins": {
     "updater": {

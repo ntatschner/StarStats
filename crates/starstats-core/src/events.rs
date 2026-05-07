@@ -37,6 +37,7 @@ pub enum GameEvent {
     CommodityBuyRequest(CommodityBuyRequest),
     CommoditySellRequest(CommoditySellRequest),
     SessionEnd(SessionEnd),
+    RemoteMatch(RemoteMatch),
 }
 
 /// `<Init> Process sc-client started` — anchors the start of a session.
@@ -435,4 +436,26 @@ pub enum SessionEndKind {
     SystemQuit,
     /// `CCIGBroker::FastShutdown` function-style entry.
     FastShutdown,
+}
+
+// ---------------------------------------------------------------------
+// Dynamic parser-definition support (see docs/PARSER_DEFINITION_UPDATES.md)
+//
+// `RemoteMatch` is the catch-all variant the parser emits when a
+// remote rule (fetched from `GET /v1/parser-definitions`) matches a
+// log line that the built-in classifier didn't recognise. The
+// `event_name` carries the rule's declared name so timeline
+// consumers can render it; `fields` is the rule's named-capture
+// extraction. `rule_id` is the manifest's stable id, surfaced so a
+// buggy rule can be retracted without rebuilding the client.
+// ---------------------------------------------------------------------
+
+/// Event emitted by a runtime-loaded parser rule. Persisted with the
+/// usual ingest pipeline so users see one consistent event surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteMatch {
+    pub timestamp: String,
+    pub rule_id: String,
+    pub event_name: String,
+    pub fields: std::collections::BTreeMap<String, String>,
 }

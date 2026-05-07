@@ -56,6 +56,7 @@ mod openapi;
 mod orders;
 mod org_routes;
 mod orgs;
+mod parser_def_routes;
 mod preferences_routes;
 mod preferences_store;
 mod profile_store;
@@ -323,6 +324,10 @@ async fn main() -> anyhow::Result<()> {
             get(query::stats_stability::<PostgresStore>),
         )
         .route(
+            "/v1/me/commerce/recent",
+            get(query::commerce_recent::<PostgresStore>),
+        )
+        .route(
             "/v1/updater/:target/:arch/:current_version",
             get(update_routes::check_for_update),
         )
@@ -339,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(totp_router)
         .merge(org_router)
         .merge(reference_router)
+        .merge(parser_def_routes::routes())
         .merge(submission_router)
         .merge(supporter_router)
         .merge(donate_router)

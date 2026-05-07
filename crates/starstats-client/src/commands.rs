@@ -500,6 +500,24 @@ fn format_summary(event: &GameEvent) -> String {
                 "Session ended (fast shutdown)".to_string()
             }
         },
+        GameEvent::RemoteMatch(e) => {
+            // Show the rule's declared event name + a compact field
+            // peek so the user can tell rules apart at a glance. We
+            // don't try to reconstruct natural-language summaries —
+            // rule authors don't know our format and we'd just be
+            // making up text. The detail drawer renders fields fully.
+            if e.fields.is_empty() {
+                format!("[remote] {}", e.event_name)
+            } else {
+                let preview: Vec<String> = e
+                    .fields
+                    .iter()
+                    .take(2)
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                format!("[remote] {} ({})", e.event_name, preview.join(", "))
+            }
+        }
     }
 }
 

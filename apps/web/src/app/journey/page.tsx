@@ -19,6 +19,7 @@ import { redirect } from 'next/navigation';
 import {
   ApiCallError,
   getCombatStats,
+  getCommerceRecent,
   getCurrentLocation,
   getLoadoutStats,
   getLocationBreakdown,
@@ -27,6 +28,9 @@ import {
   getTravelStats,
   type BreakdownResponse,
   type CombatStatsResponse,
+  type CommerceRecentResponse,
+  type CommerceTransaction,
+  type CommerceTxStatus,
   type LoadoutStatsResponse,
   type ResolvedLocation,
   type StabilityStatsResponse,
@@ -43,6 +47,7 @@ const TAB_IDS = [
   'combat',
   'loadout',
   'stability',
+  'commerce',
 ] as const;
 type TabId = (typeof TAB_IDS)[number];
 
@@ -52,6 +57,7 @@ const TAB_LABELS: Record<TabId, string> = {
   combat: 'Combat',
   loadout: 'Loadout',
   stability: 'Stability',
+  commerce: 'Commerce',
 };
 
 interface SearchParams {
@@ -108,6 +114,7 @@ export default async function JourneyPage(props: {
       {view === 'combat' && <CombatTab token={session.token} />}
       {view === 'loadout' && <LoadoutTab token={session.token} />}
       {view === 'stability' && <StabilityTab token={session.token} />}
+      {view === 'commerce' && <CommerceTab token={session.token} />}
     </div>
   );
 }
@@ -668,4 +675,143 @@ function formatDwell(seconds: number): string {
   const h = Math.floor(m / 60);
   const mr = m % 60;
   return mr === 0 ? `${h}h` : `${h}h ${mr}m`;
+}
+
+// -- Commerce tab --------------------------------------------------
+
+async function CommerceTab({ token }: { token: string }) {
+  let response: CommerceRecentResponse | null = null;
+  try {
+    response = await getCommerceRecent(token, 100, 30);
+  } catch (e) {
+    if (e instanceof ApiCallError) {
+      logger.warn(
+        { status: e.status, body: e.body },
+        'getCommerceRecent failed',
+      );
+    } else {
+      logger.warn({ err: String(e) }, 'getCommerceRecent threw');
+    }
+  }
+
+  const txs = response?.transactions ?? [];
+
+  if (txs.length === 0) {
+    return (
+      <div
+        style={{
+          padding: '32px 16px',
+          color: 'var(--fg-muted)',
+          fontSize: 14,
+          textAlign: 'center',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+        }}
+      >
+        No shop or commodity transactions captured yet. Make a purchase
+        in-game and re-sync to see them here.
+      </div>
+    );
+  }
+
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '110px 1fr 130px 110px',
+          gap: 16,
+          padding: '8px 14px',
+          fontSize: 12,
+          color: 'var(--fg-muted)',
+          fontWeight: 500,
+          textTransform: 'uppercase',
+          letterSpacing: '0.04em',
+          borderBottom: '1px solid var(--border)',
+        }}
+      >
+        <div>Kind</div>
+        <div>Item</div>
+        <div>Time</div>
+        <div style={{ textAlign: 'right' }}>Status</div>
+      </div>
+      <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+        {txs.map((tx, idx) => (
+          <li
+            key={`${tx.started_at}-${idx}`}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '110px 1fr 130px 110px',
+              gap: 16,
+              padding: '10px 14px',
+              borderBottom: '1px solid var(--border)',
+              fontSize: 14,
+              alignItems: 'baseline',
+            }}
+          >
+            <span style={{ color: 'var(--fg-muted)' }}>
+              {formatCommerceKind(tx)}
+            </span>
+            <span>
+              {tx.item ?? '—'}
+              {tx.quantity != null ? ` × ${tx.quantity}` : ''}
+            </span>
+            <span style={{ color: 'var(--fg-muted)', fontVariantNumeric: 'tabular-nums' }}>
+              {formatTimeShort(tx.started_at)}
+            </span>
+            <span
+              style={{
+                color: commerceStatusColor(tx.status),
+                fontWeight: 500,
+                textAlign: 'right',
+              }}
+            >
+              {formatCommerceStatus(tx.status)}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function formatCommerceKind(tx: CommerceTransaction): string {
+  switch (tx.kind) {
+    case 'shop':
+      return 'Shop';
+    case 'commodity_buy':
+      return 'Commodity buy';
+    case 'commodity_sell':
+      return 'Commodity sell';
+  }
+}
+
+function formatCommerceStatus(s: CommerceTxStatus): string {
+  switch (s) {
+    case 'pending':
+      return 'Pending';
+    case 'confirmed':
+      return 'Confirmed';
+    case 'rejected':
+      return 'Rejected';
+    case 'timed_out':
+      return 'Timed out';
+    case 'submitted':
+      return 'Submitted';
+  }
+}
+
+function commerceStatusColor(s: CommerceTxStatus): string {
+  switch (s) {
+    case 'confirmed':
+      return 'var(--success, #4ade80)';
+    case 'rejected':
+    case 'timed_out':
+      return 'var(--error, #f87171)';
+    case 'pending':
+      return 'var(--warning, #fbbf24)';
+    case 'submitted':
+      return 'var(--accent, #60a5fa)';
+  }
 }

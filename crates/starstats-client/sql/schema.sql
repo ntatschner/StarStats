@@ -73,3 +73,16 @@ CREATE TABLE IF NOT EXISTS event_noise_list (
     source      TEXT    NOT NULL DEFAULT 'user',
     added_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Cached parser-definition manifest fetched from the server's
+-- `GET /v1/parser-definitions`. Only one row at a time — `id = 1` is
+-- a sentinel so an UPSERT replaces the cache instead of accumulating
+-- stale rows. `payload_json` holds the full Manifest as a JSON
+-- blob; the client deserialises + compiles on startup or after a
+-- successful fetch.
+CREATE TABLE IF NOT EXISTS parser_def_manifest (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    version       INTEGER NOT NULL,
+    fetched_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    payload_json  TEXT    NOT NULL
+);

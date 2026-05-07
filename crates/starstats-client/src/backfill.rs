@@ -58,9 +58,13 @@ pub struct BackfillStats {
 /// without a tokio runtime in TLS, so a raw `tokio::spawn` panics
 /// with "no reactor running". Tauri's wrapper queues onto the
 /// runtime it owns.
-pub fn spawn(storage: Arc<Storage>, stats: Arc<parking_lot::Mutex<BackfillStats>>) {
+pub fn spawn(
+    storage: Arc<Storage>,
+    stats: Arc<parking_lot::Mutex<BackfillStats>>,
+    rules: crate::parser_defs::RuleCache,
+) {
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = run_once(&storage, &stats).await {
+        if let Err(e) = run_once(&storage, &stats, &rules).await {
             tracing::warn!(error = %e, "rotated-log backfill failed");
         }
         // Always flip `completed` so the UI exits its scanning state
@@ -70,7 +74,11 @@ pub fn spawn(storage: Arc<Storage>, stats: Arc<parking_lot::Mutex<BackfillStats>
     });
 }
 
-async fn run_once(storage: &Storage, stats: &parking_lot::Mutex<BackfillStats>) -> Result<()> {
+async fn run_once(
+    storage: &Storage,
+    stats: &parking_lot::Mutex<BackfillStats>,
+    rules: &crate::parser_defs::RuleCache,
+) -> Result<()> {
     let all_discovered = discovery::discover();
     tracing::info!(
         total = all_discovered.len(),
@@ -111,8 +119,9 @@ async fn run_once(storage: &Storage, stats: &parking_lot::Mutex<BackfillStats>) 
         s.files_total = archived.len() as u32;
     }
 
+    let rules_snapshot = rules.snapshot();
     for log in archived {
-        if let Err(e) = backfill_file(&log.path, storage, stats).await {
+        if let Err(e) = backfill_file(&log.path, storage, stats, &rules_snapshot).await {
             tracing::warn!(
                 path = %log.path.display(),
                 error = %e,
@@ -127,6 +136,7 @@ async fn backfill_file(
     path: &PathBuf,
     storage: &Storage,
     stats: &parking_lot::Mutex<BackfillStats>,
+    rules: &[starstats_core::CompiledRemoteRule],
 ) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
     let log_source = log_source_from_path(path);
@@ -180,6 +190,7 @@ async fn backfill_file(
             storage,
             &log_source,
             line_start,
+            rules,
         );
         if matches!(outcome, IngestOutcome::Recognised { .. }) {
             local_events += 1;

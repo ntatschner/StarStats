@@ -1255,6 +1255,150 @@ pub async fn stats_stability<Q: EventQuery>(
         .into_response()
 }
 
+/// Query params for `GET /v1/me/commerce/recent`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CommerceRecentParams {
+    /// How many transactions to return. Capped at 500.
+    #[serde(default = "default_commerce_limit")]
+    pub limit: u32,
+    /// Window for the "if no response in N seconds, mark timed out"
+    /// classification. Mirrors the tray client's default of 30s.
+    #[serde(default = "default_commerce_window_secs")]
+    pub window_secs: i64,
+}
+
+fn default_commerce_limit() -> u32 {
+    100
+}
+fn default_commerce_window_secs() -> i64 {
+    30
+}
+
+/// Recent shop / commodity transactions for the caller, paired
+/// `Send*Request` ↔ `*FlowResponse` via
+/// [`starstats_core::pair_transactions`].
+///
+/// Strategy: pull the last ~1000 events (regardless of type) for the
+/// user, deserialise each `payload`, filter to commerce variants,
+/// then run the pure pairer. Commerce events are rare per-user so a
+/// 1000-row cap covers a wide window without needing per-type
+/// queries.
+#[utoipa::path(
+    get,
+    path = "/v1/me/commerce/recent",
+    tag = "query",
+    params(CommerceRecentParams),
+    responses(
+        (status = 200, description = "Paired commerce transactions", body = CommerceRecentResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 500, description = "Query failed"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn commerce_recent<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    user: AuthenticatedUser,
+    Query(params): Query<CommerceRecentParams>,
+) -> impl IntoResponse {
+    // Cap aggressively — this is a "recent" view, not a forensic dump.
+    let limit = params.limit.clamp(1, 500);
+
+    // Pull the user's recent events of any type. Commerce ones get
+    // filtered in-process; others get dropped. We over-fetch by ~10x
+    // because commerce events are rare per-user and we want a useful
+    // window even if the trailing 100 raw events are all join_pu.
+    let pull_limit: i64 = (limit as i64).saturating_mul(10).clamp(200, 1000);
+    let filters = EventFilters {
+        cursor: None,
+        event_type: None,
+        since: None,
+        until: None,
+        limit: pull_limit,
+    };
+
+    let events = match query.list_filtered(&user.preferred_username, filters).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "commerce_recent list_filtered failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "query_failed");
+        }
+    };
+
+    // Deserialise each payload as GameEvent. Drop any that fail (the
+    // store may hold legacy or malformed rows from an earlier client).
+    let game_events: Vec<starstats_core::GameEvent> = events
+        .into_iter()
+        .filter_map(|e| serde_json::from_value(e.payload).ok())
+        .collect();
+
+    let now = Utc::now().to_rfc3339();
+    let txs = starstats_core::pair_transactions(&game_events, &now, params.window_secs);
+
+    // Trim to the requested limit (newest first by started_at after
+    // pair_transactions sorts ascending — reverse + take). Convert
+    // each row to the utoipa-friendly DTO so the OpenAPI spec stays
+    // canonical without forcing utoipa onto starstats-core.
+    let trimmed: Vec<CommerceTransactionDto> = txs
+        .into_iter()
+        .rev()
+        .take(limit as usize)
+        .map(CommerceTransactionDto::from)
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(CommerceRecentResponse {
+            transactions: trimmed,
+        }),
+    )
+        .into_response()
+}
+
+/// Wire-format wrapper for the commerce endpoint.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CommerceRecentResponse {
+    /// Paired transactions, newest first by started_at.
+    pub transactions: Vec<CommerceTransactionDto>,
+}
+
+/// Mirrors `starstats_core::Transaction` but in a utoipa-friendly
+/// shape. Field-for-field identical at the JSON layer.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CommerceTransactionDto {
+    pub kind: String,
+    pub status: String,
+    pub started_at: String,
+    pub confirmed_at: Option<String>,
+    pub shop_id: Option<String>,
+    pub item: Option<String>,
+    pub quantity: Option<f64>,
+    pub raw_request: String,
+    pub raw_response: Option<String>,
+}
+
+impl From<starstats_core::Transaction> for CommerceTransactionDto {
+    fn from(t: starstats_core::Transaction) -> Self {
+        Self {
+            kind: serde_json::to_value(t.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default(),
+            status: serde_json::to_value(t.status)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default(),
+            started_at: t.started_at,
+            confirmed_at: t.confirmed_at,
+            shop_id: t.shop_id,
+            item: t.item,
+            quantity: t.quantity,
+            raw_request: t.raw_request,
+            raw_response: t.raw_response,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

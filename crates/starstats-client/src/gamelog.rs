@@ -10,11 +10,12 @@
 //! Truncation handling: at game launch the file is rotated. We detect
 //! this by `metadata.len() < offset` and reset to `0`.
 
+use crate::parser_defs::RuleCache;
 use crate::storage::Storage;
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use starstats_core::{classify, structural_parse, GameEvent};
+use starstats_core::{apply_remote_rules, classify, structural_parse, GameEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +51,7 @@ pub async fn start_tail(
     path: PathBuf,
     storage: Arc<Storage>,
     stats: Arc<parking_lot::Mutex<TailStats>>,
+    rules: RuleCache,
 ) -> Result<RecommendedWatcher> {
     let (tx, mut rx) = mpsc::channel::<()>(64);
 
@@ -74,6 +76,7 @@ pub async fn start_tail(
     let storage_clone = Arc::clone(&storage);
     let stats_clone = Arc::clone(&stats);
 
+    let rules_clone = rules.clone();
     tokio::spawn(async move {
         // Initial drain in case the file already has new data we haven't seen.
         if let Err(e) = drain(
@@ -82,6 +85,7 @@ pub async fn start_tail(
             &mut offset,
             &storage_clone,
             &stats_clone,
+            &rules_clone,
         )
         .await
         {
@@ -97,6 +101,7 @@ pub async fn start_tail(
                 &mut offset,
                 &storage_clone,
                 &stats_clone,
+                &rules_clone,
             )
             .await
             {
@@ -115,6 +120,7 @@ async fn drain(
     offset: &mut u64,
     storage: &Storage,
     stats: &parking_lot::Mutex<TailStats>,
+    rules: &RuleCache,
 ) -> Result<()> {
     let file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
@@ -144,6 +150,7 @@ async fn drain(
 
     let log_source = log_source_from_path(path);
 
+    let rules_snapshot = rules.snapshot();
     loop {
         let line_start = *offset;
         buf.clear();
@@ -163,6 +170,7 @@ async fn drain(
             stats,
             &log_source,
             line_start,
+            &rules_snapshot,
         );
 
         {
@@ -182,8 +190,9 @@ fn process_line(
     stats: &parking_lot::Mutex<TailStats>,
     log_source: &str,
     line_offset: u64,
+    rules: &[starstats_core::CompiledRemoteRule],
 ) {
-    match ingest_one_line(line, storage, log_source, line_offset) {
+    match ingest_one_line(line, storage, log_source, line_offset, rules) {
         IngestOutcome::Skipped => {
             stats.lock().lines_skipped += 1;
         }
@@ -236,11 +245,16 @@ pub(crate) fn ingest_one_line(
     storage: &Storage,
     log_source: &str,
     line_offset: u64,
+    remote_rules: &[starstats_core::CompiledRemoteRule],
 ) -> IngestOutcome {
     let Some(parsed) = structural_parse(line) else {
         return IngestOutcome::Skipped;
     };
-    let Some(event) = classify(&parsed) else {
+    // Built-in classifier first; remote rules only run on built-in
+    // miss so they can never override or suppress an authoritative
+    // classification.
+    let event = classify(&parsed).or_else(|| apply_remote_rules(&parsed, remote_rules));
+    let Some(event) = event else {
         // Structural parse OK, classifier had no rule. Two paths:
         // 1. event_name is on the noise list → bump noise counter,
         //    don't pollute the actionable unknowns table.
