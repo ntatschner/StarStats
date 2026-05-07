@@ -217,6 +217,10 @@ export const api = {
     }),
   getSourceStats: () => invoke<SourceStats>('get_source_stats'),
   getStorageStats: () => invoke<StorageStats>('get_storage_stats'),
+  /** Cargo workspace version (e.g. "0.2.0-alpha") — matches the
+   * GitHub release tag. Distinct from Tauri's getVersion() which
+   * returns the numeric tauri.conf.json version (MSI-friendly). */
+  getAppVersion: () => invoke<string>('get_app_version'),
   markEventAsNoise: (eventName: string) =>
     invoke<void>('mark_event_as_noise', { eventName }),
   refreshAccountInfo: () => invoke<AccountStatus>('refresh_account_info'),

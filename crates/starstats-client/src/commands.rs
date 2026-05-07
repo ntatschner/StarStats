@@ -344,6 +344,17 @@ pub fn get_source_stats(state: State<'_, AppState>) -> SourceStats {
     }
 }
 
+/// Marketing-version string (Cargo.toml workspace version), surfaced
+/// to the UI so the displayed version matches GitHub release tags
+/// (e.g. "0.2.0-alpha"). This is distinct from Tauri's `getVersion()`
+/// API, which returns the numeric `tauri.conf.json` version (MSI
+/// bundlers reject non-numeric pre-release identifiers, so the Tauri
+/// version is intentionally a numeric subset of the marketing one).
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 pub fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
     let total_events = state.storage.total_events().map_err(|e| e.to_string())?;
