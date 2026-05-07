@@ -1,9 +1,10 @@
 # Windows installer upgrade UX — design note
 
-> **Status:** design only. Default upgrade behaviour already works
-> (auto-derived MSI UpgradeCode replaces the prior install). What's
-> deferred is the *explicit* "Upgrading existing install" message in
-> the installer UI.
+> **Status:** v0.2.x ships ARP metadata + an upgrade-detection
+> property (see `crates/starstats-client/wix/upgrade_metadata.wxs`).
+> What's still deferred is the *visible* "Upgrading existing install"
+> dialog text — that needs a full WiX UI template override and a
+> Windows VM iteration loop.
 
 ## Current behaviour (today)
 
@@ -32,7 +33,18 @@ v0.1.0 installed:
 - The progress dialog title shows **"Upgrading StarStats..."**
   instead of "Installing StarStats...".
 
-## Implementation path
+## What's already in place
+
+`crates/starstats-client/wix/upgrade_metadata.wxs` (registered via
+`bundle.windows.wix.fragmentPaths`) ships:
+
+- ARP entries (`ARPURLINFOABOUT`, `ARPHELPLINK`, `ARPNOMODIFY`,
+  `ARPNOREPAIR`) so Settings → Apps & features shows project links.
+- A `STARSTATS_UPGRADE_DETECTED` Property mirroring the built-in
+  `WIX_UPGRADE_DETECTED` signal under our namespace. The visible-UI
+  template work below keys conditional dialog text off this Property.
+
+## Implementation path (visible UI text — not yet shipped)
 
 Three pieces:
 

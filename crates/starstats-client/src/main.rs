@@ -28,6 +28,7 @@ mod hangar;
 // first-party module so the binary's trust scope is explicit);
 // `secret` is consumed by both `hangar` and the cookie-management
 // commands.
+mod parser_defs;
 #[allow(dead_code)]
 mod process_guard;
 mod secret;
@@ -129,6 +130,29 @@ fn main() {
             let storage = Arc::new(Storage::open(&storage_path)?);
             tracing::info!(path = %storage_path.display(), "opened local store");
 
+            // Hydrate the parser-definition cache from sqlite before
+            // any ingest spawns — guarantees the first events through
+            // the tail benefit from any rules cached on the previous
+            // run, even if the network fetch hasn't landed yet.
+            let parser_def_cache = parser_defs::RuleCache::new();
+            parser_defs::hydrate_from_storage(&storage, &parser_def_cache);
+            // Spawn the network refresher on the Tauri runtime so it
+            // doesn't need a local tokio context. 6h cadence; first
+            // tick runs immediately so an online cold-start picks up
+            // the active manifest.
+            if let Some(api_url) = config::load()
+                .ok()
+                .and_then(|c| c.remote_sync.api_url.clone())
+            {
+                let storage_for_fetch = Arc::clone(&storage);
+                let cache_for_fetch = parser_def_cache.clone();
+                tauri::async_runtime::spawn(parser_defs::run_fetcher(
+                    api_url,
+                    storage_for_fetch,
+                    cache_for_fetch,
+                ));
+            }
+
             // 2. Live tail stats holder
             let tail_stats = Arc::new(parking_lot::Mutex::new(gamelog::TailStats::default()));
             let sync_stats = Arc::new(parking_lot::Mutex::new(sync::SyncStats::default()));
@@ -149,7 +173,11 @@ fn main() {
 
             // 3. Discover Game.log and start tailing the most recently
             //    modified one (LIVE if the user just played).
-            let watcher = start_log_tail(Arc::clone(&storage), Arc::clone(&tail_stats))?;
+            let watcher = start_log_tail(
+                Arc::clone(&storage),
+                Arc::clone(&tail_stats),
+                parser_def_cache.clone(),
+            )?;
 
             // 3a/3b/3c. Background workers — launcher tail, crash-dir
             //     scanner, rotated-log backfill. Each is wrapped in
@@ -197,8 +225,9 @@ fn main() {
                 Arc::new(parking_lot::Mutex::new(backfill::BackfillStats::default()));
             let backfill_storage = Arc::clone(&storage);
             let backfill_stats_clone = Arc::clone(&backfill_stats);
+            let backfill_rules = parser_def_cache.clone();
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                backfill::spawn(backfill_storage, backfill_stats_clone);
+                backfill::spawn(backfill_storage, backfill_stats_clone, backfill_rules);
             }))
             .is_err()
             {
@@ -441,6 +470,7 @@ fn start_sync_workers(
 fn start_log_tail(
     storage: Arc<Storage>,
     tail_stats: Arc<parking_lot::Mutex<gamelog::TailStats>>,
+    rules: parser_defs::RuleCache,
 ) -> anyhow::Result<Option<notify::RecommendedWatcher>> {
     let mut discovered: Vec<discovery::DiscoveredLog> = discovery::discover()
         .into_iter()
@@ -464,7 +494,7 @@ fn start_log_tail(
     }
     let path = log.path.clone();
     let watcher = tauri::async_runtime::block_on(async move {
-        gamelog::start_tail(path, storage, tail_stats).await
+        gamelog::start_tail(path, storage, tail_stats, rules).await
     })?;
     Ok(Some(watcher))
 }

@@ -812,6 +812,43 @@ export async function getLoadoutStats(
   );
 }
 
+export type CommerceTxKind = 'shop' | 'commodity_buy' | 'commodity_sell';
+export type CommerceTxStatus =
+  | 'pending'
+  | 'confirmed'
+  | 'rejected'
+  | 'timed_out'
+  | 'submitted';
+
+export interface CommerceTransaction {
+  kind: CommerceTxKind;
+  status: CommerceTxStatus;
+  started_at: string;
+  confirmed_at: string | null;
+  shop_id: string | null;
+  item: string | null;
+  quantity: number | null;
+  raw_request: string;
+  raw_response: string | null;
+}
+
+export interface CommerceRecentResponse {
+  transactions: CommerceTransaction[];
+}
+
+export async function getCommerceRecent(
+  bearer: string,
+  limit: number = 100,
+  windowSecs: number = 30,
+): Promise<CommerceRecentResponse> {
+  return request<CommerceRecentResponse>(
+    'GET',
+    `/v1/me/commerce/recent?limit=${limit}&window_secs=${windowSecs}`,
+    undefined,
+    bearer,
+  );
+}
+
 export async function getStabilityStats(
   bearer: string,
   hours: number = 24 * 30,

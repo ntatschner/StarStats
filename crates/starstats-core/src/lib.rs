@@ -8,6 +8,7 @@
 
 pub mod events;
 pub mod parser;
+pub mod parser_defs;
 pub mod transactions;
 pub mod validators;
 pub mod wire;
@@ -16,13 +17,16 @@ pub use events::{
     ActorDeath, AttachmentReceived, ChangeServer, CommodityBuyRequest, CommoditySellRequest,
     GameCrash, GameEvent, HudNotification, JoinPu, LauncherActivity, LauncherCategory, LegacyLogin,
     LocationInventoryRequested, MissionEnd, MissionMarkerKind, MissionStart, PlanetTerrainLoad,
-    ProcessInit, QuantumTargetPhase, QuantumTargetSelected, ResolveSpawn, SeedSolarSystem,
-    ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
-    VehicleStowed,
+    ProcessInit, QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn,
+    SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
+    VehicleDestruction, VehicleStowed,
 };
 pub use parser::{
     classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
     LogLine, ParseStats,
+};
+pub use parser_defs::{
+    apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,
 };
 pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
 pub use validators::{validate_event, ValidationError};

@@ -46,6 +46,7 @@ pub fn validate_event(event: &GameEvent) -> Result<(), ValidationError> {
         GameEvent::CommodityBuyRequest(e) => &e.timestamp,
         GameEvent::CommoditySellRequest(e) => &e.timestamp,
         GameEvent::SessionEnd(e) => &e.timestamp,
+        GameEvent::RemoteMatch(e) => &e.timestamp,
     };
     check_timestamp(ts)?;
 

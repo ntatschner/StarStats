@@ -397,6 +397,40 @@ impl Storage {
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
+
+    /// Persist the active parser-definition manifest. The cache holds
+    /// at most one row (sentinel `id = 1`); an UPSERT replaces it on
+    /// every successful fetch. We store the raw JSON so a future
+    /// schema_version bump can be handled by re-deserialising in the
+    /// new shape without a migration.
+    pub fn write_parser_def_manifest(&self, version: u32, payload_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        conn.execute(
+            "INSERT INTO parser_def_manifest (id, version, payload_json)
+             VALUES (1, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               version = excluded.version,
+               fetched_at = datetime('now'),
+               payload_json = excluded.payload_json",
+            params![version as i64, payload_json],
+        )?;
+        Ok(())
+    }
+
+    /// Read the cached manifest payload, if any. Returns `Ok(None)`
+    /// for first-run when the cache is empty (the caller should treat
+    /// this as "no remote rules" and continue).
+    pub fn read_parser_def_manifest(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let mut stmt = conn.prepare("SELECT payload_json FROM parser_def_manifest WHERE id = 1")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            Ok(Some(payload))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
