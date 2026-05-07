@@ -1,0 +1,169 @@
+name: Build & Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.88.0
+      with:
+        components: clippy, rustfmt
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ matrix.os }}
+    - name: cargo fmt
+      run: cargo fmt --all --check
+    - name: cargo clippy (server + core)
+      run: cargo clippy -p starstats-core -p starstats-server --all-targets -- -D warnings
+    - name: cargo test (server + core)
+      run: cargo test -p starstats-core -p starstats-server --all-targets
+
+  web:
+    name: Web (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    - run: pnpm --filter web typecheck
+    - run: pnpm --filter web lint
+    - run: pnpm --filter web build
+
+  openapi-drift:
+    name: OpenAPI codegen drift
+    runs-on: ubuntu-latest
+    # Catches the case where someone changes a route signature or
+    # response shape and forgets to regenerate the TS schema. We
+    # generate the spec from the freshly-built Cargo bin and diff
+    # against the committed `schema.ts` — non-zero diff fails the job.
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: openapi-ubuntu-latest
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    - name: Dump OpenAPI spec
+      run: cargo run --quiet -p starstats-server --bin starstats-server-openapi > /tmp/openapi.json
+    - name: Regenerate schema.ts
+      env:
+        OPENAPI_SPEC: /tmp/openapi.json
+      run: pnpm --filter api-client-ts run generate
+    - name: Detect drift
+      run: |
+        if ! git diff --quiet -- packages/api-client-ts/src/generated/schema.ts; then
+          echo '::error::generated schema.ts is out of date — run `pnpm --filter api-client-ts run generate` and commit'
+          git --no-pager diff -- packages/api-client-ts/src/generated/schema.ts
+          exit 1
+        fi
+    - run: pnpm --filter api-client-ts run typecheck
+
+  web-e2e:
+    name: Web E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    - name: Install Playwright browsers
+      run: pnpm --filter web exec playwright install --with-deps chromium
+    - name: Run Playwright tests
+      run: pnpm --filter web run test:e2e
+      env:
+        CI: 'true'
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: playwright-report
+        path: apps/web/playwright-report
+        retention-days: 7
+    - uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: playwright-test-results
+        path: apps/web/test-results
+        retention-days: 7
+
+  tray-ui:
+    name: Tray UI (Vite)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    - run: pnpm --filter tray-ui typecheck
+    - run: pnpm --filter tray-ui build
+
+  tauri-client:
+    name: Tauri client ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: tauri-${{ matrix.os }}
+    - name: Install Linux Tauri deps
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    - name: Build tray-ui (frontendDist for tauri::generate_context!)
+      run: pnpm --filter tray-ui build
+    - run: cargo check -p starstats-client

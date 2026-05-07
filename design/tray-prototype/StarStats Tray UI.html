@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="stanton">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>StarStats Tray UI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css" />
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #0a0a0e;
+    color: var(--fg);
+    font-family: var(--font-sans);
+  }
+  /* Tauri-window frame: a fixed-width centered shell so the design reads
+     at the actual tray viewport width, with the surrounding chrome dimmed. */
+  .tray-window {
+    width: 720px;
+    min-height: 100vh;
+    margin: 0 auto;
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 64px rgba(0,0,0,0.6);
+    position: relative;
+    overflow: hidden;
+  }
+  /* Window-frame chrome to make it read as a real desktop window */
+  .tray-frame {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    background: #0a0a0e;
+    border-bottom: 1px solid var(--border);
+  }
+  .tray-frame__dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--surface-3);
+  }
+  .tray-frame__title {
+    flex: 1; text-align: center; font-size: 11px;
+    color: var(--fg-dim); font-family: var(--font-mono);
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+  <div class="tray-window">
+    <div class="tray-frame">
+      <span class="tray-frame__dot"></span>
+      <span class="tray-frame__dot"></span>
+      <span class="tray-frame__dot"></span>
+      <span class="tray-frame__title">StarStats — Tray Client</span>
+      <span style="width:33px"></span>
+    </div>
+    <div id="root"></div>
+  </div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="tray-app.jsx"></script>
+  <script type="text/babel" src="tray-logs.jsx"></script>
+  <script type="text/babel">
+    const { useEffect } = React;
+
+    function TrayWithTweaks() {
+      const tweakDefaults = /*EDITMODE-BEGIN*/{
+        "theme": "stanton",
+        "accentIntensity": 1
+      }/*EDITMODE-END*/;
+
+      const [t, setTweak] = useTweaks(tweakDefaults);
+
+      useEffect(() => {
+        document.documentElement.setAttribute('data-theme', t.theme);
+        document.documentElement.style.setProperty('--accent-intensity', t.accentIntensity);
+      }, [t.theme, t.accentIntensity]);
+
+      return (
+        <>
+          <TrayApp />
+          <TweaksPanel title="Tweaks">
+            <TweakSection title="Theme">
+              <TweakRadio
+                value={t.theme}
+                onChange={(v) => setTweak('theme', v)}
+                options={[
+                  { value: 'stanton', label: 'Stanton' },
+                  { value: 'pyro',    label: 'Pyro' },
+                  { value: 'terra',   label: 'Terra' },
+                  { value: 'nyx',     label: 'Nyx' },
+                ]}
+              />
+            </TweakSection>
+            <TweakSection title="Accent intensity">
+              <TweakSlider
+                value={t.accentIntensity}
+                onChange={(v) => setTweak('accentIntensity', v)}
+                min={0.5} max={1.4} step={0.05}
+              />
+            </TweakSection>
+          </TweaksPanel>
+        </>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<TrayWithTweaks />);
+  </script>
+</body>
+</html>

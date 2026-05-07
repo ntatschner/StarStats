@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StarStats — Responsive Canvas</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  html, body, #app-root { height: 100%; margin: 0; }
+  body { background: #0F0E12; font-family: 'Geist', system-ui, sans-serif; color: #ECE7DD; }
+  #app-root { height: 100vh; }
+</style>
+</head>
+<body>
+<div id="app-root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+
+<script type="text/babel">
+/**
+ * Responsive canvas — embeds the StarStats prototype at three viewport
+ * widths via sandboxed iframes pointed at the live HTML file. Each
+ * iframe sets its own width so the prototype's CSS media queries fire
+ * correctly. A small navigation strip at the top of the canvas lets
+ * the user pick which screen to inspect across all three frames at once.
+ */
+
+const SCREENS = [
+  { id: "landing",   label: "Landing" },
+  { id: "signup",    label: "Sign up" },
+  { id: "login",     label: "Login" },
+  { id: "download",  label: "Download" },
+  { id: "dashboard", label: "Dashboard" },
+  { id: "devices",   label: "Hangar" },
+  { id: "orgs",      label: "Orgs" },
+  { id: "profile",   label: "Public profile" },
+  { id: "donate",    label: "Donate" },
+  { id: "settings",  label: "Settings" },
+  { id: "twofa",     label: "2FA wizard" },
+];
+
+const SIZES = [
+  { id: "mobile",  label: "Mobile",  w: 390,  h: 844, sub: "iPhone 14 · 390×844" },
+  { id: "tablet",  label: "Tablet",  w: 820,  h: 1180, sub: "iPad · 820×1180" },
+  { id: "desktop", label: "Desktop", w: 1440, h: 900, sub: "Standard · 1440×900" },
+];
+
+const PROTO_URL = "./StarStats Prototype.html";
+
+/* Embed — iframe sized to the device, src includes a #screen= hash so
+ * the inner app can route to the right screen. We poke the inner app via
+ * postMessage too, in case it's already loaded. */
+const Embed = ({ size, screen }) => {
+  const ref = React.useRef(null);
+
+  React.useEffect(() => {
+    const f = ref.current;
+    if (!f) return;
+    const send = () => {
+      try {
+        f.contentWindow.postMessage({ type: "__starstats_goto", screen }, "*");
+      } catch (e) { /* not loaded yet */ }
+    };
+    // Try a few times after mount in case the inner app hasn't bound listeners.
+    const t1 = setTimeout(send, 100);
+    const t2 = setTimeout(send, 400);
+    const t3 = setTimeout(send, 900);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [screen]);
+
+  return (
+    <iframe
+      ref={ref}
+      title={`StarStats · ${size.label}`}
+      src={PROTO_URL + "#screen=" + screen}
+      style={{
+        width: size.w, height: size.h,
+        border: 0, background: "#0F0E12",
+        display: "block",
+      }}
+    />
+  );
+};
+
+const ResponsiveCanvas = () => {
+  const [screen, setScreen] = React.useState("landing");
+  return (
+    <DesignCanvas>
+      <DCSection
+        id="responsive"
+        title="StarStats — responsive at three widths"
+        subtitle={`Showing: ${SCREENS.find(s => s.id === screen).label} · Pick a screen below to update all three.`}
+      >
+        {SIZES.map(size => (
+          <DCArtboard
+            key={size.id}
+            id={size.id}
+            label={`${size.label} · ${size.w}×${size.h}`}
+            width={size.w}
+            height={size.h}
+          >
+            <Embed size={size} screen={screen} />
+          </DCArtboard>
+        ))}
+
+        {/* Floating screen-picker — pinned to canvas viewport, switches
+         * all three frames in unison. */}
+        <ScreenPicker screen={screen} setScreen={setScreen} />
+      </DCSection>
+    </DesignCanvas>
+  );
+};
+
+/* Floating picker. Portaled to <body> so it escapes the canvas transform —
+ * otherwise position:fixed becomes relative to the transformed world and
+ * the canvas pan-handler swallows the click events. */
+const ScreenPicker = ({ screen, setScreen }) => ReactDOM.createPortal(
+  <div
+    onPointerDown={(e) => e.stopPropagation()}
+    onWheel={(e) => e.stopPropagation()}
+    style={{
+    position: "fixed",
+    top: 16, left: "50%", transform: "translateX(-50%)",
+    zIndex: 1000,
+    display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+    background: "#fff",
+    border: "1px solid rgba(0,0,0,0.08)",
+    borderRadius: 8,
+    padding: 6,
+    boxShadow: "0 8px 28px rgba(0,0,0,0.18)",
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+    maxWidth: "calc(100vw - 32px)",
+  }}>
+    <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+      letterSpacing: "0.08em", color: "rgba(60,50,40,0.6)", padding: "0 8px" }}>
+      Screen
+    </span>
+    {SCREENS.map(s => (
+      <button
+        key={s.id}
+        onClick={() => setScreen(s.id)}
+        style={{
+          border: 0,
+          padding: "6px 10px",
+          borderRadius: 6,
+          background: screen === s.id ? "#29261b" : "transparent",
+          color: screen === s.id ? "#fff" : "#3a3528",
+          fontFamily: "inherit",
+          fontSize: 12,
+          fontWeight: 500,
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {s.label}
+      </button>
+    ))}
+  </div>,
+  document.body
+);
+
+ReactDOM.createRoot(document.getElementById("app-root")).render(<ResponsiveCanvas />);
+</script>
+</body>
+</html>

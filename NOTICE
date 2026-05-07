@@ -1,0 +1,39 @@
+StarStats — Third-Party Acknowledgements
+========================================
+
+StarStats is licensed under the Mozilla Public License 2.0 (see LICENSE).
+This file lists third-party works whose ideas, formats, or reverse-
+engineering effort informed StarStats' implementation. None of the
+projects below ship code inside this repository — only knowledge they
+helped surface.
+
+If you maintain one of these projects and would like the attribution
+amended, removed, or expanded, open an issue and we will adjust.
+
+----------------------------------------------------------------------
+
+StarCitiSync (https://github.com/JiyanDev/StarCitiSyncPublic)
+License: MIT
+
+The v0.2.0-alpha additions to `crates/starstats-core/src/parser.rs`
+recognise additional Star Citizen `Game.log` patterns — mission
+lifecycle markers (`<CLocalMissionPhaseMarker::CreateMarker>`,
+`CreateMissionObjectiveMarker`, `<EndMission>`), shop and commodity
+transactions (`SendShopBuyRequest`, `ShopFlowResponse`,
+`SendCommodityBuyRequest`, `SendCommoditySellRequest`), and clean
+session-end signals (`<SystemQuit>`, `CCIGBroker::FastShutdown`).
+
+The catalogue of which log tokens carry which meaning was informed by
+StarCitiSync's open-source backend. StarStats does not copy code from
+StarCitiSync; the regexes, dispatch shape, and tests in this repo
+were written from scratch in Rust against synthetic fixtures. The
+attribution exists because the *vocabulary* of what to look for —
+which engine calls correspond to "mission accepted" vs "shop
+purchase confirmed" — would have taken substantially longer to
+derive without StarCitiSync's prior reverse-engineering work being
+visible in public.
+
+StarStats deliberately omits StarCitiSync's screen-capture / OCR-based
+features. Anything that intercepts the running game process or its
+rendered frames is outside StarStats' EAC-safe scope (see README:
+"What StarStats does NOT do").

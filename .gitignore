@@ -1,0 +1,82 @@
+# --- Rust ---
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# --- Node / pnpm ---
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# --- Next.js ---
+.next/
+out/
+
+# --- Build / cache ---
+dist/
+build/
+.turbo/
+.tauri/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- Coverage / test ---
+coverage/
+*.lcov
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# --- Playwright ---
+playwright-report/
+test-results/
+playwright/.cache/
+
+# --- Python (in prototypes/) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Environment ---
+.env
+.env.local
+.env.*.local
+
+# --- Secrets / personal ---
+*.session
+*.cookies
+cookies.txt
+*.pem
+*.key
+
+# --- Local DB / captures ---
+*.db
+*.sqlite
+*.sqlite3
+captures/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.fleet/
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Tauri ---
+crates/starstats-client/gen/
+src-tauri/target/
+
+# --- Generated ---
+# `packages/api-client-ts/src/generated/schema.ts` is the only file
+# under `generated/`. It IS committed — the `openapi-drift` CI job
+# regenerates it from the live OpenAPI spec and fails the build if
+# the committed copy is out of sync. Web-side typecheck depends on
+# the committed copy too. Keep this directory tracked.
