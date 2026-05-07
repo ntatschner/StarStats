@@ -14,7 +14,10 @@ use crate::secret::{SecretStore, ACCOUNT_RSI_SESSION_COOKIE};
 use crate::state::{AccountStatus, AppState};
 use crate::sync::{self, SyncStats};
 use serde::{Deserialize, Serialize};
-use starstats_core::{pair_transactions, GameEvent, Transaction};
+use starstats_core::{
+    apply_remote_rules, classify, pair_transactions, structural_parse, GameEvent, Transaction,
+};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 
@@ -353,6 +356,161 @@ pub fn get_source_stats(state: State<'_, AppState>) -> SourceStats {
 #[tauri::command]
 pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Result of a re-parse pass over the local store.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReparseStats {
+    pub examined: u64,
+    /// Rows whose `(type, payload)` changed because a newer/remote
+    /// rule produced a different classification.
+    pub updated: u64,
+    /// Rows whose stored line no longer parses (probably mid-flight
+    /// at capture time). Left untouched — never demoted.
+    pub kept_unmatched: u64,
+    /// Unknowns whose sample line now classifies. The first occurrence
+    /// of each is promoted into `events`; the unknown row is removed.
+    pub promoted_unknowns: u64,
+    pub error: Option<String>,
+}
+
+/// Re-run the current classifier (built-ins + body-prefix + remote
+/// rules) over every stored event line, in place. Existing rows are
+/// updated when the new classification differs; otherwise left alone.
+/// Idempotent — running it twice with the same rule set is a no-op
+/// past the first.
+///
+/// Also walks `unknown_event_samples` and promotes any sample line
+/// that the current classifier now recognises into a real `events`
+/// row, removing the unknown record.
+///
+/// Heavy operation — async + spawn_blocking so the webview stays
+/// responsive on a multi-million-row store.
+#[tauri::command]
+pub async fn reparse_events(state: State<'_, AppState>) -> Result<ReparseStats, String> {
+    let storage = Arc::clone(&state.storage);
+    let rules_snapshot = state.parser_def_cache.snapshot();
+
+    tauri::async_runtime::spawn_blocking(move || run_reparse(&storage, &rules_snapshot))
+        .await
+        .map_err(|e| format!("reparse worker panicked: {e}"))?
+}
+
+fn run_reparse(
+    storage: &crate::storage::Storage,
+    rules: &[starstats_core::CompiledRemoteRule],
+) -> Result<ReparseStats, String> {
+    let mut stats = ReparseStats {
+        examined: 0,
+        updated: 0,
+        kept_unmatched: 0,
+        promoted_unknowns: 0,
+        error: None,
+    };
+
+    // Phase 1 — re-classify already-recognised events.
+    let outcome = storage.for_each_event(500, |row| {
+        stats.examined += 1;
+        let Some(parsed) = structural_parse(&row.raw_line) else {
+            stats.kept_unmatched += 1;
+            return Ok(());
+        };
+        let Some(new_event) = classify(&parsed).or_else(|| apply_remote_rules(&parsed, rules))
+        else {
+            // The current rule set produces nothing for this line;
+            // never demote — the row was recognised previously and
+            // its stored payload is the best record we have.
+            stats.kept_unmatched += 1;
+            return Ok(());
+        };
+        let Some((new_type, new_ts, new_payload)) = serialise_for_reparse(&new_event) else {
+            stats.kept_unmatched += 1;
+            return Ok(());
+        };
+        if new_type != row.event_type
+            || new_ts != row.timestamp
+            || new_payload != row.payload_json
+        {
+            storage
+                .update_event_classification(row.id, &new_type, &new_ts, &new_payload)
+                .map_err(|e| anyhow::anyhow!("update_event_classification: {e}"))?;
+            stats.updated += 1;
+        }
+        Ok(())
+    });
+    if let Err(e) = outcome {
+        stats.error = Some(format!("phase 1: {e}"));
+        return Ok(stats);
+    }
+
+    // Phase 2 — promote unknowns whose stored sample now classifies.
+    let unknowns = storage
+        .recent_unknowns(usize::MAX)
+        .map_err(|e| format!("recent_unknowns: {e}"))?;
+    for sample in unknowns {
+        let Some(parsed) = structural_parse(&sample.sample_line) else {
+            continue;
+        };
+        let Some(new_event) = classify(&parsed).or_else(|| apply_remote_rules(&parsed, rules))
+        else {
+            continue;
+        };
+        let Some((new_type, new_ts, new_payload)) = serialise_for_reparse(&new_event) else {
+            continue;
+        };
+        // We don't know the original byte offset for the unknown, so
+        // synthesise a key keyed on the sample line itself. ON CONFLICT
+        // DO NOTHING means a duplicate (same line in events already)
+        // is silently skipped; success means a real promotion.
+        let key = reparse_idempotency_key(&sample.log_source, &sample.sample_line);
+        let insert_outcome = storage.insert_event(
+            &key,
+            &new_type,
+            &new_ts,
+            &sample.sample_line,
+            &new_payload,
+            &sample.log_source,
+            0,
+        );
+        if let Err(e) = insert_outcome {
+            tracing::warn!(error = %e, event = %sample.event_name, "promote unknown failed");
+            continue;
+        }
+        // Remove the unknown sample regardless of whether the insert
+        // was a fresh row or a no-op conflict — either way, the
+        // sample is no longer a "next thing to write a rule for".
+        if let Err(e) = storage.delete_unknown(&sample.log_source, &sample.event_name) {
+            tracing::warn!(error = %e, "delete_unknown failed during reparse");
+        }
+        stats.promoted_unknowns += 1;
+    }
+
+    Ok(stats)
+}
+
+/// Mirror of `gamelog::serialise_event` but private to the reparse
+/// path so tweaks here don't ripple into ingest. Returns
+/// `(event_type, timestamp, payload_json)`.
+fn serialise_for_reparse(event: &GameEvent) -> Option<(String, String, String)> {
+    let payload = serde_json::to_string(event).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&payload).ok()?;
+    let event_type = value.get("type")?.as_str()?.to_string();
+    let timestamp = value
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((event_type, timestamp, payload))
+}
+
+/// Stable key for an unknown-promoted-during-reparse row. Distinct
+/// namespace (`reparse:`) so it can never collide with the live-tail
+/// keyspace (`<source>:<offset>:<line>`) — same line + same source
+/// produces the same key, so re-running reparse is idempotent.
+fn reparse_idempotency_key(log_source: &str, line: &str) -> String {
+    use uuid::Uuid;
+    let payload = format!("reparse:{log_source}:{line}");
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, payload.as_bytes()).to_string()
 }
 
 #[tauri::command]

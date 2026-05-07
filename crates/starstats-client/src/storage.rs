@@ -40,6 +40,25 @@ pub struct RecentEventRow {
     pub log_source: String,
 }
 
+/// Full row from `events` — used by the re-parse iterator. Has every
+/// column the classifier could need to either re-score the line or
+/// rewrite the payload in place. Several fields are not consumed by
+/// the current re-parse path but are kept on the struct so future
+/// passes (e.g. backfill-with-rules-applied) don't need to widen the
+/// SELECT shape.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EventRow {
+    pub id: i64,
+    pub idempotency_key: String,
+    pub event_type: String,
+    pub timestamp: String,
+    pub raw_line: String,
+    pub payload_json: String,
+    pub log_source: String,
+    pub source_offset: u64,
+}
+
 /// One row from `unknown_event_samples`. Mirrors every non-id column
 /// in the table; the command layer maps it onto its serialised wire
 /// counterpart.
@@ -415,6 +434,84 @@ impl Storage {
             params![version as i64, payload_json],
         )?;
         Ok(())
+    }
+
+    /// Stream every row of `events` for re-parse. Loads the full set
+    /// in batches so a multi-million-row store doesn't materialize as
+    /// one giant `Vec`. Caller closure decides what to do per row;
+    /// returning `Err` aborts the iteration.
+    pub fn for_each_event<F>(&self, batch_size: usize, mut f: F) -> Result<()>
+    where
+        F: FnMut(EventRow) -> Result<()>,
+    {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let mut last_id: i64 = 0;
+        loop {
+            let mut stmt = conn.prepare(
+                "SELECT id, idempotency_key, type, timestamp, raw, payload, log_source, source_offset
+                 FROM events
+                 WHERE id > ?
+                 ORDER BY id ASC
+                 LIMIT ?",
+            )?;
+            let rows: Vec<EventRow> = stmt
+                .query_map(params![last_id, batch_size as i64], |row| {
+                    Ok(EventRow {
+                        id: row.get(0)?,
+                        idempotency_key: row.get(1)?,
+                        event_type: row.get(2)?,
+                        timestamp: row.get(3)?,
+                        raw_line: row.get(4)?,
+                        payload_json: row.get(5)?,
+                        log_source: row.get(6)?,
+                        source_offset: row.get::<_, i64>(7)?.max(0) as u64,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                last_id = row.id;
+                f(row)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-classify in place — overwrite an existing row's type +
+    /// payload + timestamp (timestamps can refine when a richer
+    /// classifier extracts a more precise field). Used by the
+    /// re-parse command when newer rules upgrade an existing match.
+    /// Returns the number of rows actually updated (0 or 1).
+    pub fn update_event_classification(
+        &self,
+        id: i64,
+        event_type: &str,
+        timestamp: &str,
+        payload_json: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let n = conn.execute(
+            "UPDATE events SET type = ?, timestamp = ?, payload = ? WHERE id = ?",
+            params![event_type, timestamp, payload_json, id],
+        )?;
+        Ok(n)
+    }
+
+    /// Drop a single unknown sample by `(log_source, event_name)`.
+    /// Used by re-parse: once a sample line has been promoted to a
+    /// real `events` row, the unknown record is no longer the
+    /// "actionable next thing to write a rule for".
+    pub fn delete_unknown(&self, log_source: &str, event_name: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let n = conn.execute(
+            "DELETE FROM unknown_event_samples
+             WHERE log_source = ? AND event_name = ?",
+            params![log_source, event_name],
+        )?;
+        Ok(n)
     }
 
     /// Read the cached manifest payload, if any. Returns `Ok(None)`

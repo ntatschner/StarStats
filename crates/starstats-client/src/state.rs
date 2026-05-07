@@ -53,6 +53,11 @@ pub struct AppState {
     /// completion on startup; surfaces "scanning…" / final summary
     /// to the UI via `commands::get_source_stats`.
     pub backfill_stats: Arc<parking_lot::Mutex<BackfillStats>>,
+    /// Runtime parser-rule cache. Held in AppState so the re-parse
+    /// command can take a snapshot at the moment the user clicks the
+    /// button — re-parsing should use the SAME rule set the live
+    /// tail is using right then.
+    pub parser_def_cache: crate::parser_defs::RuleCache,
     /// Held for its lifetime — drop ends filesystem watching.
     pub _tail_handle: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
     /// Same as `_tail_handle` but for the launcher-log watcher.
