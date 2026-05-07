@@ -1,0 +1,1351 @@
+//! Two-pass `Game.log` parser.
+//!
+//! ## Why two passes
+//!
+//! Game.log lines have a stable shell:
+//!
+//! ```text
+//! <TIMESTAMP> [LEVEL] <EventName> body fields [Team_X][Y][Z]
+//! ```
+//!
+//! and a wildly variable body. Trying to capture every event with one
+//! big regex per type is brittle: CIG changes wording between patches,
+//! and a single broken regex hides the rest.
+//!
+//! Pass 1 ([`structural_parse`]) extracts the stable shell into a
+//! [`LogLine`]. Pass 2 ([`classify`]) dispatches on `(event_name, tags)`
+//! and runs a small, focused regex per event variant. Unknown lines
+//! are recorded in [`ParseStats`] so we can surface coverage to the
+//! user.
+
+use crate::events::{
+    ActorDeath, AttachmentReceived, ChangeServer, CommodityBuyRequest, CommoditySellRequest,
+    GameEvent, HudNotification, JoinPu, LauncherCategory, LegacyLogin, LocationInventoryRequested,
+    MissionEnd, MissionMarkerKind, MissionStart, PlanetTerrainLoad, ProcessInit,
+    QuantumTargetPhase, QuantumTargetSelected, ResolveSpawn, SeedSolarSystem, ServerPhase,
+    SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
+    VehicleStowed,
+};
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+// ---------------------------------------------------------------------
+// RSI Launcher log structural parser (separate format from Game.log)
+// ---------------------------------------------------------------------
+
+/// One line from an RSI Launcher log, decomposed for ingest.
+///
+/// The launcher writes Electron-style entries:
+///
+///   `[2026-05-06 12:34:56.789] [info] message text`
+///
+/// We only carry the structural shell — `timestamp`, `level`, and
+/// `message`. Higher-level classification (login, install, patch
+/// progress) is intentionally deferred until we have sample lines
+/// to anchor regexes against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherLogLine<'a> {
+    /// The bracketed date+time. Returned as-is (no normalisation) so
+    /// the caller can decide whether to parse it. Format observed in
+    /// the wild is `YYYY-MM-DD HH:MM:SS.mmm`.
+    pub timestamp: &'a str,
+    /// Lowercased level token (`info`, `warn`, `error`, `debug`, ...).
+    pub level: &'a str,
+    /// Trimmed message body — everything after the second `]`.
+    pub message: &'a str,
+}
+
+static LAUNCHER_RE: Lazy<Regex> = Lazy::new(|| {
+    // [TS] [LEVEL] message
+    // Allow any non-`]` characters inside both bracket groups so a
+    // future launcher version that pads the timestamp differently
+    // still matches.
+    Regex::new(r"^\[(?P<ts>[^\]]+)\]\s*\[(?P<level>[A-Za-z]+)\]\s*(?P<msg>.*)$")
+        .expect("LAUNCHER_RE compiles")
+});
+
+/// Bucket a launcher message into a coarse [`LauncherCategory`] using
+/// keyword detection. The launcher's vocabulary isn't formally
+/// documented but real captures cluster around the same handful of
+/// activities — auth, install, patch, update — each signalled by
+/// predictable substrings. We err on the side of `Info` when the
+/// signal is weak; a wrongly-categorised launcher message is far
+/// less harmful than a missed gameplay event.
+///
+/// `level` and `message` come from [`parse_launcher_line`] (level is
+/// pre-lowercased by the caller).
+pub fn classify_launcher_message(level: &str, message: &str) -> LauncherCategory {
+    // Lower-case once so the keyword scan is case-insensitive without
+    // allocating per-keyword.
+    let lower = message.to_ascii_lowercase();
+
+    // Errors are level-driven first — explicit error level outranks
+    // any keyword match (a "patch download error" is an Error, not a
+    // Patch). Some lines log at info level but carry "failed" /
+    // "error" in the body; treat those as errors too.
+    let level_is_error = matches!(level, "error" | "fatal");
+    let body_says_error = lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("exception")
+        || lower.contains("err_");
+    if level_is_error || body_says_error {
+        return LauncherCategory::Error;
+    }
+
+    // Auth — login flow, session, credentials. RSI launcher uses
+    // both "log in" and "sign in" wording across versions.
+    if lower.contains("log in")
+        || lower.contains("logged in")
+        || lower.contains("logging in")
+        || lower.contains("log out")
+        || lower.contains("logged out")
+        || lower.contains("sign in")
+        || lower.contains("signed in")
+        || lower.contains("authenticat")
+        || lower.contains("credential")
+        || lower.contains("session refresh")
+        || lower.contains("token refresh")
+        || lower.contains("oauth")
+    {
+        return LauncherCategory::Auth;
+    }
+
+    // Patch keywords are checked before Install because "applying
+    // patch" should win over a stray "install" mention nearby. Patch
+    // operations include explicit patch verbs plus delta downloads.
+    if lower.contains("patch")
+        || lower.contains("delta")
+        || lower.contains("applying update")
+        || lower.contains("applying ")
+    {
+        return LauncherCategory::Patch;
+    }
+
+    // Install / verify covers fresh installs, file integrity checks,
+    // re-downloads. The launcher uses "verify" for the integrity pass.
+    if lower.contains("install")
+        || lower.contains("download")
+        || lower.contains("verify")
+        || lower.contains("verification")
+        || lower.contains("integrity")
+        || lower.contains("repair")
+        || lower.contains("file check")
+    {
+        return LauncherCategory::Install;
+    }
+
+    // Self-update of the launcher itself.
+    if lower.contains("launcher update")
+        || lower.contains("self-update")
+        || lower.contains("self update")
+        || lower.contains("checking for updates")
+    {
+        return LauncherCategory::Update;
+    }
+
+    LauncherCategory::Info
+}
+
+/// Parse a single line from an RSI Launcher log. Returns `None` for
+/// blanks, banners, multi-line continuations, or anything that
+/// doesn't carry the bracketed timestamp + level shell.
+pub fn parse_launcher_line(line: &str) -> Option<LauncherLogLine<'_>> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line.is_empty() {
+        return None;
+    }
+    let caps = LAUNCHER_RE.captures(line)?;
+    let timestamp = caps.name("ts")?.as_str().trim();
+    let level = caps.name("level")?.as_str();
+    let message = caps.name("msg")?.as_str().trim();
+    // The launcher emits some lines that are pure level-only chatter
+    // ("[info]") with no message body. Drop them — they carry no
+    // signal worth surfacing on the timeline.
+    if message.is_empty() {
+        return None;
+    }
+    Some(LauncherLogLine {
+        timestamp,
+        level,
+        message,
+    })
+}
+
+// ---------------------------------------------------------------------
+// Pass 1: structural pre-parse
+// ---------------------------------------------------------------------
+
+/// One Game.log line, decomposed into its stable parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine<'a> {
+    pub timestamp: &'a str,
+    pub level: Option<&'a str>,
+    pub event_name: Option<&'a str>,
+    pub body: &'a str,
+    pub tags: Vec<&'a str>,
+}
+
+static SHELL_RE: Lazy<Regex> = Lazy::new(|| {
+    // <TS> [LEVEL] <Event> ... [tag1][tag2]...
+    // The tag run at the end is greedy from the LAST `]` walking back —
+    // we strip it in code rather than via regex, for robustness.
+    //
+    // Event name allows ONE level of nested `<...>` so symbols like
+    // `<CSCLoadingPlatformManager::LoadEntitiesReference::<lambda_1>>`
+    // are captured whole instead of being truncated at the inner `>`.
+    Regex::new(r"^<(?P<ts>[^>]+)>\s+(?:\[(?P<level>[A-Za-z]+)\]\s+)?(?:<(?P<event>(?:[^<>]|<[^>]*>)+)>)?\s*(?P<rest>.*)$")
+        .expect("SHELL_RE compiles")
+});
+
+static TAG_TAIL_RE: Lazy<Regex> = Lazy::new(|| {
+    // Trailing block: one or more [Team_X] / [Foo] tokens at end of line.
+    Regex::new(r"\s*((?:\[[A-Za-z0-9_]+\])+)\s*$").expect("TAG_TAIL_RE compiles")
+});
+
+/// Parse the structural shell of one log line. Returns `None` for
+/// lines that don't even start with a timestamp (continuation lines,
+/// blanks, banners).
+pub fn structural_parse(line: &str) -> Option<LogLine<'_>> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let caps = SHELL_RE.captures(line)?;
+    let timestamp = caps.name("ts")?.as_str();
+    let level = caps.name("level").map(|m| m.as_str());
+    let event_name = caps.name("event").map(|m| m.as_str());
+    let rest = caps.name("rest").map(|m| m.as_str()).unwrap_or("");
+
+    // Walk the trailing tag block off `rest`.
+    let (body, tags) = if let Some(tag_caps) = TAG_TAIL_RE.captures(rest) {
+        let tag_run = tag_caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let body = &rest[..rest.len() - tag_caps.get(0).unwrap().as_str().len()];
+        let tags = tag_run
+            .split(['[', ']'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        (body.trim(), tags)
+    } else {
+        (rest.trim(), Vec::new())
+    };
+
+    Some(LogLine {
+        timestamp,
+        level,
+        event_name,
+        body,
+        tags,
+    })
+}
+
+// ---------------------------------------------------------------------
+// Pass 2: semantic classification
+// ---------------------------------------------------------------------
+
+static PROCESS_INIT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"Process sc-client started\s*\(Local:\s*(?P<local>[^.]+)\.\s*Env:\s*(?P<env>[^)]+)\).*?bOnline\[(?P<online>\d)\]"
+    ).expect("PROCESS_INIT_RE compiles")
+});
+
+static LEGACY_LOGIN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"User Login Success\s*-\s*Handle\[(?P<handle>[^\]]+)\](?:\s*-\s*Time\[(?P<time>[^\]]+)\])?")
+        .expect("LEGACY_LOGIN_RE compiles")
+});
+
+static JOIN_PU_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"address\[(?P<address>[^\]]+)\]\s*port\[(?P<port>\d+)\]\s*shard\[(?P<shard>[^\]]+)\]\s*locationId\[(?P<loc>[^\]]+)\]"
+    ).expect("JOIN_PU_RE compiles")
+});
+
+static CHANGE_SERVER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"IsShardPersisted\[(?P<shard>\d)\]\s*IsServer\[(?P<server>\d)\]\s*IsMultiplayer\[(?P<mp>\d)\](?:\s*IsOnline\[(?P<online>\d)\])?"
+    ).expect("CHANGE_SERVER_RE compiles")
+});
+
+static SEED_SS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Solar System '(?P<ss>[^']+)' for shard (?P<shard>\S+)")
+        .expect("SEED_SS_RE compiles")
+});
+
+static RESOLVE_SPAWN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"player id:\s*\[(?P<geid>\d+)\]").expect("RESOLVE_SPAWN_RE compiles"));
+
+// Combat events — patterns derived from community captures, NOT this
+// fixture (which has no combat). Kept in their own block so they're
+// easy to update when we get a real combat capture.
+static ACTOR_DEATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?:CActor::Kill:\s*)?'(?P<victim>[^']+)'(?:\s*\[(?P<vgeid>\d+)\])?\s*in zone\s*'(?P<zone>[^']+)'\s*killed by\s*'(?P<killer>[^']+)'(?:\s*\[(?P<kgeid>\d+)\])?\s*using\s*'(?P<weapon>[^']+)'.*?with damage type\s*'(?P<dmg>[^']+)'"
+    ).expect("ACTOR_DEATH_RE compiles")
+});
+
+static VEHICLE_DESTRUCTION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"vehicle\s*'(?P<vclass>[^']+)'(?:\s*\[(?P<vid>[^\]]+)\])?.*?destroy(?:Level|_level)\s*[:=]?\s*(?P<level>\d+).*?caused by\s*'(?P<cause>[^']+)'(?:.*?zone\s*'(?P<zone>[^']+)')?"
+    ).expect("VEHICLE_DESTRUCTION_RE compiles")
+});
+
+// HUD banner notifications (zone/jurisdiction/armistice). The text is
+// allowed to contain a trailing colon-space because the engine appends
+// a player or location after the colon; we keep what's inside the
+// quotes verbatim so callers can detect that suffix themselves.
+static HUD_NOTIFICATION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"Added notification\s*"(?P<text>[^"]*)"\s*\[(?P<id>\d+)\](?:.*?MissionId:\s*\[(?P<mission>[^\]]+)\])?"#
+    ).expect("HUD_NOTIFICATION_RE compiles")
+});
+
+static LOCATION_INVENTORY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"Player\[(?P<player>[^\]]+)\]\s*requested\s*inventory\s*for\s*Location\[(?P<location>[^\]]+)\]"
+    ).expect("LOCATION_INVENTORY_RE compiles")
+});
+
+// Match `Planet OOC_<...>` up to whitespace — the object-container
+// key never has spaces in it.
+static PLANET_TERRAIN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"Planet\s+(?P<planet>OOC_\S+)").expect("PLANET_TERRAIN_RE compiles"));
+
+// Quantum target lines look like:
+//   ... | NOT AUTH | <vehicle_class>_<vehicle_id>[<vehicle_id>]| ... |Player has (selected point|requested fuel calculation to destination) <destination>...
+// The vehicle field uses an underscore between class and id, but the
+// id is also re-emitted in `[brackets]` so we anchor on that.
+static QUANTUM_TARGET_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"\|\s*(?P<vehicle>[A-Za-z0-9_]+?)_(?P<vid>\d+)\[(?P<vid2>\d+)\]\|.*?Player has (?:selected point|requested fuel calculation to destination)\s+(?P<dest>\S+)"
+    ).expect("QUANTUM_TARGET_RE compiles")
+});
+
+// CLandingArea unregister body:
+//   [STOWING ON UNREGISTER] <area_name> [<area_id>] - Attempting to stow current vehicle [<vehicle_id>] ... Vehicle Zone Host [<zone_id>]
+// `area_name` is whitespace-free even when prefixed with `[PROC]` and
+// suffixed with a GUID-in-braces, so a single \S+ captures it cleanly.
+static VEHICLE_STOWED_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"\[STOWING\s+ON\s+UNREGISTER\]\s*(?P<area>\S+)\s*\[(?P<area_id>\d+)\]\s*-\s*Attempting to stow current vehicle\s*\[(?P<vehicle_id>\d+)\].*?Vehicle Zone Host\s*\[(?P<zone_host>\d+)\]"
+    ).expect("VEHICLE_STOWED_RE compiles")
+});
+
+// AttachmentReceived body shape:
+//   Player[NAME] Attachment[name_with_id, class, id] Status[X] Port[Y] Elapsed[N.NNN]
+// The Attachment[] tuple's first field repeats class+"_"+id, so we
+// drop it and capture only the canonical class + id.
+static ATTACHMENT_RECEIVED_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"Player\[(?P<player>[^\]]+)\]\s*Attachment\[[^,]+,\s*(?P<class>[^,]+?),\s*(?P<id>[^\]]+)\]\s*Status\[(?P<status>[^\]]+)\]\s*Port\[(?P<port>[^\]]+)\]\s*Elapsed\[(?P<elapsed>[^\]]+)\]"
+    ).expect("ATTACHMENT_RECEIVED_RE compiles")
+});
+
+// ---------------------------------------------------------------------
+// v0.2.0-alpha additions: mission / shop / commodity / session-end.
+//
+// Patterns derived from external community reverse-engineering work
+// (see repo NOTICE). They are best-effort: real captures may force
+// tightening.  Every regex is anchored on its keyword so substring
+// matches in unrelated lines won't false-positive.
+// ---------------------------------------------------------------------
+
+// `<CLocalMissionPhaseMarker::CreateMarker>` body shape (best-effort):
+//   ... missionId[<uuid>] ... missionName[<name>]
+static MISSION_PHASE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"missionId\[(?P<id>[0-9a-fA-F-]+)\](?:.*?missionName\[(?P<name>[^\]]+)\])?")
+        .expect("MISSION_PHASE_RE compiles")
+});
+
+// `CreateMissionObjectiveMarker(...)` function-call body. The args
+// list typically contains the parent mission UUID and a localised
+// objective string we don't try to translate. We capture only the UUID.
+static MISSION_OBJECTIVE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"CreateMissionObjectiveMarker\([^)]*?(?P<id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    ).expect("MISSION_OBJECTIVE_RE compiles")
+});
+
+// `<EndMission>` body — typically `... missionId[<uuid>] outcome[<word>] ...`.
+// Outcome is optional because the engine sometimes prints just the id.
+static MISSION_END_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?:missionId\[(?P<id>[0-9a-fA-F-]+)\])?(?:.*?outcome\[(?P<outcome>[A-Za-z]+)\])?")
+        .expect("MISSION_END_RE compiles")
+});
+
+// Shop / standard-item buy request — function-call style. Body looks like:
+//   `Send(?:Standard)?ShopBuyRequest(shopId=..., item=..., quantity=N, ...)`
+// We only require the keyword anchor; the inner KV list varies.
+static SHOP_BUY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"Send(?:Standard)?(?:Item|Shop)?BuyRequest(?:.*?shopId=(?P<shop>[A-Za-z0-9_-]+))?(?:.*?item(?:Class)?=(?P<item>[A-Za-z0-9_]+))?(?:.*?quantity=(?P<qty>\d+))?"
+    ).expect("SHOP_BUY_RE compiles")
+});
+
+// Server-side flow response — keyword anchor + optional Result token.
+static SHOP_RESPONSE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"ShopFlowResponse(?:.*?shopId=(?P<shop>[A-Za-z0-9_-]+))?(?:.*?Result\[(?P<result>[A-Za-z]+)\])?"
+    ).expect("SHOP_RESPONSE_RE compiles")
+});
+
+static COMMODITY_BUY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"SendCommodityBuyRequest(?:.*?commodity=(?P<commodity>[A-Za-z0-9_]+))?(?:.*?(?:quantity|amount)=(?P<qty>[0-9.]+))?"
+    ).expect("COMMODITY_BUY_RE compiles")
+});
+
+static COMMODITY_SELL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"SendCommoditySellRequest(?:.*?commodity=(?P<commodity>[A-Za-z0-9_]+))?(?:.*?(?:quantity|amount)=(?P<qty>[0-9.]+))?"
+    ).expect("COMMODITY_SELL_RE compiles")
+});
+
+/// Tally of recognised vs unrecognised lines, useful for surfacing
+/// parser coverage to the user.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParseStats {
+    pub total: u64,
+    pub recognised: u64,
+    pub structural_only: u64,
+    pub skipped: u64,
+}
+
+impl ParseStats {
+    pub fn record(&mut self, parsed: bool, structural: bool) {
+        self.total += 1;
+        if parsed {
+            self.recognised += 1;
+        } else if structural {
+            self.structural_only += 1;
+        } else {
+            self.skipped += 1;
+        }
+    }
+
+    pub fn coverage(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        self.recognised as f64 / self.total as f64
+    }
+}
+
+/// Classify a structurally-parsed line into a typed `GameEvent`.
+/// Returns `None` for lines we don't (yet) know how to route.
+///
+/// Two-layer dispatch:
+///   1. If the line has an `<EventName>` shell, match on that first.
+///   2. Otherwise (or on shell-match miss), fall through to
+///      [`classify_body_prefix`] which scans the body for known
+///      function-call-style entries (`SendShopBuyRequest`,
+///      `CreateMissionObjectiveMarker`, ...). The engine emits some
+///      events without a `<EventName>` shell, so a shell-only
+///      dispatcher would silently drop them.
+pub fn classify(line: &LogLine<'_>) -> Option<GameEvent> {
+    let body = line.body;
+    let ts = line.timestamp.to_string();
+
+    let Some(event) = line.event_name else {
+        return classify_body_prefix(&ts, body);
+    };
+
+    let shell_match: Option<GameEvent> = match event {
+        "Init" if line.tags.contains(&"ProcessInit") => {
+            let c = PROCESS_INIT_RE.captures(body)?;
+            Some(GameEvent::ProcessInit(ProcessInit {
+                timestamp: ts.clone(),
+                local_session: c["local"].trim().to_string(),
+                env_session: c["env"].trim().to_string(),
+                online: &c["online"] == "1",
+            }))
+        }
+        "Legacy login response" => {
+            let c = LEGACY_LOGIN_RE.captures(body)?;
+            Some(GameEvent::LegacyLogin(LegacyLogin {
+                timestamp: ts.clone(),
+                handle: c["handle"].to_string(),
+                server_time: c.name("time").map(|m| m.as_str().to_string()),
+            }))
+        }
+        "Join PU" => {
+            let c = JOIN_PU_RE.captures(body)?;
+            Some(GameEvent::JoinPu(JoinPu {
+                timestamp: ts.clone(),
+                address: c["address"].to_string(),
+                port: c["port"].parse().ok()?,
+                shard: c["shard"].to_string(),
+                location_id: c["loc"].to_string(),
+            }))
+        }
+        "Change Server Start" | "Change Server End" => {
+            let c = CHANGE_SERVER_RE.captures(body)?;
+            let phase = if event == "Change Server Start" {
+                ServerPhase::Start
+            } else {
+                ServerPhase::End
+            };
+            Some(GameEvent::ChangeServer(ChangeServer {
+                timestamp: ts.clone(),
+                phase,
+                is_shard_persisted: &c["shard"] == "1",
+                is_server: &c["server"] == "1",
+                is_multiplayer: &c["mp"] == "1",
+                is_online: c.name("online").map(|m| m.as_str() == "1"),
+            }))
+        }
+        "Seed Solar System" | "Seed Solar System Success" => {
+            let c = SEED_SS_RE.captures(body)?;
+            Some(GameEvent::SeedSolarSystem(SeedSolarSystem {
+                timestamp: ts.clone(),
+                solar_system: c["ss"].to_string(),
+                shard: c["shard"].to_string(),
+                success: event == "Seed Solar System Success",
+            }))
+        }
+        "ResolveSpawnLocation Location Not Found" => {
+            let c = RESOLVE_SPAWN_RE.captures(body)?;
+            Some(GameEvent::ResolveSpawn(ResolveSpawn {
+                timestamp: ts.clone(),
+                player_geid: c["geid"].to_string(),
+                fallback: true,
+            }))
+        }
+        "Actor Death" => {
+            let c = ACTOR_DEATH_RE.captures(body)?;
+            Some(GameEvent::ActorDeath(ActorDeath {
+                timestamp: ts.clone(),
+                victim: c["victim"].to_string(),
+                victim_geid: c.name("vgeid").map(|m| m.as_str().to_string()),
+                zone: c["zone"].to_string(),
+                killer: c["killer"].to_string(),
+                killer_geid: c.name("kgeid").map(|m| m.as_str().to_string()),
+                weapon: c["weapon"].to_string(),
+                damage_type: c["dmg"].to_string(),
+            }))
+        }
+        "Vehicle Destruction" => {
+            let c = VEHICLE_DESTRUCTION_RE.captures(body)?;
+            Some(GameEvent::VehicleDestruction(VehicleDestruction {
+                timestamp: ts.clone(),
+                vehicle_class: c["vclass"].to_string(),
+                vehicle_id: c.name("vid").map(|m| m.as_str().to_string()),
+                destroy_level: c["level"].parse().ok()?,
+                caused_by: c["cause"].to_string(),
+                zone: c.name("zone").map(|m| m.as_str().to_string()),
+            }))
+        }
+        "SHUDEvent_OnNotification" => {
+            let c = HUD_NOTIFICATION_RE.captures(body)?;
+            // Treat the all-zero mission GUID as no mission to keep
+            // the wire payload tidy.
+            let mission = c
+                .name("mission")
+                .map(|m| m.as_str().to_string())
+                .filter(|m| !matches!(m.as_str(), "00000000-0000-0000-0000-000000000000"));
+            Some(GameEvent::HudNotification(HudNotification {
+                timestamp: ts.clone(),
+                text: c["text"].to_string(),
+                notification_id: c["id"].parse().ok()?,
+                mission_id: mission,
+            }))
+        }
+        "RequestLocationInventory" => {
+            let c = LOCATION_INVENTORY_RE.captures(body)?;
+            Some(GameEvent::LocationInventoryRequested(
+                LocationInventoryRequested {
+                    timestamp: ts.clone(),
+                    player: c["player"].to_string(),
+                    location: c["location"].to_string(),
+                },
+            ))
+        }
+        "InvalidateAllTerrainCells" => {
+            let c = PLANET_TERRAIN_RE.captures(body)?;
+            Some(GameEvent::PlanetTerrainLoad(PlanetTerrainLoad {
+                timestamp: ts.clone(),
+                planet: c["planet"].to_string(),
+            }))
+        }
+        "CLandingArea::UnregisterFromExternalSystems" => {
+            let c = VEHICLE_STOWED_RE.captures(body)?;
+            let zone_host = c["zone_host"].to_string();
+            // [0] is the sentinel for "no persistent zone" (PROC pads).
+            let zone_host_id = if zone_host == "0" {
+                None
+            } else {
+                Some(zone_host)
+            };
+            Some(GameEvent::VehicleStowed(VehicleStowed {
+                timestamp: ts.clone(),
+                vehicle_id: c["vehicle_id"].to_string(),
+                landing_area: c["area"].to_string(),
+                landing_area_id: c["area_id"].to_string(),
+                zone_host_id,
+            }))
+        }
+        "AttachmentReceived" => {
+            let c = ATTACHMENT_RECEIVED_RE.captures(body)?;
+            Some(GameEvent::AttachmentReceived(AttachmentReceived {
+                timestamp: ts.clone(),
+                player: c["player"].to_string(),
+                item_class: c["class"].to_string(),
+                item_id: c["id"].to_string(),
+                status: c["status"].to_string(),
+                port: c["port"].to_string(),
+                elapsed_seconds: c["elapsed"].parse().ok()?,
+            }))
+        }
+        "Player Selected Quantum Target - Local"
+        | "Player Requested Fuel to Quantum Target - Server Routing" => {
+            let c = QUANTUM_TARGET_RE.captures(body)?;
+            // Strip a trailing comma from destinations like
+            // `OOC_Stanton_2_Crusader,` (the engine sometimes puts
+            // a comma before "routing locally").
+            let mut destination = c["dest"].to_string();
+            if destination.ends_with(',') {
+                destination.pop();
+            }
+            Some(GameEvent::QuantumTargetSelected(QuantumTargetSelected {
+                timestamp: ts.clone(),
+                phase: if event == "Player Selected Quantum Target - Local" {
+                    QuantumTargetPhase::Selected
+                } else {
+                    QuantumTargetPhase::FuelRequested
+                },
+                vehicle_class: c["vehicle"].to_string(),
+                vehicle_id: c["vid"].to_string(),
+                destination,
+            }))
+        }
+        "CLocalMissionPhaseMarker::CreateMarker" => {
+            let c = MISSION_PHASE_RE.captures(body)?;
+            Some(GameEvent::MissionStart(MissionStart {
+                timestamp: ts.clone(),
+                mission_id: c["id"].to_string(),
+                marker_kind: MissionMarkerKind::Phase,
+                mission_name: c.name("name").map(|m| m.as_str().to_string()),
+            }))
+        }
+        "EndMission" => {
+            // EndMission body sometimes lacks both id AND outcome —
+            // the regex's groups are all optional, so .captures() can
+            // succeed with everything None. That's still a useful
+            // signal: pair it with the most recent MissionStart.
+            let c = MISSION_END_RE.captures(body);
+            Some(GameEvent::MissionEnd(MissionEnd {
+                timestamp: ts.clone(),
+                mission_id: c
+                    .as_ref()
+                    .and_then(|c| c.name("id"))
+                    .map(|m| m.as_str().to_string()),
+                outcome: c
+                    .as_ref()
+                    .and_then(|c| c.name("outcome"))
+                    .map(|m| m.as_str().to_string()),
+            }))
+        }
+        "SystemQuit" => Some(GameEvent::SessionEnd(SessionEnd {
+            timestamp: ts.clone(),
+            kind: SessionEndKind::SystemQuit,
+        })),
+        _ => None,
+    };
+
+    // Shell-match hit — return it. Otherwise fall through to body-prefix
+    // dispatch: some lines DO have an event_name, but it's one we don't
+    // recognise yet AND the body still contains a function-call entry
+    // worth surfacing (rare, but cheap to handle).
+    shell_match.or_else(|| classify_body_prefix(&ts, body))
+}
+
+/// Body-prefix dispatch for log lines whose meaningful payload sits in
+/// the body itself rather than under an `<EventName>` shell. Star
+/// Citizen logs a number of events as bare function calls
+/// (`SendShopBuyRequest(...)`, `CreateMissionObjectiveMarker(...)`,
+/// `CCIGBroker::FastShutdown(...)`); these never reach the shell-event
+/// match arm and would otherwise be silently dropped.
+///
+/// The scan order matters: more specific patterns must come before
+/// looser ones to avoid a shop-buy-request line being misclassified as
+/// a generic shop response.
+fn classify_body_prefix(ts: &str, body: &str) -> Option<GameEvent> {
+    // Mission objectives — function call inside body.
+    if body.contains("CreateMissionObjectiveMarker") {
+        let c = MISSION_OBJECTIVE_RE.captures(body)?;
+        return Some(GameEvent::MissionStart(MissionStart {
+            timestamp: ts.to_string(),
+            mission_id: c["id"].to_string(),
+            marker_kind: MissionMarkerKind::Objective,
+            mission_name: None,
+        }));
+    }
+
+    // Shop buy must be checked BEFORE shop response — both contain
+    // "Shop", but only the buy form contains "BuyRequest".
+    if body.contains("BuyRequest")
+        && (body.contains("SendShopBuyRequest")
+            || body.contains("SendStandardItemBuyRequest")
+            || body.contains("SendStandardShopBuyRequest"))
+    {
+        let c = SHOP_BUY_RE.captures(body);
+        return Some(GameEvent::ShopBuyRequest(ShopBuyRequest {
+            timestamp: ts.to_string(),
+            shop_id: c
+                .as_ref()
+                .and_then(|c| c.name("shop"))
+                .map(|m| m.as_str().to_string()),
+            item_class: c
+                .as_ref()
+                .and_then(|c| c.name("item"))
+                .map(|m| m.as_str().to_string()),
+            quantity: c
+                .as_ref()
+                .and_then(|c| c.name("qty"))
+                .and_then(|m| m.as_str().parse().ok()),
+            raw: body.trim().to_string(),
+        }));
+    }
+
+    if body.contains("ShopFlowResponse") {
+        let c = SHOP_RESPONSE_RE.captures(body);
+        let success = c
+            .as_ref()
+            .and_then(|c| c.name("result"))
+            .map(|m| matches!(m.as_str(), "Success" | "OK" | "ok"));
+        return Some(GameEvent::ShopFlowResponse(ShopFlowResponse {
+            timestamp: ts.to_string(),
+            shop_id: c
+                .as_ref()
+                .and_then(|c| c.name("shop"))
+                .map(|m| m.as_str().to_string()),
+            success,
+            raw: body.trim().to_string(),
+        }));
+    }
+
+    if body.contains("SendCommodityBuyRequest") {
+        let c = COMMODITY_BUY_RE.captures(body);
+        return Some(GameEvent::CommodityBuyRequest(CommodityBuyRequest {
+            timestamp: ts.to_string(),
+            commodity: c
+                .as_ref()
+                .and_then(|c| c.name("commodity"))
+                .map(|m| m.as_str().to_string()),
+            quantity: c
+                .as_ref()
+                .and_then(|c| c.name("qty"))
+                .and_then(|m| m.as_str().parse().ok()),
+            raw: body.trim().to_string(),
+        }));
+    }
+
+    if body.contains("SendCommoditySellRequest") {
+        let c = COMMODITY_SELL_RE.captures(body);
+        return Some(GameEvent::CommoditySellRequest(CommoditySellRequest {
+            timestamp: ts.to_string(),
+            commodity: c
+                .as_ref()
+                .and_then(|c| c.name("commodity"))
+                .map(|m| m.as_str().to_string()),
+            quantity: c
+                .as_ref()
+                .and_then(|c| c.name("qty"))
+                .and_then(|m| m.as_str().parse().ok()),
+            raw: body.trim().to_string(),
+        }));
+    }
+
+    if body.contains("CCIGBroker::FastShutdown") {
+        return Some(GameEvent::SessionEnd(SessionEnd {
+            timestamp: ts.to_string(),
+            kind: SessionEndKind::FastShutdown,
+        }));
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn structural_parses_typical_notice_line() {
+        let line = "<2026-05-02T21:14:23.189Z> [Notice] <Join PU> address[35.241.202.174] port[64300] shard[pub_euw1b_11704877_090] locationId[562954248454145] [Team_GameServices][GIM][Matchmaking]";
+        let p = structural_parse(line).unwrap();
+        assert_eq!(p.timestamp, "2026-05-02T21:14:23.189Z");
+        assert_eq!(p.level, Some("Notice"));
+        assert_eq!(p.event_name, Some("Join PU"));
+        assert_eq!(p.tags, vec!["Team_GameServices", "GIM", "Matchmaking"]);
+        assert!(p.body.contains("address[35.241.202.174]"));
+    }
+
+    #[test]
+    fn structural_parses_line_without_event_or_tags() {
+        let line = "<2026-05-02T21:01:51.390Z> Log started on Sat May  2 21:01:51 2026";
+        let p = structural_parse(line).unwrap();
+        assert_eq!(p.timestamp, "2026-05-02T21:01:51.390Z");
+        assert_eq!(p.event_name, None);
+        assert!(p.tags.is_empty());
+    }
+
+    #[test]
+    fn structural_captures_nested_angle_event_name() {
+        // CIG embeds lambda symbols like `<lambda_1>` inside event
+        // names. The parser must capture the whole symbol, not stop
+        // at the first inner `>`.
+        let line = "<2026-05-03T18:00:00.000Z> [Notice] <CSCLoadingPlatformManager::LoadEntitiesReference::<lambda_1>> body here [Team_X]";
+        let p = structural_parse(line).unwrap();
+        assert_eq!(
+            p.event_name,
+            Some("CSCLoadingPlatformManager::LoadEntitiesReference::<lambda_1>")
+        );
+    }
+
+    #[test]
+    fn structural_returns_none_on_garbage() {
+        assert_eq!(structural_parse("not a log line"), None);
+        assert_eq!(structural_parse(""), None);
+    }
+
+    #[test]
+    fn classifies_join_pu() {
+        let line = "<2026-05-02T21:14:23.189Z> [Notice] <Join PU> address[35.241.202.174] port[64300] shard[pub_euw1b_11704877_090] locationId[562954248454145] [Team_GameServices][GIM][Matchmaking]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::JoinPu(j) => {
+                assert_eq!(j.address, "35.241.202.174");
+                assert_eq!(j.port, 64300);
+                assert_eq!(j.shard, "pub_euw1b_11704877_090");
+                assert_eq!(j.location_id, "562954248454145");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_legacy_login_response() {
+        let line = "<2026-05-02T21:02:06.340Z> [Notice] <Legacy login response> [CIG-net] User Login Success - Handle[TheCodeSaiyan] - Time[213000609] [Team_GameServices][Login]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::LegacyLogin(l) => {
+                assert_eq!(l.handle, "TheCodeSaiyan");
+                assert_eq!(l.server_time.as_deref(), Some("213000609"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_change_server_start() {
+        let line = "<2026-05-02T21:14:23.400Z> [Notice] <Change Server Start> IsShardPersisted[0] IsServer[1] IsMultiplayer[1] [Team_Network][Network][Loading]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::ChangeServer(c) => {
+                assert_eq!(c.phase, ServerPhase::Start);
+                assert!(!c.is_shard_persisted);
+                assert!(c.is_server);
+                assert!(c.is_multiplayer);
+                assert!(c.is_online.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_resolve_spawn_with_player_geid() {
+        let line = "<2026-05-02T21:02:10.956Z> [Notice] <ResolveSpawnLocation Location Not Found> Could not resolve initial spawn location from spawning module for player id: [9794883988961], setting spawn zone location zonehost to solar system fallback [Team_BackendServices][Services]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::ResolveSpawn(r) => {
+                assert_eq!(r.player_geid, "9794883988961");
+                assert!(r.fallback);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_hud_notification_jurisdiction() {
+        let line = r#"<2026-05-03T17:57:19.579Z> [Notice] <SHUDEvent_OnNotification> Added notification "Entered Hurston Dynamics Jurisdiction: " [2] to queue. New queue size: 2, MissionId: [00000000-0000-0000-0000-000000000000], ObjectiveId: [] [Team_CoreGameplayFeatures][Missions][Comms]"#;
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::HudNotification(h) => {
+                assert_eq!(h.text, "Entered Hurston Dynamics Jurisdiction: ");
+                assert_eq!(h.notification_id, 2);
+                // Zero-GUID is filtered out.
+                assert!(h.mission_id.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_hud_notification_armistice() {
+        let line = r#"<2026-05-03T17:58:32.955Z> [Notice] <SHUDEvent_OnNotification> Added notification "Entering Armistice Zone - Combat Prohibited: " [3] to queue. New queue size: 1, MissionId: [00000000-0000-0000-0000-000000000000], ObjectiveId: [] [Team_CoreGameplayFeatures][Missions][Comms]"#;
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        if let GameEvent::HudNotification(h) = event {
+            assert!(h.text.contains("Armistice Zone"));
+            assert_eq!(h.notification_id, 3);
+        } else {
+            panic!("expected HudNotification");
+        }
+    }
+
+    #[test]
+    fn classifies_location_inventory_with_real_location() {
+        let line = "<2026-05-03T18:09:28.551Z> [Notice] <RequestLocationInventory> Player[TheCodeSaiyan] requested inventory for Location[Stanton2_Orison] [Team_CoreGameplayFeatures][Inventory]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::LocationInventoryRequested(l) => {
+                assert_eq!(l.player, "TheCodeSaiyan");
+                assert_eq!(l.location, "Stanton2_Orison");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_location_inventory_invalid_passthrough() {
+        // INVALID_LOCATION_ID is captured verbatim; downstream filters it.
+        let line = "<2026-05-03T17:57:20.456Z> [Notice] <RequestLocationInventory> Player[TheCodeSaiyan] requested inventory for Location[INVALID_LOCATION_ID] [Team_CoreGameplayFeatures][Inventory]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        if let GameEvent::LocationInventoryRequested(l) = event {
+            assert_eq!(l.location, "INVALID_LOCATION_ID");
+        } else {
+            panic!("expected LocationInventoryRequested");
+        }
+    }
+
+    #[test]
+    fn classifies_vehicle_stowed_hangar_elevator() {
+        let line = "<2026-05-03T17:59:40.697Z> [Notice] <CLandingArea::UnregisterFromExternalSystems> [STOWING ON UNREGISTER] LandingArea_ShipElevator_HangarMediumTop [10012175369898] - Attempting to stow current vehicle [10006174073187] due to landing area unregistering. Vehicle Zone Host [10012175369590] [Team_MissionFeatures][ATC]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::VehicleStowed(v) => {
+                assert_eq!(v.vehicle_id, "10006174073187");
+                assert_eq!(v.landing_area, "LandingArea_ShipElevator_HangarMediumTop");
+                assert_eq!(v.landing_area_id, "10012175369898");
+                assert_eq!(v.zone_host_id.as_deref(), Some("10012175369590"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_vehicle_stowed_proc_pad_drops_zero_zone() {
+        // Procedurally-generated reststop pads emit `Vehicle Zone Host [0]`,
+        // which our parser maps to `None` so consumers don't accidentally
+        // treat the zero as a real GEID.
+        let line = "<2026-05-03T18:03:45.145Z> [Notice] <CLandingArea::UnregisterFromExternalSystems> [STOWING ON UNREGISTER] [PROC]LandingArea_Pad_SmlB_{A27E3980-7BC8-42F5-A348-32E97E567C8B} [9917447339901] - Attempting to stow current vehicle [9945955166448] due to landing area unregistering. Vehicle Zone Host [0] [Team_MissionFeatures][ATC]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        if let GameEvent::VehicleStowed(v) = event {
+            assert!(v.landing_area.starts_with("[PROC]LandingArea_Pad_SmlB_"));
+            assert_eq!(v.vehicle_id, "9945955166448");
+            assert!(v.zone_host_id.is_none());
+        } else {
+            panic!("expected VehicleStowed");
+        }
+    }
+
+    #[test]
+    fn classifies_attachment_received_armor() {
+        let line = "<2026-05-03T17:52:57.219Z> [Notice] <AttachmentReceived> Player[TheCodeSaiyan] Attachment[rsi_odyssey_undersuit_01_01_01_200000000232, rsi_odyssey_undersuit_01_01_01, 200000000232] Status[persistent] Port[Armor_Undersuit] Elapsed[27.480394] [Team_CoreGameplayFeatures][Inventory]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::AttachmentReceived(a) => {
+                assert_eq!(a.player, "TheCodeSaiyan");
+                assert_eq!(a.item_class, "rsi_odyssey_undersuit_01_01_01");
+                assert_eq!(a.item_id, "200000000232");
+                assert_eq!(a.status, "persistent");
+                assert_eq!(a.port, "Armor_Undersuit");
+                assert!((a.elapsed_seconds - 27.480394).abs() < 1e-6);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_attachment_received_multitool_module() {
+        let line = "<2026-05-03T19:19:05.518Z> [Notice] <AttachmentReceived> Player[TheCodeSaiyan] Attachment[grin_multitool_01_tractorbeam_9994535389060, grin_multitool_01_tractorbeam, 9994535389060] Status[persistent] Port[module_attach] Elapsed[1375.079224] [Team_CoreGameplayFeatures][Inventory]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        if let GameEvent::AttachmentReceived(a) = event {
+            assert_eq!(a.item_class, "grin_multitool_01_tractorbeam");
+            assert_eq!(a.port, "module_attach");
+            assert!(a.elapsed_seconds > 1000.0);
+        } else {
+            panic!("expected AttachmentReceived");
+        }
+    }
+
+    #[test]
+    fn classifies_quantum_target_selected() {
+        let line = "<2026-05-03T18:03:22.115Z> [Notice] <Player Selected Quantum Target - Local> [ItemNavigation][CL][45668] | NOT AUTH | CRUS_Starfighter_Ion_10012175043656[10012175043656]|CSCItemNavigation::OnPlayerSelectedQuantumTarget|Player has selected point OOC_Stanton_2_Crusader as their destination, routing locally [Team_CGP4][QuantumTravel]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::QuantumTargetSelected(q) => {
+                assert_eq!(q.phase, QuantumTargetPhase::Selected);
+                assert_eq!(q.vehicle_class, "CRUS_Starfighter_Ion");
+                assert_eq!(q.vehicle_id, "10012175043656");
+                assert_eq!(q.destination, "OOC_Stanton_2_Crusader");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_quantum_target_fuel_requested() {
+        let line = "<2026-05-03T18:07:46.738Z> [Notice] <Player Requested Fuel to Quantum Target - Server Routing> [ItemNavigation][CL][45668] | NOT AUTH | CRUS_Starfighter_Ion_10012175043656[10012175043656]|CSCItemNavigation::OnPlayerRequestFuelToQuantumTarget|Player has requested fuel calculation to destination Orison_LOC [Team_CGP4][QuantumTravel]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        if let GameEvent::QuantumTargetSelected(q) = event {
+            assert_eq!(q.phase, QuantumTargetPhase::FuelRequested);
+            assert_eq!(q.vehicle_class, "CRUS_Starfighter_Ion");
+            assert_eq!(q.destination, "Orison_LOC");
+        } else {
+            panic!("expected QuantumTargetSelected");
+        }
+    }
+
+    #[test]
+    fn classifies_planet_terrain_load() {
+        let line = "<2026-05-03T18:00:00.000Z> [Notice] <InvalidateAllTerrainCells> Planet OOC_Stanton_2b_Daymar invalidated all terrain cells [Team_3DEngine]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::PlanetTerrainLoad(t) => {
+                assert_eq!(t.planet, "OOC_Stanton_2b_Daymar");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_synthetic_actor_death() {
+        // Synthesised — this fixture has no combat.
+        let line = "<2024-01-15T14:30:25.832Z> [Notice] <Actor Death> CActor::Kill: 'VictimName' [123456789] in zone 'OOC_Stanton_4a_PortOlisar' killed by 'KillerName' [987654321] using 'Weapon_Pistol_Behring_P4AR_Default' [Class P4AR] with damage type 'Bullet' from direction x: 0.5, y: 0.2, z: -0.8 [Team_ActorTech][Actor]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::ActorDeath(d) => {
+                assert_eq!(d.victim, "VictimName");
+                assert_eq!(d.killer, "KillerName");
+                assert_eq!(d.zone, "OOC_Stanton_4a_PortOlisar");
+                assert_eq!(d.weapon, "Weapon_Pistol_Behring_P4AR_Default");
+                assert_eq!(d.damage_type, "Bullet");
+                assert_eq!(d.victim_geid.as_deref(), Some("123456789"));
+                assert_eq!(d.killer_geid.as_deref(), Some("987654321"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    // -- Launcher log parsing -------------------------------------
+
+    #[test]
+    fn parse_launcher_line_extracts_timestamp_level_and_message() {
+        let line = "[2026-05-06 12:34:56.789] [info] Starting RSI Launcher 2.10.4";
+        let p = parse_launcher_line(line).unwrap();
+        assert_eq!(p.timestamp, "2026-05-06 12:34:56.789");
+        assert_eq!(p.level, "info");
+        assert_eq!(p.message, "Starting RSI Launcher 2.10.4");
+    }
+
+    #[test]
+    fn parse_launcher_line_handles_warn_and_error_levels() {
+        let warn =
+            parse_launcher_line("[2026-05-06 12:00:00.000] [warn] Patcher retrying").unwrap();
+        assert_eq!(warn.level, "warn");
+        let err =
+            parse_launcher_line("[2026-05-06 12:00:01.000] [error] Failed to authenticate user")
+                .unwrap();
+        assert_eq!(err.level, "error");
+        assert_eq!(err.message, "Failed to authenticate user");
+    }
+
+    #[test]
+    fn parse_launcher_line_returns_none_for_blank_or_continuation_lines() {
+        assert!(parse_launcher_line("").is_none());
+        // Lines without the bracket shell don't parse — these are
+        // typically multi-line continuations of a previous entry.
+        assert!(parse_launcher_line("    at Object.<anonymous> (file.js:10)").is_none());
+        assert!(parse_launcher_line("[just-a-banner]").is_none());
+    }
+
+    #[test]
+    fn parse_launcher_line_drops_empty_message_bodies() {
+        // The launcher sometimes emits a header line with no body —
+        // we don't surface those because they carry no signal.
+        assert!(parse_launcher_line("[2026-05-06 12:00:00.000] [info] ").is_none());
+    }
+
+    #[test]
+    fn parse_launcher_line_preserves_message_with_brackets() {
+        // Message bodies often contain bracketed sub-fields (URLs,
+        // module names). Make sure we don't truncate at the first
+        // post-prefix `]`.
+        let line =
+            "[2026-05-06 12:00:00.000] [info] GET https://example.com/[v1]/assets returned 200";
+        let p = parse_launcher_line(line).unwrap();
+        assert_eq!(
+            p.message,
+            "GET https://example.com/[v1]/assets returned 200"
+        );
+    }
+
+    // -- Launcher message classification ---------------------------
+
+    #[test]
+    fn classify_launcher_message_routes_error_level_to_error_bucket() {
+        assert_eq!(
+            classify_launcher_message("error", "Something went sideways"),
+            LauncherCategory::Error
+        );
+        assert_eq!(
+            classify_launcher_message("fatal", "Engine died"),
+            LauncherCategory::Error
+        );
+    }
+
+    #[test]
+    fn classify_launcher_message_routes_failure_keywords_at_info_level_to_error() {
+        // The launcher logs some failures at info level. Body keywords
+        // win over the level — these should still be `Error`.
+        assert_eq!(
+            classify_launcher_message("info", "Patch download failed"),
+            LauncherCategory::Error
+        );
+        assert_eq!(
+            classify_launcher_message("info", "ERR_NETWORK_TIMEOUT"),
+            LauncherCategory::Error
+        );
+    }
+
+    #[test]
+    fn classify_launcher_message_recognises_auth_phrases() {
+        for msg in [
+            "User logged in successfully",
+            "Logging in with token",
+            "Session refresh in progress",
+            "OAuth callback received",
+            "Saved credential for user",
+            "User signed in",
+        ] {
+            assert_eq!(
+                classify_launcher_message("info", msg),
+                LauncherCategory::Auth,
+                "did not classify as Auth: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_launcher_message_recognises_install_and_patch_separately() {
+        assert_eq!(
+            classify_launcher_message("info", "Installing Star Citizen LIVE"),
+            LauncherCategory::Install
+        );
+        assert_eq!(
+            classify_launcher_message("info", "Verifying file integrity"),
+            LauncherCategory::Install
+        );
+        assert_eq!(
+            classify_launcher_message("info", "Applying patch 4.0"),
+            LauncherCategory::Patch
+        );
+        assert_eq!(
+            classify_launcher_message("info", "Patch download complete"),
+            LauncherCategory::Patch
+        );
+    }
+
+    #[test]
+    fn classify_launcher_message_recognises_update_keywords() {
+        assert_eq!(
+            classify_launcher_message("info", "Checking for updates"),
+            LauncherCategory::Update
+        );
+        assert_eq!(
+            classify_launcher_message("info", "Self-update available"),
+            LauncherCategory::Update
+        );
+    }
+
+    #[test]
+    fn classify_launcher_message_falls_back_to_info_when_unknown() {
+        assert_eq!(
+            classify_launcher_message("info", "Something quiet happened"),
+            LauncherCategory::Info
+        );
+        assert_eq!(
+            classify_launcher_message("debug", "Heartbeat tick"),
+            LauncherCategory::Info
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // v0.2.0-alpha — mission / shop / commodity / session-end
+    //
+    // Synthetic fixtures only — these exercise the regex shapes, not
+    // real captures. Once we have real captures in hand, replace
+    // these with verbatim log lines and tighten the patterns.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn classifies_mission_phase_marker() {
+        let line = "<2026-05-07T12:00:00.000Z> [Notice] <CLocalMissionPhaseMarker::CreateMarker> missionId[ABC12345-0000-0000-0000-000000000001] missionName[Hauling Run] [Team_Missions]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::MissionStart(m) => {
+                assert_eq!(m.mission_id, "ABC12345-0000-0000-0000-000000000001");
+                assert_eq!(m.marker_kind, MissionMarkerKind::Phase);
+                assert_eq!(m.mission_name.as_deref(), Some("Hauling Run"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_mission_objective_marker_via_body_prefix() {
+        // No <EventName> shell — the meaningful payload is a function
+        // call sitting in the body. Must reach via body-prefix dispatch.
+        let line = "<2026-05-07T12:01:00.000Z> [Notice] CreateMissionObjectiveMarker(11111111-2222-3333-4444-555555555555, deliver_to_lorville)";
+        let p = structural_parse(line).unwrap();
+        assert_eq!(p.event_name, None, "fixture must lack a shell event");
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::MissionStart(m) => {
+                assert_eq!(m.mission_id, "11111111-2222-3333-4444-555555555555");
+                assert_eq!(m.marker_kind, MissionMarkerKind::Objective);
+                assert!(m.mission_name.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_end_mission_with_outcome() {
+        let line = "<2026-05-07T12:30:00.000Z> [Notice] <EndMission> missionId[ABC12345-0000-0000-0000-000000000001] outcome[Success] [Team_Missions]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::MissionEnd(m) => {
+                assert_eq!(
+                    m.mission_id.as_deref(),
+                    Some("ABC12345-0000-0000-0000-000000000001")
+                );
+                assert_eq!(m.outcome.as_deref(), Some("Success"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_shop_buy_request_via_body_prefix() {
+        let line = "<2026-05-07T13:00:00.000Z> [Notice] SendShopBuyRequest(shopId=area18_kiosk_07, itemClass=apparel_helmet_pilot_blue, quantity=1)";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::ShopBuyRequest(s) => {
+                assert_eq!(s.shop_id.as_deref(), Some("area18_kiosk_07"));
+                assert_eq!(s.item_class.as_deref(), Some("apparel_helmet_pilot_blue"));
+                assert_eq!(s.quantity, Some(1));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_shop_flow_response_success() {
+        let line = "<2026-05-07T13:00:01.000Z> [Notice] ShopFlowResponse(shopId=area18_kiosk_07, Result[Success])";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::ShopFlowResponse(s) => {
+                assert_eq!(s.shop_id.as_deref(), Some("area18_kiosk_07"));
+                assert_eq!(s.success, Some(true));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_commodity_buy_request() {
+        let line = "<2026-05-07T14:00:00.000Z> [Notice] SendCommodityBuyRequest(commodity=Agricium, quantity=125.5, terminal=cru_l1)";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::CommodityBuyRequest(c) => {
+                assert_eq!(c.commodity.as_deref(), Some("Agricium"));
+                assert_eq!(c.quantity, Some(125.5));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_commodity_sell_request() {
+        let line = "<2026-05-07T15:00:00.000Z> [Notice] SendCommoditySellRequest(commodity=Quantanium, amount=64)";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::CommoditySellRequest(c) => {
+                assert_eq!(c.commodity.as_deref(), Some("Quantanium"));
+                assert_eq!(c.quantity, Some(64.0));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_session_end_via_system_quit_shell() {
+        let line = "<2026-05-07T16:00:00.000Z> [Notice] <SystemQuit> shutting down [Team_System]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::SessionEnd(s) => {
+                assert_eq!(s.kind, SessionEndKind::SystemQuit);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_session_end_via_fast_shutdown_body_prefix() {
+        let line = "<2026-05-07T16:00:01.000Z> [Notice] CCIGBroker::FastShutdown() invoked";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::SessionEnd(s) => {
+                assert_eq!(s.kind, SessionEndKind::FastShutdown);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_prefix_returns_none_for_unrelated_lines() {
+        // Sanity: a body-only line with no recognised keyword must
+        // not produce a spurious event.
+        let line =
+            "<2026-05-07T17:00:00.000Z> [Notice] some unrelated diagnostic chatter, no keyword";
+        let p = structural_parse(line).unwrap();
+        assert!(classify(&p).is_none());
+    }
+}

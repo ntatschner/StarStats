@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StarStats",
+  "version": "0.1.0",
+  "identifier": "app.starstats.tray",
+  "build": {
+    "beforeDevCommand": "pnpm --filter tray-ui dev",
+    "beforeBuildCommand": "pnpm --filter tray-ui build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../apps/tray-ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "StarStats",
+        "width": 900,
+        "height": 640,
+        "minWidth": 700,
+        "minHeight": 500,
+        "resizable": true,
+        "decorations": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+      "devCsp": "default-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:5173 ws://localhost:5173"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "deb", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "StarStats",
+    "category": "Utility",
+    "shortDescription": "Personal Star Citizen metrics",
+    "longDescription": "EAC-safe local capture of personal Star Citizen game stats. Reads only Game.log and authenticated robertsspaceindustries.com pages."
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ntatschner/StarStats/releases/latest/download/updater-manifest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyQzA2QkNGQUUzMzVENDQKUldSRVhUT3V6MnZBd24zOTIvbTZacUhZRWc4OVp4aUNBaDZwNmpJakN0QWxvelNrL21KaWRaeUkK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

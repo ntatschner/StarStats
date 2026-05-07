@@ -1,0 +1,1188 @@
+//! Sharing + public-visibility endpoints.
+//!
+//! These handlers manage the wave-2 ReBAC bits in SpiceDB:
+//!  - `/v1/me/visibility` toggles the `public_view@user:*` wildcard
+//!    on the caller's `stats_record`.
+//!  - `/v1/me/share*` grants/revokes per-user shares
+//!    (`share_with_user@user:<recipient>`).
+//!  - `/v1/public/{handle}/*` exposes the summary + timeline for users
+//!    who have flipped the public toggle (no auth, SpiceDB-gated).
+//!  - `/v1/u/{handle}/*` does the same for authenticated callers,
+//!    resolving through `share_with_user` so a recipient can read a
+//!    friend's stats.
+//!
+//! Failure posture:
+//!  - SpiceDB unavailable -> 503 `{"error":"spicedb_unavailable"}`.
+//!  - Recipient unknown -> 404 (handle lookup is the only Postgres
+//!    side-effect of these handlers; the rest lives in SpiceDB).
+//!  - Permission denied on a public/friend read -> 404 (don't leak
+//!    user existence).
+
+use crate::api_error::ApiErrorBody;
+use crate::audit::{AuditEntry, AuditLog};
+use crate::auth::AuthenticatedUser;
+use crate::orgs::{OrgStore, PostgresOrgStore};
+use crate::repo::{EventQuery, PostgresStore};
+use crate::spicedb::{ObjectRef, SpicedbClient};
+use crate::users::{PostgresUserStore, UserStore};
+use crate::validation::{build_timeline_buckets, resolve_timeline_days};
+use axum::{
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
+    routing::{delete, get, post},
+    Extension, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use utoipa::{IntoParams, ToSchema};
+
+/// Build the `/v1/me/share*`, `/v1/me/visibility`, `/v1/public/*`,
+/// and `/v1/u/*` sub-router.
+///
+/// Five internal sub-routers because `State<_>` shapes diverge:
+///  - `add_share` needs `Arc<UserStore>` (recipient lookup).
+///  - `share_with_org` needs `Arc<OrgStore>` (org existence check).
+///  - public/friend reads need `Arc<EventQuery>` (the data source).
+///  - the remaining toggles need no State, only Extensions.
+pub fn routes(
+    users: Arc<PostgresUserStore>,
+    orgs: Arc<PostgresOrgStore>,
+    store: Arc<PostgresStore>,
+) -> Router {
+    // Both `add_share` and `set_visibility` need the user store —
+    // the former for recipient lookup, both for the rsi-verified gate.
+    let share_user_router = Router::new()
+        .route("/v1/me/share", post(add_share::<PostgresUserStore>))
+        .route(
+            "/v1/me/visibility",
+            post(set_visibility::<PostgresUserStore>).get(get_visibility),
+        )
+        .with_state(users.clone());
+
+    let share_no_state_router: Router = Router::new()
+        .route("/v1/me/shares", get(list_shares))
+        .route("/v1/me/share/:recipient_handle", delete(delete_share));
+
+    let share_org_post_router = Router::new()
+        .route(
+            "/v1/me/share/org",
+            post(share_with_org::<PostgresOrgStore, PostgresUserStore>),
+        )
+        .with_state((orgs, users));
+
+    let share_org_delete_router: Router =
+        Router::new().route("/v1/me/share/org/:slug", delete(unshare_with_org));
+
+    let share_query_router = Router::new()
+        .route(
+            "/v1/public/:handle/summary",
+            get(public_summary::<PostgresStore>),
+        )
+        .route(
+            "/v1/public/:handle/timeline",
+            get(public_timeline::<PostgresStore>),
+        )
+        .route(
+            "/v1/u/:handle/summary",
+            get(friend_summary::<PostgresStore>),
+        )
+        .route(
+            "/v1/u/:handle/timeline",
+            get(friend_timeline::<PostgresStore>),
+        )
+        .with_state(store);
+
+    share_user_router
+        .merge(share_no_state_router)
+        .merge(share_org_post_router)
+        .merge(share_org_delete_router)
+        .merge(share_query_router)
+}
+
+// -- DTOs ------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct VisibilityRequest {
+    pub public: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VisibilityResponse {
+    pub public: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ShareRequest {
+    pub recipient_handle: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ShareResponse {
+    pub shared_with: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RevokeShareResponse {
+    pub revoked: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ShareEntry {
+    pub recipient_handle: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OrgShareEntry {
+    pub org_slug: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ListSharesResponse {
+    pub shares: Vec<ShareEntry>,
+    /// Orgs with `share_with_org` rows pointing at the caller's
+    /// stats_record. Always present (empty array when no org shares
+    /// exist) so the client can use a single property without nullish
+    /// checks.
+    #[serde(default)]
+    pub org_shares: Vec<OrgShareEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ShareOrgRequest {
+    pub org_slug: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ShareOrgResponse {
+    pub shared_with_org: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RevokeOrgShareResponse {
+    pub revoked: bool,
+}
+
+// Mirror of `query::SummaryResponse` so the public endpoints don't
+// need to reach across modules. The OpenAPI generator emits both
+// shapes; the web client treats them as compatible.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicSummaryResponse {
+    pub claimed_handle: String,
+    pub total: u64,
+    pub by_type: Vec<PublicTypeCount>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicTypeCount {
+    pub event_type: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicTimelineResponse {
+    pub days: u32,
+    pub buckets: Vec<PublicTimelineBucket>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicTimelineBucket {
+    pub date: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PublicTimelineParams {
+    /// Number of trailing days to bucket. Defaults to 30, max 90.
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+// -- Helpers ---------------------------------------------------------
+
+fn err(status: StatusCode, code: &str) -> Response {
+    (
+        status,
+        Json(ApiErrorBody {
+            error: code.to_string(),
+            detail: None,
+        }),
+    )
+        .into_response()
+}
+
+fn no_store() -> [(header::HeaderName, &'static str); 1] {
+    [(header::CACHE_CONTROL, "no-store")]
+}
+
+fn validate_handle(handle: &str) -> bool {
+    // RSI handles in our store are case-insensitive ASCII identifiers.
+    // Be conservative here so a path/body argument can't be used to
+    // smuggle whitespace or wildcards into a SpiceDB write. Length cap
+    // matches the migration's `claimed_handle` column (varchar 64).
+    !handle.is_empty()
+        && handle.len() <= 64
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Block claim-making sharing operations (public toggle, per-user
+/// share, org share) until the caller has proven they own the
+/// handle their account is signed up under. Returns `Some(403)`
+/// when unverified — handlers `?` this at the top of the handler
+/// before any SpiceDB or audit work.
+///
+/// Reads-only ops (`get_visibility`, `list_shares`, `delete_share`,
+/// `unshare_with_org`) are deliberately NOT gated: a user must be
+/// able to walk back state if a handle dispute happens after sign-up.
+async fn require_rsi_verified<U: UserStore>(
+    users: &U,
+    auth: &AuthenticatedUser,
+) -> Option<Response> {
+    let sub = match uuid::Uuid::parse_str(&auth.sub) {
+        Ok(id) => id,
+        Err(_) => return Some(err(StatusCode::INTERNAL_SERVER_ERROR, "bad_subject")),
+    };
+    match users.find_by_id(sub).await {
+        Ok(Some(u)) if u.rsi_verified_at.is_some() => None,
+        Ok(Some(_)) => Some(err(StatusCode::FORBIDDEN, "rsi_handle_not_verified")),
+        Ok(None) => Some(err(StatusCode::UNAUTHORIZED, "unauthorized")),
+        Err(e) => {
+            tracing::error!(error = %e, "find_by_id failed in rsi-verify gate");
+            Some(err(StatusCode::INTERNAL_SERVER_ERROR, "internal"))
+        }
+    }
+}
+
+// -- /v1/me/visibility -----------------------------------------------
+
+#[utoipa::path(
+    post,
+    path = "/v1/me/visibility",
+    tag = "sharing",
+    request_body = VisibilityRequest,
+    responses(
+        (status = 200, description = "Visibility toggled", body = VisibilityResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller hasn't proven RSI handle ownership", body = ApiErrorBody),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn set_visibility<U: UserStore>(
+    State(users): State<Arc<U>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    auth: AuthenticatedUser,
+    Json(req): Json<VisibilityRequest>,
+) -> Response {
+    if let Some(resp) = require_rsi_verified(users.as_ref(), &auth).await {
+        return resp;
+    }
+
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let result = if req.public {
+        client.write_public_view(&auth.preferred_username).await
+    } else {
+        client.delete_public_view(&auth.preferred_username).await
+    };
+
+    if let Err(e) = result {
+        tracing::error!(error = %e, handle = %auth.preferred_username, "set visibility failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.visibility_changed".to_string(),
+            payload: serde_json::json!({ "public": req.public }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (visibility)");
+    }
+
+    (
+        StatusCode::OK,
+        no_store(),
+        Json(VisibilityResponse { public: req.public }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/me/visibility",
+    tag = "sharing",
+    responses(
+        (status = 200, description = "Current visibility", body = VisibilityResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn get_visibility(
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    auth: AuthenticatedUser,
+) -> Response {
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let resource = ObjectRef::new("stats_record", &auth.preferred_username);
+    let subject = ObjectRef::new("user", "*");
+    let public = match client.check_permission(resource, "view", subject).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "spicedb check failed (visibility get)");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+        }
+    };
+
+    (
+        StatusCode::OK,
+        no_store(),
+        Json(VisibilityResponse { public }),
+    )
+        .into_response()
+}
+
+// -- /v1/me/share* ---------------------------------------------------
+
+#[utoipa::path(
+    post,
+    path = "/v1/me/share",
+    tag = "sharing",
+    request_body = ShareRequest,
+    responses(
+        (status = 200, description = "Share granted", body = ShareResponse),
+        (status = 400, description = "Cannot share with self", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller hasn't proven RSI handle ownership", body = ApiErrorBody),
+        (status = 404, description = "Recipient handle not found", body = ApiErrorBody),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn add_share<U: UserStore>(
+    State(users): State<Arc<U>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    auth: AuthenticatedUser,
+    Json(req): Json<ShareRequest>,
+) -> Response {
+    if let Some(resp) = require_rsi_verified(users.as_ref(), &auth).await {
+        return resp;
+    }
+
+    let recipient = req.recipient_handle.trim();
+    if !validate_handle(recipient) {
+        return err(StatusCode::BAD_REQUEST, "invalid_recipient_handle");
+    }
+
+    if recipient.eq_ignore_ascii_case(&auth.preferred_username) {
+        return err(StatusCode::BAD_REQUEST, "cannot_share_with_self");
+    }
+
+    // Validate the recipient exists in our user table — sharing with a
+    // ghost handle is a UX trap (the wildcard subject would be the only
+    // way to grant such a thing, and that's the public toggle's job).
+    let recipient_user = match users.find_by_handle(recipient).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return err(StatusCode::NOT_FOUND, "recipient_not_found");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "find_by_handle failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        }
+    };
+
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    if let Err(e) = client
+        .write_share_with_user(&auth.preferred_username, &recipient_user.claimed_handle)
+        .await
+    {
+        tracing::error!(error = %e, "write share failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.granted".to_string(),
+            payload: serde_json::json!({
+                "recipient_handle": recipient_user.claimed_handle,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share grant)");
+    }
+
+    (
+        StatusCode::OK,
+        Json(ShareResponse {
+            shared_with: recipient_user.claimed_handle,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/me/share/{recipient_handle}",
+    tag = "sharing",
+    params(
+        ("recipient_handle" = String, Path, description = "RSI handle to revoke share from")
+    ),
+    responses(
+        (status = 200, description = "Share revoked (idempotent)", body = RevokeShareResponse),
+        (status = 400, description = "Invalid handle in path", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn delete_share(
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    auth: AuthenticatedUser,
+    Path(recipient_handle): Path<String>,
+) -> Response {
+    let recipient = recipient_handle.trim();
+    if !validate_handle(recipient) {
+        return err(StatusCode::BAD_REQUEST, "invalid_recipient_handle");
+    }
+
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    if let Err(e) = client
+        .delete_share_with_user(&auth.preferred_username, recipient)
+        .await
+    {
+        tracing::error!(error = %e, "delete share failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.revoked".to_string(),
+            payload: serde_json::json!({ "recipient_handle": recipient }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share revoke)");
+    }
+
+    (StatusCode::OK, Json(RevokeShareResponse { revoked: true })).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/me/shares",
+    tag = "sharing",
+    responses(
+        (status = 200, description = "List of recipient handles you've shared with", body = ListSharesResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn list_shares(
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    auth: AuthenticatedUser,
+) -> Response {
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let user_shares = match client.list_share_with_user(&auth.preferred_username).await {
+        Ok(handles) => handles
+            .into_iter()
+            .map(|h| ShareEntry {
+                recipient_handle: h,
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::error!(error = %e, "list shares failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+        }
+    };
+    let org_shares = match client.list_share_with_org(&auth.preferred_username).await {
+        Ok(slugs) => slugs
+            .into_iter()
+            .map(|org_slug| OrgShareEntry { org_slug })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            // The user-share half already succeeded; degrade by
+            // returning an empty org list rather than failing the
+            // whole call. Logged so ops sees the partial outage.
+            tracing::warn!(
+                error = %e,
+                "list org shares failed; returning empty org_shares"
+            );
+            Vec::new()
+        }
+    };
+    (
+        StatusCode::OK,
+        no_store(),
+        Json(ListSharesResponse {
+            shares: user_shares,
+            org_shares,
+        }),
+    )
+        .into_response()
+}
+
+// -- /v1/me/share/org ------------------------------------------------
+
+#[utoipa::path(
+    post,
+    path = "/v1/me/share/org",
+    tag = "sharing",
+    request_body = ShareOrgRequest,
+    responses(
+        (status = 200, description = "Share with org granted", body = ShareOrgResponse),
+        (status = 400, description = "Invalid org slug", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller hasn't proven RSI handle ownership", body = ApiErrorBody),
+        (status = 404, description = "Org not found", body = ApiErrorBody),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn share_with_org<O: OrgStore, U: UserStore>(
+    State((orgs, users)): State<(Arc<O>, Arc<U>)>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    auth: AuthenticatedUser,
+    Json(req): Json<ShareOrgRequest>,
+) -> Response {
+    if let Some(resp) = require_rsi_verified(users.as_ref(), &auth).await {
+        return resp;
+    }
+
+    let slug = req.org_slug.trim();
+    if slug.is_empty()
+        || slug.len() > crate::orgs::SLUG_MAX_LEN
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return err(StatusCode::BAD_REQUEST, "invalid_org_slug");
+    }
+
+    // Validate the org exists in our metadata table — sharing with a
+    // ghost slug is the same trap as sharing with a ghost handle.
+    let org = match orgs.find_by_slug(slug).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "org_not_found"),
+        Err(e) => {
+            tracing::error!(error = %e, "find_by_slug failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        }
+    };
+
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    if let Err(e) = client
+        .write_share_with_org(&auth.preferred_username, &org.slug)
+        .await
+    {
+        tracing::error!(error = %e, "write_share_with_org failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.org_granted".to_string(),
+            payload: serde_json::json!({ "org_slug": org.slug }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.org_granted)");
+    }
+
+    (
+        StatusCode::OK,
+        Json(ShareOrgResponse {
+            shared_with_org: org.slug,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/me/share/org/{slug}",
+    tag = "sharing",
+    params(("slug" = String, Path, description = "Org slug to revoke share from")),
+    responses(
+        (status = 200, description = "Org share revoked (idempotent)", body = RevokeOrgShareResponse),
+        (status = 400, description = "Invalid org slug", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn unshare_with_org(
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    auth: AuthenticatedUser,
+    Path(slug): Path<String>,
+) -> Response {
+    let s = slug.trim();
+    if s.is_empty()
+        || s.len() > crate::orgs::SLUG_MAX_LEN
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return err(StatusCode::BAD_REQUEST, "invalid_org_slug");
+    }
+
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    if let Err(e) = client
+        .delete_share_with_org(&auth.preferred_username, s)
+        .await
+    {
+        tracing::error!(error = %e, "delete_share_with_org failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.org_revoked".to_string(),
+            payload: serde_json::json!({ "org_slug": s }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.org_revoked)");
+    }
+
+    (
+        StatusCode::OK,
+        Json(RevokeOrgShareResponse { revoked: true }),
+    )
+        .into_response()
+}
+
+// -- Public read endpoints ------------------------------------------
+
+/// Check `public_view` on `stats_record:<handle>`. Returns `Ok(bool)`
+/// on a successful permission lookup, `Err(_)` when SpiceDB is
+/// unreachable / errored — callers map that to 503 rather than 404,
+/// so an outage doesn't masquerade as "handle not public".
+async fn check_public(client: &SpicedbClient, handle: &str) -> anyhow::Result<bool> {
+    let resource = ObjectRef::new("stats_record", handle);
+    let subject = ObjectRef::new("user", "*");
+    client
+        .check_permission(resource, "view", subject)
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "spicedb public check failed"))
+}
+
+/// Check `view` permission for `viewer` on `stats_record:<owner>`.
+/// Same outage posture as [`check_public`]: errors bubble so the
+/// handler can return 503 instead of a misleading 404.
+async fn check_view(client: &SpicedbClient, owner: &str, viewer: &str) -> anyhow::Result<bool> {
+    let resource = ObjectRef::new("stats_record", owner);
+    let subject = ObjectRef::new("user", viewer);
+    client
+        .check_permission(resource, "view", subject)
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "spicedb friend check failed"))
+}
+
+/// Convert `check_public`/`check_view` results into a handler response.
+/// `Ok(true)` runs `then` (the 200 path); `Ok(false)` is 404 (don't
+/// leak existence); `Err(_)` is 503 with the standard
+/// `spicedb_unavailable` error body.
+async fn render_or_404<F, Fut>(check: anyhow::Result<bool>, then: F) -> Response
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    match check {
+        Ok(true) => then().await,
+        Ok(false) => (StatusCode::NOT_FOUND, ()).into_response(),
+        Err(_) => err(StatusCode::SERVICE_UNAVAILABLE, "spicedb_unavailable"),
+    }
+}
+
+async fn render_summary<Q: EventQuery>(query: &Q, handle: &str) -> Response {
+    match query.summary_for_handle(handle).await {
+        Ok((total, by_type)) => (
+            StatusCode::OK,
+            Json(PublicSummaryResponse {
+                claimed_handle: handle.to_string(),
+                total,
+                by_type: by_type
+                    .into_iter()
+                    .map(|(event_type, count)| PublicTypeCount { event_type, count })
+                    .collect(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "public summary query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "query_failed")
+        }
+    }
+}
+
+async fn render_timeline<Q: EventQuery>(query: &Q, handle: &str, days: u32) -> Response {
+    match query.timeline(handle, days).await {
+        Ok(rows) => {
+            let buckets = build_timeline_buckets(rows, days)
+                .into_iter()
+                .map(|(date, count)| PublicTimelineBucket { date, count })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(PublicTimelineResponse { days, buckets }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "public timeline query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "query_failed")
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/public/{handle}/summary",
+    tag = "sharing",
+    params(("handle" = String, Path, description = "RSI handle to fetch public summary for")),
+    responses(
+        (status = 200, description = "Public summary", body = PublicSummaryResponse),
+        (status = 404, description = "Not public or unknown handle"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+)]
+pub async fn public_summary<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Path(handle): Path<String>,
+) -> Response {
+    if !validate_handle(&handle) {
+        return (StatusCode::NOT_FOUND, ()).into_response();
+    }
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let check = check_public(client, &handle).await;
+    render_or_404(check, || async {
+        render_summary(query.as_ref(), &handle).await
+    })
+    .await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/public/{handle}/timeline",
+    tag = "sharing",
+    params(
+        ("handle" = String, Path, description = "RSI handle"),
+        PublicTimelineParams,
+    ),
+    responses(
+        (status = 200, description = "Public timeline", body = PublicTimelineResponse),
+        (status = 404, description = "Not public or unknown handle"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+)]
+pub async fn public_timeline<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Path(handle): Path<String>,
+    Query(params): Query<PublicTimelineParams>,
+) -> Response {
+    if !validate_handle(&handle) {
+        return (StatusCode::NOT_FOUND, ()).into_response();
+    }
+    let Ok(days) = resolve_timeline_days(params.days) else {
+        return err(StatusCode::BAD_REQUEST, "invalid_days");
+    };
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+    let check = check_public(client, &handle).await;
+    render_or_404(check, || async {
+        render_timeline(query.as_ref(), &handle, days).await
+    })
+    .await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/u/{handle}/summary",
+    tag = "sharing",
+    params(("handle" = String, Path, description = "Owner RSI handle")),
+    responses(
+        (status = 200, description = "Friend summary", body = PublicSummaryResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Not shared with you or unknown handle"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn friend_summary<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    auth: AuthenticatedUser,
+    Path(handle): Path<String>,
+) -> Response {
+    if !validate_handle(&handle) {
+        return (StatusCode::NOT_FOUND, ()).into_response();
+    }
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+    let check = check_view(client, &handle, &auth.preferred_username).await;
+    render_or_404(check, || async {
+        render_summary(query.as_ref(), &handle).await
+    })
+    .await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/u/{handle}/timeline",
+    tag = "sharing",
+    params(
+        ("handle" = String, Path, description = "Owner RSI handle"),
+        PublicTimelineParams,
+    ),
+    responses(
+        (status = 200, description = "Friend timeline", body = PublicTimelineResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Not shared with you or unknown handle"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn friend_timeline<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    auth: AuthenticatedUser,
+    Path(handle): Path<String>,
+    Query(params): Query<PublicTimelineParams>,
+) -> Response {
+    if !validate_handle(&handle) {
+        return (StatusCode::NOT_FOUND, ()).into_response();
+    }
+    let Ok(days) = resolve_timeline_days(params.days) else {
+        return err(StatusCode::BAD_REQUEST, "invalid_days");
+    };
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+    let check = check_view(client, &handle, &auth.preferred_username).await;
+    render_or_404(check, || async {
+        render_timeline(query.as_ref(), &handle, days).await
+    })
+    .await
+}
+
+// -- Tests -----------------------------------------------------------
+//
+// SpiceDB writes/reads need a live sidecar to round-trip cleanly, and
+// extracting `SpicedbClient` behind a trait would force an allocation
+// + dyn-dispatch on the hot path of `query::summary` (which the wave
+// 1 code already exercises directly). The tests below therefore skip
+// the SpiceDB-touching paths and exercise the validation + audit
+// behaviour, which is where the bug surface actually lives.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::test_support::MemoryAuditLog;
+    use crate::auth::test_support::fresh_pair;
+    use crate::auth::AuthVerifier;
+    use crate::users::test_support::MemoryUserStore;
+    use crate::users::{hash_password, UserStore};
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use axum::routing::{delete, post};
+    use axum::Router;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    fn router(
+        users: Arc<MemoryUserStore>,
+        verifier: Arc<AuthVerifier>,
+        spicedb: Arc<Option<SpicedbClient>>,
+        audit: Arc<dyn AuditLog>,
+    ) -> Router {
+        Router::new()
+            .route("/v1/me/visibility", post(set_visibility::<MemoryUserStore>))
+            .route("/v1/me/share", post(add_share::<MemoryUserStore>))
+            .route("/v1/me/share/:recipient_handle", delete(delete_share))
+            .with_state(users)
+            .layer(Extension(verifier))
+            .layer(Extension(spicedb))
+            .layer(Extension(audit))
+    }
+
+    /// Seed a user, mark their RSI handle verified, and return the
+    /// `(user_id, bearer)` pair. The verified mark is incidental —
+    /// these tests are not about the gate, so seeding pre-verified
+    /// keeps the assertions focused on whatever the test actually
+    /// exercises.
+    async fn seed_user(
+        store: &MemoryUserStore,
+        email: &str,
+        handle: &str,
+        issuer: &crate::auth::TokenIssuer,
+    ) -> (Uuid, String) {
+        let phc = hash_password("password-123-abcdef").unwrap();
+        let user = store.create(email, &phc, handle).await.unwrap();
+        store.mark_rsi_verified(user.id).await.unwrap();
+        let token = issuer
+            .sign_user(&user.id.to_string(), handle)
+            .expect("sign user token");
+        (user.id, token)
+    }
+
+    async fn read_body(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn set_visibility_returns_503_when_spicedb_skipped() {
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/me/visibility")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"public":true}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "spicedb_unavailable");
+    }
+
+    #[tokio::test]
+    async fn share_with_unknown_handle_returns_404() {
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit_mem = Arc::new(MemoryAuditLog::default());
+        let audit: Arc<dyn AuditLog> = audit_mem.clone();
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/me/share")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"recipient_handle":"NobodyHere"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "recipient_not_found");
+        // No audit row should have been written because the validation
+        // failed before the SpiceDB write would have run.
+        assert!(audit_mem.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn share_with_self_returns_400() {
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit_mem = Arc::new(MemoryAuditLog::default());
+        let audit: Arc<dyn AuditLog> = audit_mem.clone();
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/me/share")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"recipient_handle":"alice"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "cannot_share_with_self");
+        assert!(audit_mem.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_share_invalid_handle_returns_400() {
+        // Path-segment validation runs before any SpiceDB call, so this
+        // exercises the validation gate without needing a sidecar.
+        // delete_share itself is *not* gated on rsi-verified (read /
+        // cleanup ops aren't), so the user doesn't need to be seeded —
+        // but the token still needs a real UUID sub for the auth
+        // extractor's downstream handlers, hence the seed.
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+
+        // A handle containing illegal chars (`/` would split the path,
+        // so use `$` which is allowed in URIs but not in our handle
+        // regex).
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/v1/me/share/bad$handle")
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_recipient_handle");
+    }
+
+    #[tokio::test]
+    async fn delete_share_returns_503_when_spicedb_skipped_idempotent_shape() {
+        // Verifies the no-spicedb path still rejects cleanly with 503
+        // instead of silently 200ing. The test name preserves the
+        // "idempotent" intent — the actual idempotency lives in
+        // SpiceDB and is exercised in homelab integration tests.
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/v1/me/share/Bob")
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "spicedb_unavailable");
+    }
+}

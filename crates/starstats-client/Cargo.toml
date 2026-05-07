@@ -1,0 +1,90 @@
+[package]
+name = "starstats-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "StarStats Tauri tray client"
+
+[[bin]]
+name = "starstats-client"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+starstats-core.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+# Async runtime + I/O
+tokio = { workspace = true }
+
+# Filesystem watch
+notify = "7.0"
+
+# Local storage (bundled SQLite, no system dep)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Cross-platform user dirs
+directories = "5.0"
+
+# Config file format
+toml = "0.8"
+
+# Synchronisation primitives
+parking_lot = "0.12"
+
+# Errors / serde / time / tracing
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Daily-rolling file appender for the tray's persistent log. With
+# `windows_subsystem = "windows"` stdout is detached in release
+# builds, so without this the only way to diagnose a setup-time
+# panic is to rebuild a debug binary.
+tracing-appender = "0.2"
+
+# IDs (idempotency keys)
+uuid.workspace = true
+
+# Sync worker + hangar fetcher — HTTP client. `cookies` lets reqwest
+# preserve any Set-Cookie RSI's WAF emits during the 30x dance on the
+# pledges page; `gzip` matches RSI's default content-encoding so we
+# don't either fail to decode or lug the uncompressed body around.
+reqwest = { workspace = true, features = ["cookies", "gzip"] }
+
+# HTML parsing for the RSI pledge ledger scrape (hangar fetcher).
+# Same crate the server uses for the public-profile parser, so version
+# drift between client and server is impossible.
+scraper = { workspace = true }
+
+# OS keychain wrapper for the RSI session cookie.
+keyring = { workspace = true }
+
+# Process detection — EAC-aware scheduling guard for the hangar
+# fetcher (skip cycles while StarCitizen.exe is running).
+sysinfo = { workspace = true }
+
+# Decoding the JWT payload returned from device pairing (no signature
+# check — the server already validated it).
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true
