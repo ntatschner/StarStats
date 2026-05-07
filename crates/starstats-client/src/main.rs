@@ -268,6 +268,7 @@ fn main() {
             commands::get_parse_coverage,
             commands::get_session_timeline,
             commands::list_transactions,
+            commands::get_app_version,
             commands::get_source_stats,
             commands::get_storage_stats,
             commands::mark_event_as_noise,

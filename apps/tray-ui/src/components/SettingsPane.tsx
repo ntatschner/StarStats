@@ -1,5 +1,4 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
 import type { Config, RsiCookieStatus } from '../api';
 import { api } from '../api';
 import {
@@ -48,8 +47,11 @@ export function SettingsPane({ config, onSave }: Props) {
   const [cookieError, setCookieError] = useState<string | null>(null);
   const [cookieSavedAt, setCookieSavedAt] = useState<number | null>(null);
 
-  // Updates card state. `appVersion` is the Tauri-reported package
-  // version (read once on mount). `updateState` drives the status
+  // Updates card state. `appVersion` is the Cargo workspace version
+  // (e.g. "0.2.0-alpha") sourced via api.getAppVersion() so it
+  // matches the GitHub release tag. Tauri's own getVersion() would
+  // return the numeric tauri.conf.json value (MSI-friendly subset).
+  // `updateState` drives the status
   // text/buttons; `installProgress` is non-null only while a download
   // is in flight.
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -76,7 +78,8 @@ export function SettingsPane({ config, onSave }: Props) {
       .catch((e) => {
         if (!cancelled) setCookieError(String(e));
       });
-    getVersion()
+    api
+      .getAppVersion()
       .then((v) => {
         if (!cancelled) setAppVersion(v);
       })
