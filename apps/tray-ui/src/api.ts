@@ -179,6 +179,26 @@ export interface StorageStats {
   db_size_bytes: number;
 }
 
+export type TransactionKind = 'shop' | 'commodity_buy' | 'commodity_sell';
+export type TransactionStatus =
+  | 'pending'
+  | 'confirmed'
+  | 'rejected'
+  | 'timed_out'
+  | 'submitted';
+
+export interface Transaction {
+  kind: TransactionKind;
+  status: TransactionStatus;
+  started_at: string;
+  confirmed_at: string | null;
+  shop_id: string | null;
+  item: string | null;
+  quantity: number | null;
+  raw_request: string;
+  raw_response: string | null;
+}
+
 export const api = {
   getStatus: () => invoke<StatusResponse>('get_status'),
   getConfig: () => invoke<Config>('get_config'),
@@ -190,6 +210,11 @@ export const api = {
     invoke<ParseCoverageResponse>('get_parse_coverage'),
   getSessionTimeline: (limit?: number) =>
     invoke<TimelineEntry[]>('get_session_timeline', { limit }),
+  listTransactions: (limit?: number, windowSecs?: number) =>
+    invoke<Transaction[]>('list_transactions', {
+      limit,
+      windowSecs,
+    }),
   getSourceStats: () => invoke<SourceStats>('get_source_stats'),
   getStorageStats: () => invoke<StorageStats>('get_storage_stats'),
   markEventAsNoise: (eventName: string) =>

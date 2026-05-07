@@ -14,7 +14,7 @@ use crate::secret::{SecretStore, ACCOUNT_RSI_SESSION_COOKIE};
 use crate::state::{AccountStatus, AppState};
 use crate::sync::{self, SyncStats};
 use serde::{Deserialize, Serialize};
-use starstats_core::GameEvent;
+use starstats_core::{pair_transactions, GameEvent, Transaction};
 use std::time::Duration;
 use tauri::State;
 
@@ -280,6 +280,38 @@ pub fn get_session_timeline(
         .collect();
 
     Ok(entries)
+}
+
+/// Aggregate the recent shop / commodity request-response pairs into
+/// transaction rows. Pulls the last `limit` events, deserialises them,
+/// hands the slice to `starstats_core::pair_transactions`, and returns
+/// the resulting `Vec<Transaction>` to JS.
+///
+/// `window_secs` is the "if we haven't seen a response in N seconds,
+/// mark it timed out" threshold. 30s is the default the UI uses; the
+/// param exists so debugging can dial it down.
+#[tauri::command]
+pub fn list_transactions(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+    window_secs: Option<i64>,
+) -> Result<Vec<Transaction>, String> {
+    let limit = clamp_timeline_limit(limit);
+    let rows = state
+        .storage
+        .recent_events(limit)
+        .map_err(|e| e.to_string())?;
+    let events: Vec<GameEvent> = rows
+        .into_iter()
+        .filter_map(|r| serde_json::from_str::<GameEvent>(&r.payload_json).ok())
+        .collect();
+    // `now` for the ageing clock is the system time in UTC ISO. We
+    // don't pull `chrono` here because we're already on it via the
+    // workspace dep — `to_rfc3339()` matches the format the parser
+    // emits.
+    let now = chrono::Utc::now().to_rfc3339();
+    let window = window_secs.unwrap_or(30);
+    Ok(pair_transactions(&events, &now, window))
 }
 
 /// Aggregate counters surfaced by the Logs pane's headline strip:

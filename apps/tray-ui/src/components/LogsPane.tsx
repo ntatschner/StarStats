@@ -42,6 +42,7 @@ import {
   toneForType,
   TONE_VAR,
 } from './tray/format';
+import { TransactionsCard } from './TransactionsCard';
 
 const REFRESH_MS = 10_000;
 
@@ -447,6 +448,8 @@ export function LogsPane() {
           ))}
         </div>
       )}
+
+      <TransactionsCard />
 
       {/* GROUPED LIST */}
       {showLoadingState ? (
