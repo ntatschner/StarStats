@@ -298,3 +298,53 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         gh release edit "${{ github.ref_name }}" --draft=false
+
+    # Commit the just-published manifest to `release-manifests/<channel>.json`
+    # on `main`. The in-app updater polls these files via raw.githubusercontent.com,
+    # which gives every channel a stable URL that doesn't depend on
+    # `/releases/latest/` (which 404s for prereleases). The tag's
+    # pre-release suffix selects the channel:
+    #   - `vX.Y.Z-alpha[.N]` → alpha.json
+    #   - `vX.Y.Z-rc[.N]`    → rc.json
+    #   - `vX.Y.Z`           → live.json
+    # Anything else fails the step so unrecognised tags don't silently
+    # overwrite a channel.
+    - name: Update channel manifest on main
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        TAG="${GITHUB_REF#refs/tags/}"
+        case "$TAG" in
+          v*.*.*-alpha|v*.*.*-alpha.*) CHANNEL=alpha ;;
+          v*.*.*-rc|v*.*.*-rc.*)       CHANNEL=rc ;;
+          v*.*.*)                      CHANNEL=live ;;
+          *)
+            echo "::error::tag $TAG does not match any channel pattern" >&2
+            exit 1
+            ;;
+        esac
+        echo "channel=$CHANNEL"
+
+        # Refresh the working tree to the tip of main — `actions/checkout`
+        # in the earlier step gave us the tag commit, which is detached.
+        git fetch origin main
+        git checkout main
+        git pull --ff-only origin main
+
+        mkdir -p release-manifests
+        cp ./updater-manifest.json "release-manifests/${CHANNEL}.json"
+
+        # Skip the commit if the manifest is byte-identical to what's
+        # already on main — happens when re-running the workflow against
+        # an unchanged release.
+        if git diff --quiet "release-manifests/${CHANNEL}.json"; then
+          echo "no change to release-manifests/${CHANNEL}.json — skipping commit"
+          exit 0
+        fi
+
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add "release-manifests/${CHANNEL}.json"
+        git commit -m "release-manifests: ${CHANNEL} → ${TAG}"
+        git push origin main

@@ -87,6 +87,19 @@ export interface RemoteSyncConfig {
   batch_size: number;
 }
 
+/**
+ * Release channel the updater tracks. Each value maps to a manifest
+ * file at `release-manifests/<channel>.json` on the StarStats main
+ * branch. Server-side default is `alpha` while we're pre-1.0.
+ */
+export type ReleaseChannel = 'alpha' | 'rc' | 'live';
+
+export const RELEASE_CHANNEL_LABELS: Record<ReleaseChannel, string> = {
+  alpha: 'Alpha',
+  rc: 'Release Candidate',
+  live: 'Live',
+};
+
 export interface Config {
   gamelog_path: string | null;
   remote_sync: RemoteSyncConfig;
@@ -95,12 +108,17 @@ export interface Config {
   /// Defaults to true server-side; the Updates card in Settings
   /// exposes a toggle.
   auto_update_check: boolean;
+  /// Which release channel the in-app updater queries. Defaults to
+  /// `alpha`; users can switch via the Updates card. Changing this
+  /// takes effect on the next "Check for updates" or app restart.
+  release_channel: ReleaseChannel;
   /// Whether to write a daily-rolling `client.log` to the user
   /// data dir. Defaults to false so end users have no log clutter;
   /// toggle on from Settings → Updates to capture logs for a bug
   /// report. The panic-only log is always written.
   debug_logging: boolean;
 }
+
 
 export interface PairOutcome {
   claimed_handle: string;

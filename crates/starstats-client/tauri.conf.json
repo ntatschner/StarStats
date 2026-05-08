@@ -49,7 +49,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/ntatschner/StarStats/releases/latest/download/updater-manifest.json"
+        "https://raw.githubusercontent.com/ntatschner/StarStats/main/release-manifests/alpha.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyQzA2QkNGQUUzMzVENDQKUldSRVhUT3V6MnZBd24zOTIvbTZacUhZRWc4OVp4aUNBaDZwNmpJakN0QWxvelNrL21KaWRaeUkK",
       "windows": {
