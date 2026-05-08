@@ -427,9 +427,7 @@ fn run_reparse(
             stats.kept_unmatched += 1;
             return Ok(());
         };
-        if new_type != row.event_type
-            || new_ts != row.timestamp
-            || new_payload != row.payload_json
+        if new_type != row.event_type || new_ts != row.timestamp || new_payload != row.payload_json
         {
             storage
                 .update_event_classification(row.id, &new_type, &new_ts, &new_payload)
