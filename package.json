@@ -23,7 +23,7 @@
     "@tauri-apps/cli": "^2.1.0",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
-    "@types/node": "^22.10.2"
+    "@types/node": "^25.6.2"
   },
   "pnpm": {
     "overrides": {
