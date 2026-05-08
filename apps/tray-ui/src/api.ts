@@ -205,6 +205,23 @@ export interface ReparseStats {
   error: string | null;
 }
 
+/**
+ * Result of `reingest_rotated_logs`. Distinct from `ReparseStats`:
+ * Re-parse walks the local SQLite store to re-classify already-stored
+ * events; Re-ingest walks the raw rotated `Game-*.log` files on disk
+ * and feeds each line back through the classifier. The latter is the
+ * only way to recover events that were `None`'d by an older parser
+ * version (the body-line PlayerDeath events live only in the raw logs
+ * because the v0.2.x parser couldn't recognise them).
+ */
+export interface ReingestStats {
+  files_walked: number;
+  files_failed: number;
+  lines_processed: number;
+  events_recognised: number;
+  error: string | null;
+}
+
 export type TransactionKind = 'shop' | 'commodity_buy' | 'commodity_sell';
 export type TransactionStatus =
   | 'pending'
@@ -250,6 +267,7 @@ export const api = {
   /** Re-run the current classifier over every stored event in place.
    * Idempotent on a stable rule set; safe to invoke from a button. */
   reparseEvents: () => invoke<ReparseStats>('reparse_events'),
+  reingestRotatedLogs: () => invoke<ReingestStats>('reingest_rotated_logs'),
   markEventAsNoise: (eventName: string) =>
     invoke<void>('mark_event_as_noise', { eventName }),
   refreshAccountInfo: () => invoke<AccountStatus>('refresh_account_info'),
