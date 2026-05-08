@@ -90,33 +90,70 @@ fn main() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
 
-                let auto_check = config::load().map(|c| c.auto_update_check).unwrap_or(true);
-                if auto_check {
+                let cfg = config::load().unwrap_or_default();
+                if cfg.auto_update_check {
                     use tauri_plugin_updater::UpdaterExt;
                     let handle = app.handle().clone();
                     let current_version = env!("CARGO_PKG_VERSION");
+                    let channel = cfg.release_channel;
                     tauri::async_runtime::spawn(async move {
-                        match handle.updater() {
-                            Ok(updater) => match updater.check().await {
-                                Ok(Some(update)) => tracing::info!(
-                                    current_version = current_version,
-                                    new_version = %update.version,
-                                    "starstats update available"
-                                ),
-                                Ok(None) => tracing::info!(
-                                    current_version = current_version,
-                                    "starstats is up to date"
-                                ),
-                                Err(e) => tracing::warn!(
+                        // Override the static `endpoints` from
+                        // tauri.conf.json with the user's selected
+                        // channel. `updater_builder()` lets us swap
+                        // endpoints per-call, so changing the channel
+                        // in Settings takes effect on the next check
+                        // without an app restart.
+                        let url = match channel.manifest_url().parse::<tauri::Url>() {
+                            Ok(u) => u,
+                            Err(e) => {
+                                tracing::warn!(
                                     error = %e,
-                                    current_version = current_version,
-                                    "updater check failed"
-                                ),
+                                    channel = channel.as_str(),
+                                    "release channel URL did not parse — skipping check"
+                                );
+                                return;
+                            }
+                        };
+                        let updater = match handle.updater_builder().endpoints(vec![url]) {
+                            Ok(b) => match b.build() {
+                                Ok(u) => u,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        channel = channel.as_str(),
+                                        current_version = current_version,
+                                        "could not build updater for channel"
+                                    );
+                                    return;
+                                }
                             },
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    channel = channel.as_str(),
+                                    current_version = current_version,
+                                    "could not set updater endpoints"
+                                );
+                                return;
+                            }
+                        };
+                        match updater.check().await {
+                            Ok(Some(update)) => tracing::info!(
+                                channel = channel.as_str(),
+                                current_version = current_version,
+                                new_version = %update.version,
+                                "starstats update available"
+                            ),
+                            Ok(None) => tracing::info!(
+                                channel = channel.as_str(),
+                                current_version = current_version,
+                                "starstats is up to date"
+                            ),
                             Err(e) => tracing::warn!(
                                 error = %e,
+                                channel = channel.as_str(),
                                 current_version = current_version,
-                                "could not get updater handle"
+                                "updater check failed"
                             ),
                         }
                     });
@@ -271,6 +308,8 @@ fn main() {
             commands::list_transactions,
             commands::get_app_version,
             commands::reparse_events,
+            commands::check_for_update_for_channel,
+            commands::install_update_for_channel,
             commands::get_source_stats,
             commands::get_storage_stats,
             commands::mark_event_as_noise,

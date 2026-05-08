@@ -24,6 +24,13 @@ pub struct Config {
     /// can still trigger a manual check via the same card.
     #[serde(default = "default_auto_update_check")]
     pub auto_update_check: bool,
+    /// Which release channel to track. Drives the updater endpoint —
+    /// each channel has its own manifest at
+    /// `release-manifests/<channel>.json` on the main branch.
+    /// Default is Alpha while we're pre-1.0; users can opt into RC or
+    /// Live via the Settings dropdown.
+    #[serde(default)]
+    pub release_channel: ReleaseChannel,
     /// When true, the tray writes a daily-rolling `client.log` to
     /// the user data dir for diagnostics. Defaults to false to keep
     /// disk use minimal — toggle on from Settings → Updates if you
@@ -40,8 +47,60 @@ impl Default for Config {
             remote_sync: RemoteSyncConfig::default(),
             web_origin: None,
             auto_update_check: default_auto_update_check(),
+            release_channel: ReleaseChannel::default(),
             debug_logging: false,
         }
+    }
+}
+
+/// User-selectable release channel. Each channel maps to a stable
+/// manifest URL on the `main` branch; the release workflow writes the
+/// generated manifest into `release-manifests/<channel>.json` based
+/// on the tag's pre-release suffix.
+///
+/// Switching channels changes which manifest the updater queries on
+/// next check — no reinstall required. The Tauri updater only offers
+/// a download when the manifest version is strictly greater than the
+/// installed version (semver), so switching from Alpha to Live while
+/// running a newer prerelease will not roll back; you'll simply
+/// receive nothing until Live catches up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseChannel {
+    /// Pre-release builds — anything tagged `vX.Y.Z-alpha[.N]`.
+    /// Default while the project is pre-1.0 because that's the only
+    /// channel currently producing builds.
+    #[default]
+    Alpha,
+    /// Release candidates — `vX.Y.Z-rc[.N]`. Intended for users who
+    /// want stability ahead of GA but accept the occasional regression.
+    Rc,
+    /// Stable releases — bare `vX.Y.Z` tags. The conservative default
+    /// once the project hits 1.0; for now this channel is empty.
+    Live,
+}
+
+impl ReleaseChannel {
+    /// Lowercase token used in the manifest filename and the Settings
+    /// dropdown's serialised value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReleaseChannel::Alpha => "alpha",
+            ReleaseChannel::Rc => "rc",
+            ReleaseChannel::Live => "live",
+        }
+    }
+
+    /// Stable updater endpoint for this channel — points at the
+    /// manifest on the main branch via raw.githubusercontent.com.
+    /// Stable across releases (a single tag's manifest URL would
+    /// 404 for prereleases via `/releases/latest/`, which is why
+    /// we don't use that anymore).
+    pub fn manifest_url(&self) -> String {
+        format!(
+            "https://raw.githubusercontent.com/ntatschner/StarStats/main/release-manifests/{}.json",
+            self.as_str()
+        )
     }
 }
 

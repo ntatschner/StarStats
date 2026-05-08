@@ -1,17 +1,21 @@
-import { check, type Update } from '@tauri-apps/plugin-updater';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { relaunch } from '@tauri-apps/plugin-process';
+import type { ReleaseChannel } from './api';
 
+/**
+ * Updater check result. Unlike the plugin-updater 2.10.x JS API,
+ * this carries no opaque handle — the install step re-runs `check`
+ * server-side so we don't have to plumb a non-Serializable `Update`
+ * across the IPC boundary. The race window between check and
+ * install is acceptable: a fresher release between the two would
+ * simply install the newer one.
+ */
 export interface UpdateInfo {
   available: true;
   version: string;
   notes: string | null;
   date: string | null;
-  /**
-   * Opaque handle to pass to `applyUpdate`. The wrapping caller should
-   * not introspect this — the plugin's internal `Update` type may
-   * change between releases.
-   */
-  handle: Update;
 }
 
 export interface NoUpdate {
@@ -20,50 +24,72 @@ export interface NoUpdate {
 
 export type UpdateCheckResult = UpdateInfo | NoUpdate;
 
+interface RustCheckOutcome {
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+  date: string | null;
+}
+
 /**
- * Checks the configured updater endpoint for a new release.
- * Returns immediate metadata; does not download or install.
+ * Asks the Rust side to check the given channel's manifest. The
+ * Rust command builds a fresh `Updater` with `endpoints(...)`
+ * overridden to the channel URL, so flipping the channel in
+ * Settings takes effect on the next check without an app restart.
+ *
+ * The JS plugin-updater's `check()` is bypassed because its
+ * `CheckOptions` doesn't expose the `endpoints` field in
+ * 2.10.1 — only the Rust `UpdaterBuilder` supports
+ * per-call endpoint override.
  */
-export async function checkForUpdate(): Promise<UpdateCheckResult> {
-  const update = await check();
-  if (!update) {
+export async function checkForUpdate(
+  channel: ReleaseChannel,
+): Promise<UpdateCheckResult> {
+  const result = await invoke<RustCheckOutcome>(
+    'check_for_update_for_channel',
+    { channel },
+  );
+  if (!result.available || !result.version) {
     return { available: false };
   }
   return {
     available: true,
-    version: update.version,
-    notes: update.body ?? null,
-    date: update.date ?? null,
-    handle: update,
+    version: result.version,
+    notes: result.notes,
+    date: result.date,
   };
 }
 
 /**
- * Downloads + installs the update returned by `checkForUpdate`, then
- * relaunches the app.
+ * Downloads + installs the latest release on the given channel,
+ * then relaunches. Progress events are emitted from Rust on the
+ * `update-progress` Tauri event channel; we subscribe before
+ * invoking the install command and unsubscribe in `finally`.
  *
- * Takes the `Update` handle directly rather than calling `check()` a
- * second time — that pattern has a TOCTOU window where a transient
- * network blip after the user clicks "Install" surfaces as a misleading
- * "No update available" error. By reusing the handle the UI already
- * showed, we keep download/install on the same release the user
- * approved.
- *
- * Throws on download/install failure.
+ * Returns when install completes — the relaunch typically kills
+ * this process, so callers shouldn't expect to run code after.
  */
 export async function applyUpdate(
-  update: Update,
+  channel: ReleaseChannel,
   onProgress?: (downloaded: number, total: number | null) => void,
 ): Promise<void> {
-  let downloaded = 0;
-  let total: number | null = null;
-  await update.downloadAndInstall((event) => {
-    if (event.event === 'Started') {
-      total = event.data.contentLength ?? null;
-    } else if (event.event === 'Progress') {
-      downloaded += event.data.chunkLength;
-      onProgress?.(downloaded, total);
+  let unlisten: UnlistenFn | null = null;
+  if (onProgress) {
+    unlisten = await listen<{ downloaded: number; total: number | null }>(
+      'update-progress',
+      (event) => {
+        onProgress(event.payload.downloaded, event.payload.total);
+      },
+    );
+  }
+  try {
+    const installed = await invoke<boolean>('install_update_for_channel', {
+      channel,
+    });
+    if (installed) {
+      await relaunch();
     }
-  });
-  await relaunch();
+  } finally {
+    unlisten?.();
+  }
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { Config, RsiCookieStatus } from '../api';
-import { api } from '../api';
+import type { Config, ReleaseChannel, RsiCookieStatus } from '../api';
+import { api, RELEASE_CHANNEL_LABELS } from '../api';
 import {
   applyUpdate,
   checkForUpdate,
@@ -98,7 +98,9 @@ export function SettingsPane({ config, onSave }: Props) {
   const handleCheckForUpdate = async () => {
     setUpdateState({ kind: 'checking' });
     try {
-      const result: UpdateCheckResult = await checkForUpdate();
+      const result: UpdateCheckResult = await checkForUpdate(
+        draft.release_channel,
+      );
       if (result.available) {
         setUpdateState({ kind: 'available', info: result });
       } else {
@@ -109,17 +111,17 @@ export function SettingsPane({ config, onSave }: Props) {
     }
   };
 
-  // "Install and restart" — uses the `Update` handle the previous
-  // check returned (no second `check()` call, avoids the TOCTOU
-  // window where a transient network blip would surface as
-  // "no update available" after the user already pressed Install).
+  // "Install and restart". The Rust install command re-checks the
+  // channel before downloading, so a fresher release between
+  // user-pressed-Install and now would simply install the newer
+  // one — fine for our scale, and removes the need to plumb the
+  // (non-Serializable) Update handle across the IPC bridge.
   const handleInstallUpdate = async () => {
     if (updateState.kind !== 'available') return;
-    const handle = updateState.info.handle;
     setUpdateState({ kind: 'installing' });
     setInstallProgress({ downloaded: 0, total: null });
     try {
-      await applyUpdate(handle, (downloaded, total) => {
+      await applyUpdate(draft.release_channel, (downloaded, total) => {
         setInstallProgress({ downloaded, total });
       });
       // applyUpdate calls relaunch(); we never reach this line.
@@ -288,6 +290,48 @@ export function SettingsPane({ config, onSave }: Props) {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <UpdateStatusLine state={updateState} progress={installProgress} />
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 12,
+              color: 'var(--fg-muted)',
+            }}
+            title="Switch channels at any time. The next check polls the new channel's manifest."
+          >
+            <span style={{ minWidth: 64 }}>Channel</span>
+            <select
+              value={draft.release_channel}
+              onChange={(e) =>
+                editDraft((prev) => ({
+                  ...prev,
+                  release_channel: e.target.value as ReleaseChannel,
+                }))
+              }
+              disabled={
+                updateState.kind === 'checking' ||
+                updateState.kind === 'installing'
+              }
+              style={{
+                background: 'var(--bg-2)',
+                color: 'var(--fg)',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                padding: '4px 6px',
+                fontSize: 12,
+                fontFamily: 'inherit',
+              }}
+            >
+              {(Object.keys(RELEASE_CHANNEL_LABELS) as ReleaseChannel[]).map(
+                (ch) => (
+                  <option key={ch} value={ch}>
+                    {RELEASE_CHANNEL_LABELS[ch]}
+                  </option>
+                ),
+              )}
+            </select>
+          </label>
           {updateState.kind === 'available' && updateState.info.notes && (
             <pre
               style={{

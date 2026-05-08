@@ -143,6 +143,117 @@ pub fn get_config() -> Result<Config, String> {
     config::load().map_err(|e| e.to_string())
 }
 
+/// Outcome of a Rust-side updater check. Mirrors the JS `UpdateInfo`
+/// type but with no opaque Update handle — the install path re-checks
+/// internally because `tauri_plugin_updater::Update` isn't
+/// Serializable and can't ride the IPC bridge.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateCheckOutcome {
+    pub available: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    pub date: Option<String>,
+}
+
+fn build_channel_updater(
+    app: &tauri::AppHandle,
+    channel: crate::config::ReleaseChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let url = channel
+        .manifest_url()
+        .parse::<tauri::Url>()
+        .map_err(|e| format!("manifest URL did not parse: {e}"))?;
+    let builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| format!("set endpoints: {e}"))?;
+    builder.build().map_err(|e| format!("build updater: {e}"))
+}
+
+/// Check the given channel's manifest for a newer release.
+///
+/// We can't return the underlying `Update` handle to JS — its type
+/// from `tauri-plugin-updater` isn't Serializable. Instead we return
+/// just the metadata; the install command does its own check (the
+/// race window is fine for our scale, and a new release between
+/// check and install would simply install the newer one).
+#[tauri::command]
+pub async fn check_for_update_for_channel(
+    channel: crate::config::ReleaseChannel,
+    app: tauri::AppHandle,
+) -> Result<UpdateCheckOutcome, String> {
+    let updater = build_channel_updater(&app, channel)?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(u) => Ok(UpdateCheckOutcome {
+            available: true,
+            version: Some(u.version.clone()),
+            notes: u.body.clone(),
+            date: u.date.map(|d| d.to_string()),
+        }),
+        None => Ok(UpdateCheckOutcome {
+            available: false,
+            version: None,
+            notes: None,
+            date: None,
+        }),
+    }
+}
+
+/// Download + install the latest release on the given channel,
+/// emitting `update-progress` events on the way through. The
+/// frontend listens for these to drive its progress bar; on success
+/// the process plugin's `relaunch()` swaps in the new binary, so
+/// this command does not return.
+///
+/// If the manifest reports nothing newer (e.g. the user already
+/// installed it via another path between check and install), this
+/// returns `Ok(false)` so the UI can flip back to "up to date".
+#[tauri::command]
+pub async fn install_update_for_channel(
+    channel: crate::config::ReleaseChannel,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    use tauri::Emitter;
+    let updater = build_channel_updater(&app, channel)?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let app_for_progress = app.clone();
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total = std::sync::Arc::new(parking_lot::Mutex::new(None::<u64>));
+    let downloaded_for_chunk = std::sync::Arc::clone(&downloaded);
+    let total_for_chunk = std::sync::Arc::clone(&total);
+    update
+        .download_and_install(
+            move |chunk_len, content_length| {
+                let mut total_lock = total_for_chunk.lock();
+                if total_lock.is_none() {
+                    *total_lock = content_length;
+                }
+                let cur = downloaded_for_chunk
+                    .fetch_add(chunk_len as u64, std::sync::atomic::Ordering::Relaxed)
+                    .saturating_add(chunk_len as u64);
+                let _ = app_for_progress.emit(
+                    "update-progress",
+                    serde_json::json!({
+                        "downloaded": cur,
+                        "total": *total_lock,
+                    }),
+                );
+            },
+            || {
+                // download_and_install fires this once the bytes
+                // are on disk and the installer is about to run.
+                // No-op — the UI already shows "installing" once
+                // download completes.
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub fn save_config(cfg: Config) -> Result<(), String> {
     config::save(&cfg).map_err(|e| e.to_string())
