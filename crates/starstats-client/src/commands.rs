@@ -519,7 +519,19 @@ fn run_reparse(
         error: None,
     };
 
-    // Phase 1 — re-classify already-recognised events.
+    // Phase 1 — re-classify already-recognised events. Also tracks
+    // the most-recent zone signal as we walk so death events can be
+    // back-filled with a best-effort `zone` field.
+    //
+    // Walk order is `id ASC` (per for_each_event), which matches
+    // ingest order. For the typical workflow — live tail + on-startup
+    // backfill of rotated logs — that approximates timestamp order
+    // closely enough for the enrichment to land the right zone on
+    // each death. Edge case: a late backfill that ingests OLDER logs
+    // AFTER newer live-tail events would attribute the wrong zone
+    // to those older deaths; users can re-run Re-parse after the
+    // backfill catches up to fix it.
+    let mut last_zone: Option<String> = None;
     let outcome = storage.for_each_event(500, |row| {
         stats.examined += 1;
         let Some(parsed) = structural_parse(&row.raw_line) else {
@@ -534,6 +546,33 @@ fn run_reparse(
             stats.kept_unmatched += 1;
             return Ok(());
         };
+
+        // Update the zone tracker BEFORE enriching, so a death event
+        // co-located with a fresh PlanetTerrainLoad on the same tick
+        // doesn't accidentally pick up the older zone.
+        match &new_event {
+            GameEvent::PlanetTerrainLoad(t) => last_zone = Some(t.planet.clone()),
+            GameEvent::LocationInventoryRequested(l) if l.location != "INVALID_LOCATION_ID" => {
+                last_zone = Some(l.location.clone());
+            }
+            _ => {}
+        }
+
+        // Best-effort zone enrichment for death-related events.
+        // Classify always returns `zone: None`; the enrichment pass
+        // injects whatever last_zone has accumulated.
+        let new_event = match new_event {
+            GameEvent::PlayerDeath(mut d) if d.zone.is_none() => {
+                d.zone = last_zone.clone();
+                GameEvent::PlayerDeath(d)
+            }
+            GameEvent::PlayerIncapacitated(mut i) if i.zone.is_none() => {
+                i.zone = last_zone.clone();
+                GameEvent::PlayerIncapacitated(i)
+            }
+            other => other,
+        };
+
         let Some((new_type, new_ts, new_payload)) = serialise_for_reparse(&new_event) else {
             stats.kept_unmatched += 1;
             return Ok(());
@@ -660,6 +699,20 @@ fn format_summary(event: &GameEvent) -> String {
             "{} killed by {} ({}, {})",
             e.victim, e.killer, e.weapon, e.damage_type
         ),
+        GameEvent::PlayerDeath(e) => {
+            // Strip the leading `body_` so the body class reads as
+            // a recognisable variant name (e.g. `01_noMagicPocket`)
+            // rather than redundant prefix noise.
+            let class = e.body_class.strip_prefix("body_").unwrap_or(&e.body_class);
+            match &e.zone {
+                Some(z) => format!("Died ({class}) in {z}"),
+                None => format!("Died ({class})"),
+            }
+        }
+        GameEvent::PlayerIncapacitated(e) => match &e.zone {
+            Some(z) => format!("Incapacitated in {z}"),
+            None => "Incapacitated".to_string(),
+        },
         GameEvent::VehicleDestruction(e) => format!(
             "Vehicle destroyed: {} (level {}, by {})",
             e.vehicle_class, e.destroy_level, e.caused_by

@@ -17,9 +17,9 @@ pub use events::{
     ActorDeath, AttachmentReceived, ChangeServer, CommodityBuyRequest, CommoditySellRequest,
     GameCrash, GameEvent, HudNotification, JoinPu, LauncherActivity, LauncherCategory, LegacyLogin,
     LocationInventoryRequested, MissionEnd, MissionMarkerKind, MissionStart, PlanetTerrainLoad,
-    ProcessInit, QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn,
-    SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
-    VehicleDestruction, VehicleStowed,
+    PlayerDeath, PlayerIncapacitated, ProcessInit, QuantumTargetPhase, QuantumTargetSelected,
+    RemoteMatch, ResolveSpawn, SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind,
+    ShopBuyRequest, ShopFlowResponse, VehicleDestruction, VehicleStowed,
 };
 pub use parser::{
     classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
