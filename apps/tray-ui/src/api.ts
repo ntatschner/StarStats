@@ -268,6 +268,7 @@ export const api = {
    * Idempotent on a stable rule set; safe to invoke from a button. */
   reparseEvents: () => invoke<ReparseStats>('reparse_events'),
   reingestRotatedLogs: () => invoke<ReingestStats>('reingest_rotated_logs'),
+  refreshHangarNow: () => invoke<void>('refresh_hangar_now'),
   markEventAsNoise: (eventName: string) =>
     invoke<void>('mark_event_as_noise', { eventName }),
   refreshAccountInfo: () => invoke<AccountStatus>('refresh_account_info'),

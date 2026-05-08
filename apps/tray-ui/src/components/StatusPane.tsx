@@ -7,14 +7,23 @@ import {
   type StatusResponse,
   type TimelineEntry,
 } from '../api';
-import { Banner, KV, StatPill, StatusDot, TrayCard } from './tray/primitives';
 import {
+  Banner,
+  GhostButton,
+  KV,
+  StatPill,
+  StatusDot,
+  TrayCard,
+} from './tray/primitives';
+import {
+  ageLabel,
   fmtBytes,
   fmtCovPct,
   fmtTime,
   toneForType,
   TONE_VAR,
 } from './tray/format';
+import type { HangarStats } from '../api';
 
 /// Only http(s) origins get rendered as a clickable link in the
 /// email-verification banner. Defends against a hostile local config
@@ -744,41 +753,7 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
       <SourcesCard stats={sourceStats} />
 
       {/* HANGAR */}
-      <TrayCard
-        title="Hangar"
-        kicker={hangar.last_error ? 'ERROR' : 'OK'}
-      >
-        <dl
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '90px 1fr',
-            gap: '6px 10px',
-            margin: 0,
-          }}
-        >
-          <KV
-            label="Last sync"
-            value={
-              hangar.last_success_at ? fmtTime(hangar.last_success_at) : '—'
-            }
-            mono
-          />
-          <KV
-            label="Ships pushed"
-            value={hangar.ships_pushed.toLocaleString()}
-            mono
-          />
-          <KV
-            label="Status"
-            value={
-              hangar.last_skip_reason ??
-              hangar.last_error ?? (
-                <span style={{ color: 'var(--ok)' }}>ok</span>
-              )
-            }
-          />
-        </dl>
-      </TrayCard>
+      <HangarCard hangar={hangar} />
     </div>
   );
 }
@@ -893,4 +868,268 @@ function SourcesCard({ stats }: { stats: SourceStats | null }) {
       </dl>
     </TrayCard>
   );
+}
+
+/// Render-state derived from `HangarStats`. Field combinations encode
+/// six distinct UX states; the previous "ERROR else OK" kicker treated
+/// "never ran" identically to "succeeded", which is what produced the
+/// misleading "OK · no last sync" rendering. We always look at all
+/// three timestamps (attempt/success/error) plus the skip reason.
+type HangarState =
+  | { kind: 'never_started' }
+  | { kind: 'refreshing' }
+  | { kind: 'fresh_success'; at: string; ageMs: number }
+  | { kind: 'stale_success'; at: string }
+  | { kind: 'skipped'; at: string | null; reason: string }
+  | { kind: 'error'; at: string | null; message: string };
+
+/// Anything fresher than this counts as a "just-fetched" affirmative
+/// success (green dot). Past the window we still call it a success but
+/// fade it to the muted "info" tone.
+const HANGAR_FRESH_MS = 5 * 60_000;
+
+/// Hard ceiling on the in-flight spinner. If the polled
+/// `last_attempt_at` hasn't advanced past the click stamp by then,
+/// we drop back to the previous state rather than spin forever — the
+/// kick worker may not even be spawned (no api_url/token configured).
+const HANGAR_REFRESH_TIMEOUT_MS = 60_000;
+
+function deriveHangarState(
+  h: HangarStats,
+  refreshingSince: number | null,
+): HangarState {
+  if (refreshingSince !== null) {
+    return { kind: 'refreshing' };
+  }
+  if (h.last_error) {
+    return {
+      kind: 'error',
+      at: h.last_attempt_at,
+      message: h.last_error,
+    };
+  }
+  if (h.last_success_at) {
+    const ageMs = Date.now() - new Date(h.last_success_at).getTime();
+    if (ageMs < HANGAR_FRESH_MS) {
+      return { kind: 'fresh_success', at: h.last_success_at, ageMs };
+    }
+    return { kind: 'stale_success', at: h.last_success_at };
+  }
+  if (h.last_skip_reason) {
+    return {
+      kind: 'skipped',
+      at: h.last_attempt_at,
+      reason: h.last_skip_reason,
+    };
+  }
+  return { kind: 'never_started' };
+}
+
+interface HangarCardProps {
+  hangar: HangarStats;
+}
+
+function HangarCard({ hangar }: HangarCardProps) {
+  // Stamped on click; cleared once a polled `last_attempt_at` lands
+  // past the stamp (see effect below). Without this, "Refresh now"
+  // would leave no trace in the UI between clicks until the next
+  // poll arrives.
+  const [refreshingSince, setRefreshingSince] = useState<number | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (refreshingSince === null) return;
+
+    const lastAttemptMs = hangar.last_attempt_at
+      ? new Date(hangar.last_attempt_at).getTime()
+      : 0;
+    if (lastAttemptMs >= refreshingSince) {
+      setRefreshingSince(null);
+      return;
+    }
+
+    // Safety net: if no new attempt lands within the timeout, give
+    // up so the spinner doesn't stick. The hangar worker only runs
+    // when api_url + access_token are both set; the kick is a no-op
+    // otherwise.
+    const remaining =
+      refreshingSince + HANGAR_REFRESH_TIMEOUT_MS - Date.now();
+    const handle = window.setTimeout(
+      () => setRefreshingSince(null),
+      Math.max(0, remaining),
+    );
+    return () => window.clearTimeout(handle);
+  }, [hangar.last_attempt_at, refreshingSince]);
+
+  const state = deriveHangarState(hangar, refreshingSince);
+  const dotTone = hangarDotTone(state);
+  const kicker = hangarKicker(state);
+
+  const onRefresh = async () => {
+    setRefreshError(null);
+    setRefreshingSince(Date.now());
+    try {
+      await api.refreshHangarNow();
+    } catch (err) {
+      setRefreshingSince(null);
+      setRefreshError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <TrayCard
+      title="Hangar"
+      kicker={
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          <StatusDot tone={dotTone} />
+          {kicker}
+        </span>
+      }
+      right={
+        <GhostButton
+          onClick={onRefresh}
+          disabled={state.kind === 'refreshing'}
+          style={{ padding: '4px 10px', fontSize: 11 }}
+        >
+          {state.kind === 'refreshing' ? 'Refreshing…' : 'Refresh now'}
+        </GhostButton>
+      }
+    >
+      <HangarBody state={state} ships={hangar.ships_pushed} />
+      {refreshError && (
+        <p
+          style={{
+            margin: '8px 0 0',
+            fontSize: 12,
+            color: 'var(--danger)',
+          }}
+        >
+          Refresh failed: {refreshError}
+        </p>
+      )}
+    </TrayCard>
+  );
+}
+
+function hangarDotTone(state: HangarState): 'ok' | 'warn' | 'danger' | 'info' | 'dim' {
+  switch (state.kind) {
+    case 'fresh_success':
+      return 'ok';
+    case 'stale_success':
+      return 'info';
+    case 'refreshing':
+      return 'info';
+    case 'skipped':
+      return 'warn';
+    case 'error':
+      return 'danger';
+    case 'never_started':
+      return 'dim';
+  }
+}
+
+function hangarKicker(state: HangarState): string {
+  switch (state.kind) {
+    case 'never_started':
+      return 'not started';
+    case 'refreshing':
+      return 'fetching from RSI…';
+    case 'fresh_success':
+      return `✓ ${ageLabel(state.at)}`;
+    case 'stale_success':
+      return ageLabel(state.at);
+    case 'skipped':
+      return 'skipped';
+    case 'error':
+      return 'error';
+  }
+}
+
+function HangarBody({ state, ships }: { state: HangarState; ships: number }) {
+  const shipCount = ships.toLocaleString();
+
+  switch (state.kind) {
+    case 'never_started':
+      return (
+        <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
+          Pair this device and configure the API URL to start syncing your
+          hangar from the RSI website.
+        </p>
+      );
+
+    case 'refreshing':
+      return (
+        <p style={{ margin: 0, color: 'var(--fg)', fontSize: 13 }}>
+          Fetching the latest hangar snapshot from RSI… last known total{' '}
+          <strong style={{ fontVariantNumeric: 'tabular-nums' }}>
+            {shipCount}
+          </strong>{' '}
+          ships.
+        </p>
+      );
+
+    case 'fresh_success':
+      return (
+        <p style={{ margin: 0, color: 'var(--fg)', fontSize: 13 }}>
+          <span style={{ color: 'var(--ok)' }}>
+            Fetched{' '}
+            <strong style={{ fontVariantNumeric: 'tabular-nums' }}>
+              {shipCount}
+            </strong>{' '}
+            ships from RSI
+          </span>{' '}
+          <span style={{ color: 'var(--fg-dim)' }}>
+            · {ageLabel(state.at)} ({fmtTime(state.at)})
+          </span>
+        </p>
+      );
+
+    case 'stale_success':
+      return (
+        <p style={{ margin: 0, color: 'var(--fg)', fontSize: 13 }}>
+          Last successful fetch{' '}
+          <strong>{ageLabel(state.at)}</strong>{' '}
+          <span style={{ color: 'var(--fg-dim)' }}>
+            ({fmtTime(state.at)})
+          </span>{' '}
+          ·{' '}
+          <strong style={{ fontVariantNumeric: 'tabular-nums' }}>
+            {shipCount}
+          </strong>{' '}
+          ships pushed
+        </p>
+      );
+
+    case 'skipped':
+      return (
+        <p style={{ margin: 0, color: 'var(--warn)', fontSize: 13 }}>
+          Skipped: {state.reason}
+          {state.at && (
+            <span style={{ color: 'var(--fg-dim)' }}>
+              {' '}
+              · {ageLabel(state.at)}
+            </span>
+          )}
+        </p>
+      );
+
+    case 'error':
+      return (
+        <p style={{ margin: 0, color: 'var(--danger)', fontSize: 13 }}>
+          {state.message}
+          {state.at && (
+            <span style={{ color: 'var(--fg-dim)' }}>
+              {' '}
+              · {ageLabel(state.at)}
+            </span>
+          )}
+        </p>
+      );
+  }
 }

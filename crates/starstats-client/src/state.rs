@@ -41,6 +41,13 @@ pub struct AppState {
     /// allocated so commands can call into it regardless of whether
     /// the worker actually spawned this session.
     pub sync_kick: Arc<Notify>,
+    /// Manual nudge to the hangar refresh worker. Same shape as
+    /// `sync_kick` — `notify_one()` cuts short the inter-cycle
+    /// sleep so a "Refresh now" button click triggers an immediate
+    /// fetch instead of waiting up to REFRESH_INTERVAL. Always
+    /// allocated; calling it when the worker isn't spawned (no
+    /// api_url/token configured) is a silent no-op.
+    pub hangar_kick: Arc<Notify>,
     /// Live counters from the launcher-log tailer. Optional shape
     /// because the tailer doesn't start when no launcher logs are
     /// found locally — `current_path = None` is the "not running"

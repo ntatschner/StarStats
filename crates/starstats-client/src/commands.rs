@@ -1117,6 +1117,20 @@ pub fn retry_sync_now(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Wake the hangar refresh worker immediately instead of waiting for
+/// its next REFRESH_INTERVAL tick. Wired up by the Status pane's
+/// "Refresh now" button. Silent no-op if the worker isn't spawned
+/// (i.e. user hasn't paired their device yet) — the Notify just
+/// queues a permit nobody consumes, costs nothing.
+///
+/// The cycle still respects per-tick gates (game running, no cookie
+/// set, auth_lost) — kicking doesn't bypass safety, only the sleep.
+#[tauri::command]
+pub fn refresh_hangar_now(state: State<'_, AppState>) -> Result<(), String> {
+    state.hangar_kick.notify_one();
+    Ok(())
+}
+
 /// Pull `preferred_username` out of a JWT's payload without verifying
 /// the signature — the server already verified it for us when it
 /// minted the token. This is purely a UX convenience so we can show
