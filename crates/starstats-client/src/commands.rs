@@ -1145,11 +1145,6 @@ fn decode_username_from_token(token: &str) -> Option<String> {
 /// rejects accidental whole-page paste.
 pub const MAX_COOKIE_CHARS: usize = 4096;
 
-#[derive(Debug, Deserialize)]
-pub struct SetRsiCookieRequest {
-    pub cookie_value: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct RsiCookieStatus {
     pub configured: bool,
@@ -1163,9 +1158,17 @@ pub struct RsiCookieStatus {
 /// keychain. Idempotent — overwrites any previous value. Returns the
 /// redacted preview so the UI can confirm the write without echoing
 /// the secret.
+///
+/// Takes `cookie_value` as a top-level Tauri command arg so the
+/// plugin's automatic camelCase→snake_case mapping applies — JS
+/// invokes with `{ cookieValue }` and Tauri rewrites the key for
+/// us. The earlier `SetRsiCookieRequest { cookie_value }` wrapper
+/// struct silently broke that mapping (Serde sees the inner field
+/// names verbatim) and rejected the JS payload at runtime with
+/// `missing field 'cookie_value'`.
 #[tauri::command]
-pub async fn set_rsi_cookie(req: SetRsiCookieRequest) -> Result<RsiCookieStatus, String> {
-    let trimmed = req.cookie_value.trim();
+pub async fn set_rsi_cookie(cookie_value: String) -> Result<RsiCookieStatus, String> {
+    let trimmed = cookie_value.trim();
     if trimmed.is_empty() {
         return Err("cookie value is empty".into());
     }
