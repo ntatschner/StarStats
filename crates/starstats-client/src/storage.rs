@@ -444,9 +444,16 @@ impl Storage {
     where
         F: FnMut(EventRow) -> Result<()>,
     {
-        let conn = self.conn.lock().expect("storage mutex poisoned");
         let mut last_id: i64 = 0;
         loop {
+            // Fetch one batch with the lock held, then release it
+            // BEFORE invoking the closure. The original implementation
+            // held the lock across the closure body, which deadlocked
+            // any caller (e.g. reparse) that called back into other
+            // Storage methods that re-acquire the same lock. Paged by
+            // `id > last_id` so concurrent inserts during the walk
+            // are visited in a later batch — correct for re-parse.
+            let conn = self.conn.lock().expect("storage mutex poisoned");
             let mut stmt = conn.prepare(
                 "SELECT id, idempotency_key, type, timestamp, raw, payload, log_source, source_offset
                  FROM events
@@ -454,21 +461,26 @@ impl Storage {
                  ORDER BY id ASC
                  LIMIT ?",
             )?;
-            let rows: Vec<EventRow> = stmt
-                .query_map(params![last_id, batch_size as i64], |row| {
-                    Ok(EventRow {
-                        id: row.get(0)?,
-                        idempotency_key: row.get(1)?,
-                        event_type: row.get(2)?,
-                        timestamp: row.get(3)?,
-                        raw_line: row.get(4)?,
-                        payload_json: row.get(5)?,
-                        log_source: row.get(6)?,
-                        source_offset: row.get::<_, i64>(7)?.max(0) as u64,
-                    })
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
+            let mapped = stmt.query_map(params![last_id, batch_size as i64], |row| {
+                Ok(EventRow {
+                    id: row.get(0)?,
+                    idempotency_key: row.get(1)?,
+                    event_type: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    raw_line: row.get(4)?,
+                    payload_json: row.get(5)?,
+                    log_source: row.get(6)?,
+                    source_offset: row.get::<_, i64>(7)?.max(0) as u64,
+                })
+            })?;
+            let rows: Vec<EventRow> = mapped.filter_map(|r| r.ok()).collect();
+            // Drop the lock guard explicitly so the closure invoked
+            // below is free to call back into other Storage methods
+            // that re-acquire the connection. Without this drop the
+            // re-parse closure deadlocks the moment it tries to write
+            // an updated classification.
+            drop(stmt);
+            drop(conn);
             if rows.is_empty() {
                 break;
             }
