@@ -273,7 +273,7 @@ export const api = {
   refreshAccountInfo: () => invoke<AccountStatus>('refresh_account_info'),
   retrySyncNow: () => invoke<void>('retry_sync_now'),
   setRsiCookie: (cookieValue: string) =>
-    invoke<RsiCookieStatus>('set_rsi_cookie', { req: { cookieValue } }),
+    invoke<RsiCookieStatus>('set_rsi_cookie', { cookieValue }),
   clearRsiCookie: () => invoke<RsiCookieStatus>('clear_rsi_cookie'),
   getRsiCookieStatus: () => invoke<RsiCookieStatus>('get_rsi_cookie_status'),
 };
