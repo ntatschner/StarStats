@@ -308,6 +308,7 @@ fn main() {
             commands::list_transactions,
             commands::get_app_version,
             commands::reparse_events,
+            commands::reingest_rotated_logs,
             commands::check_for_update_for_channel,
             commands::install_update_for_channel,
             commands::get_source_stats,

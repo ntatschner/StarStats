@@ -636,6 +636,145 @@ fn run_reparse(
     Ok(stats)
 }
 
+/// Outcome of `reingest_rotated_logs`. Mirrors the on-disk shape of
+/// `BackfillStats` but without `completed`/`files_already_done` —
+/// this command always re-walks every archived file from offset 0
+/// regardless of saved cursor state, so those flags don't apply.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReingestStats {
+    pub files_walked: u32,
+    pub files_failed: u32,
+    pub lines_processed: u64,
+    pub events_recognised: u64,
+    /// Final non-fatal error message if the walk aborted partway.
+    /// `None` on a clean run.
+    pub error: Option<String>,
+}
+
+/// Forces a full re-walk of every rotated `Game-*.log` file, ignoring
+/// the saved per-file cursor. Each line is fed back through
+/// `ingest_one_line`, which dedupes already-known events via the
+/// `(log_source, line_offset, line)` idempotency key — so previously-
+/// classified rows stay where they are and only NEW classifications
+/// (e.g. body-line PlayerDeath events under v0.3.2+ that were `None`'d
+/// by an older parser) land fresh.
+///
+/// Side effect: `unknown_event_samples.occurrences` will inflate for
+/// any event_name that still doesn't classify, because record_unknown
+/// re-bumps the count on each pass. Acceptable noise — the goal is
+/// recovering historical events that the modern parser now handles.
+///
+/// After the walk completes, the cursor is rewritten to EOF so the
+/// next startup backfill short-circuits. The user typically clicks
+/// Re-parse next to back-fill zone enrichment on the new rows.
+#[tauri::command]
+pub async fn reingest_rotated_logs(state: State<'_, AppState>) -> Result<ReingestStats, String> {
+    let storage = Arc::clone(&state.storage);
+    let rules_snapshot = state.parser_def_cache.snapshot();
+    tauri::async_runtime::spawn_blocking(move || run_reingest(&storage, &rules_snapshot))
+        .await
+        .map_err(|e| format!("reingest worker panicked: {e}"))?
+}
+
+fn run_reingest(
+    storage: &crate::storage::Storage,
+    rules: &[starstats_core::CompiledRemoteRule],
+) -> Result<ReingestStats, String> {
+    use crate::discovery::{self, LogKind};
+    use crate::gamelog::{ingest_one_line, log_source_from_path, IngestOutcome};
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let archived: Vec<_> = discovery::discover()
+        .into_iter()
+        .filter(|d| d.kind == LogKind::ChannelArchived)
+        .collect();
+
+    let mut stats = ReingestStats {
+        files_walked: 0,
+        files_failed: 0,
+        lines_processed: 0,
+        events_recognised: 0,
+        error: None,
+    };
+
+    for log in archived {
+        let path_str = log.path.to_string_lossy().to_string();
+        let log_source = log_source_from_path(&log.path);
+
+        let file = match File::open(&log.path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    path = %log.path.display(),
+                    error = %e,
+                    "reingest: open failed",
+                );
+                stats.files_failed += 1;
+                continue;
+            }
+        };
+
+        let mut reader = BufReader::new(file);
+        let mut offset: u64 = 0;
+        let mut line_buf = String::new();
+        let mut local_lines: u64 = 0;
+        let mut local_events: u64 = 0;
+
+        loop {
+            let line_start = offset;
+            line_buf.clear();
+            let n = match reader.read_line(&mut line_buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %log.path.display(),
+                        error = %e,
+                        "reingest: read_line failed; stopping this file",
+                    );
+                    break;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if !line_buf.ends_with('\n') {
+                // Truncated final line — skip it like backfill does.
+                break;
+            }
+            offset += n as u64;
+            local_lines += 1;
+            let outcome = ingest_one_line(
+                line_buf.trim_end_matches(['\r', '\n']),
+                storage,
+                &log_source,
+                line_start,
+                rules,
+            );
+            if matches!(outcome, IngestOutcome::Recognised { .. }) {
+                local_events += 1;
+            }
+        }
+
+        // Park the cursor at EOF so the next startup backfill skips
+        // this file. The whole point of this command is to bypass the
+        // cursor, but ONLY for this run; subsequent startups should
+        // resume the normal short-circuit path.
+        if let Err(e) = storage.write_cursor(&path_str, offset) {
+            tracing::warn!(
+                path = %log.path.display(),
+                error = %e,
+                "reingest: write_cursor failed",
+            );
+        }
+        stats.files_walked += 1;
+        stats.lines_processed = stats.lines_processed.saturating_add(local_lines);
+        stats.events_recognised = stats.events_recognised.saturating_add(local_events);
+    }
+
+    Ok(stats)
+}
+
 /// Mirror of `gamelog::serialise_event` but private to the reparse
 /// path so tweaks here don't ripple into ingest. Returns
 /// `(event_type, timestamp, payload_json)`.
