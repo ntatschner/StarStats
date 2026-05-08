@@ -13,6 +13,8 @@ license = "MPL-2.0"
 authors = ["StarStats contributors"]
 rust-version = "1.88"
 repository = "https://github.com/ntatschner/StarStats"
+homepage = "https://starstats.app"
+documentation = "https://starstats.app/help"
 
 # Workspace-wide clippy posture. The CI clippy step runs with
 # `-D warnings`, so anything that fires a warning becomes a build

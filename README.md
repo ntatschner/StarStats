@@ -1,7 +1,155 @@
 # StarStats
 
-EAC-safe personal metrics platform for Star Citizen. Tray client + API + web app.
-**Reads only files the game writes to disk and the RSI website with your own session** — never the running game process.
+[![Status](https://img.shields.io/badge/status-pre--1.0%20alpha-orange)](https://github.com/ntatschner/StarStats/releases)
+[![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/ntatschner/StarStats?include_prereleases&sort=semver)](https://github.com/ntatschner/StarStats/releases)
+
+EAC-safe personal metrics for Star Citizen. A tray client + API + web
+companion that turns the data the game already writes about you into
+something you can actually look at.
+
+Future home: **<https://starstats.app>** (domain registered, site not
+live yet — links into `starstats.app/...` will 404 until launch).
+
+> **Status: pre-1.0 (`v0.3.x-alpha`).** Shape is settled enough to use
+> day-to-day, but the wire format, schema, and event coverage are
+> still moving. Expect the alpha channel to break occasionally on
+> upgrade.
+
+## What it is
+
+StarStats reads two things, and only those two things:
+
+1. **Your local `Game.log` file.** The game writes this itself, on
+   every session, to a world-readable text file under
+   `%LOCALAPPDATA%\..\StarCitizen\LIVE\Game.log` (or your equivalent
+   `LIVE` / `PTU` / `EPTU` / `TECH-PREVIEW` install). The tray client
+   tails it the same way Notepad would.
+2. **`robertsspaceindustries.com`, as you.** If you paste your own RSI
+   session cookie into the tray's Hangar Sync settings, StarStats
+   issues authenticated HTTPS requests to your own profile and hangar
+   pages — exactly what your browser already does when you're logged
+   in.
+
+That's the whole input surface. There is no DLL, no overlay, no
+process attach, no memory read, no game-network sniffing, no macros,
+no automation of in-game actions.
+
+## EAC-safety, in one paragraph
+
+Easy Anti-Cheat watches for tampering with the running game process
+and its memory, modules loaded into the game, hooks against game
+APIs, and modifications of game files. StarStats does **none** of
+those things. It opens a text file the game flushed to disk, and it
+issues plain HTTPS requests to a public website you're already logged
+into. The Windows APIs involved are the ones used by every editor,
+browser, and chat client on your machine. The full technical
+explanation — including a side-by-side comparison with overlay and
+memory-reading tools that *do* get bans — lives in
+[`EAC-SAFETY.md`](EAC-SAFETY.md). If you have any doubt before
+running it, read that file first.
+
+## What it tracks today
+
+Parsed from `Game.log` (`crates/starstats-core/src/events.rs` is the
+authoritative list):
+
+| Lifecycle | Combat | Economy | Movement | Operational |
+|---|---|---|---|---|
+| `ProcessInit` / `LegacyLogin` | `PlayerDeath` | `ShopBuyRequest` / `ShopFlowResponse` | `JoinPu` / `ChangeServer` | `HudNotification` |
+| `MissionStart` / `MissionEnd` | `PlayerIncapacitated` | `CommodityBuyRequest` / `CommoditySellRequest` | `SeedSolarSystem` / `ResolveSpawn` | `AttachmentReceived` |
+| `SessionEnd` / `GameCrash` | `ActorDeath` *(legacy)* | (transaction pairing into completed orders) | `QuantumTargetSelected` | `LocationInventoryRequested` |
+| `LauncherActivity` | `VehicleDestruction` | | `PlanetTerrainLoad` / `VehicleStowed` | `RemoteMatch` |
+
+Pulled from RSI (when you've pasted your session cookie):
+
+- Public-profile snapshot (handle, citizen number, enlisted-since).
+- Hangar inventory diff (what came/went between checks).
+
+## Key features
+
+- **Auto-update with channel selector.** The tray polls a per-channel
+  manifest on `main` (`release-manifests/{alpha,rc,live}.json`) and
+  prompts to install. Switch channels in Settings; tag suffix decides
+  which manifest CI updates (`-alpha` → alpha, `-rc` → rc, bare
+  semver → live).
+- **Re-parse.** When the parser learns a new event type, hit
+  *Re-parse* to re-classify everything already in your local store
+  in place — no log-file replay needed.
+- **Transaction pairing.** Buy and sell requests are matched against
+  their flow-response confirmations into a single completed order
+  with price, quantity, and location resolved.
+- **Web companion.** A Next.js dashboard that surfaces the same data
+  with sharing controls and a longer history view than the tray
+  affords.
+- **EAC-safe by construction.** See
+  [`EAC-SAFETY.md`](EAC-SAFETY.md). It's the entire reason this
+  project exists.
+
+## Install (users)
+
+Pre-built installers ship on every tagged release:
+**<https://github.com/ntatschner/StarStats/releases>**
+
+| Platform | Artifact | Notes |
+|---|---|---|
+| Windows | `StarStats_<version>_x64-setup.exe` (NSIS) or `.msi` (WiX) | Code-signed; auto-update enabled |
+| Linux | `StarStats_<version>_amd64.AppImage` or `.deb` | AppImage is portable; `.deb` for Debian/Ubuntu |
+
+After install:
+
+1. Launch StarStats. It runs to the system tray; click the icon for
+   the menu.
+2. Open *Settings* and point *Game.log path* at your install's
+   `Game.log`. The default Windows location is
+   `%LOCALAPPDATA%\..\StarCitizen\LIVE\Game.log` — adjust for `PTU`
+   etc. The picker only allows files named `Game.log`.
+3. *(Optional)* Paste your RSI session cookie into *Hangar Sync* if
+   you want hangar/profile snapshots. The cookie is stored in your OS
+   keychain (Windows Credential Manager / macOS Keychain / Linux
+   Secret Service) — only the same OS user that pasted it can read
+   it back.
+4. Launch Star Citizen. Events flow into the tray as the game writes
+   them. The history pane and the *Re-parse* button live under the
+   *Events* tab.
+
+If you want to point at a self-hosted StarStats server instead of
+running purely local, the *Server* settings tab takes a base URL and
+walks you through device pairing.
+
+## Build (contributors)
+
+Full developer setup, branching model, commit conventions, and the
+release flow live in [`CONTRIBUTING.md`](CONTRIBUTING.md). Quick
+start:
+
+```powershell
+# Prereqs: Rust 1.88, pnpm 9.15, Node 20.
+# For server work: Postgres 16+. For tray work: WebView2 (Windows) or GTK + WebKit2GTK (Linux).
+
+# Clone
+git clone https://github.com/ntatschner/StarStats.git
+cd StarStats
+
+# Rust workspace (excludes the Tauri client by default — see CONTRIBUTING.md for the GUI loop)
+cargo build  --workspace --exclude starstats-client
+cargo test   --workspace --exclude starstats-client
+cargo clippy --workspace --exclude starstats-client -- -D warnings
+cargo fmt --all --check
+
+# Web app
+pnpm install
+pnpm --filter web dev
+
+# Tray (full GUI loop)
+pnpm --filter tray-ui dev   # in one shell
+cargo run -p starstats-client   # in another, after the dev UI is up
+```
+
+Code signing, updater signing, and registry credentials are all
+supplied via GitHub Actions secrets — contributors never need any of
+those locally. CI runs `cargo fmt --check`, `cargo clippy -D
+warnings`, `cargo test`, and the web/tray TS builds on every PR.
 
 ## Repository layout
 
@@ -20,81 +168,62 @@ StarStats/
 │   └── api-client-ts/          generated TS client (from server's OpenAPI spec)
 ├── infra/                      docker-compose configs (synced to homelab host)
 ├── docs/
-│   ├── ARCHITECTURE.md         (forthcoming — replaces python-spike doc)
-│   ├── HOMELAB-INTEGRATION.md  bring-up runbook for voyager docker host
+│   ├── ARCHITECTURE.md         end-to-end system design
+│   ├── HOMELAB-INTEGRATION.md  bring-up runbook for self-hosting the API
 │   ├── OBSERVABILITY.md        per-component telemetry matrix
 │   └── AUDIT.md                tamper-evident audit log design
+├── release-manifests/          per-channel updater manifests (alpha/rc/live)
 └── prototypes/
     └── python-spike/           original Python prototype, retained for reference
 ```
 
-## Stack at a glance
-
-- **Tray client**: Rust + Tauri 2 + React (TS) — single signed binary on Windows + Linux
-- **Server**: Rust + Axum + sqlx + Postgres (existing voyager pgvector/pg17)
-- **Web**: Next.js 15 (App Router, RSC) + TypeScript + Tailwind v4 + shadcn/ui
-- **Authn**: Self-hosted (RS256 JWTs minted by the API; web app holds email/pw + OAuth link UI)
-- **Authz**: SpiceDB (Zanzibar-style ReBAC) for org/sharing/scopes
-- **Object storage**: MinIO with Object Lock for audit immutability
-- **Observability**: OpenTelemetry → Loki / Tempo / Prometheus, surfaced in existing Grafana
-- **Errors**: GlitchTip (Sentry-compatible)
-
-See `docs/HOMELAB-INTEGRATION.md` for the full bring-up runbook on the
-voyager docker host.
-
-## Development
-
-Local-dev environment variables are documented in two `.env.example`
-files — copy each to its sibling and tweak as needed:
-
-```powershell
-Copy-Item crates/starstats-server/.env.example crates/starstats-server/.env
-Copy-Item apps/web/.env.example apps/web/.env.local
-```
-
-Then:
-
-```powershell
-# Rust — workspace build, test, lint
-cargo build --workspace --exclude starstats-client
-cargo test  --workspace --exclude starstats-client
-cargo clippy --workspace --exclude starstats-client -- -D warnings
-cargo fmt --all --check
-
-# Tauri client (requires platform deps — see crates/starstats-client/README.md)
-cargo build -p starstats-client
-
-# Web app
-pnpm install
-pnpm --filter web build
-pnpm --filter web dev
-
-# Tray UI (Vite frontend for Tauri)
-pnpm --filter tray-ui dev
-```
-
-`starstats-client` is excluded from default workspace builds because Tauri
-requires GTK / WebKit2GTK on Linux and WebView2 on Windows. CI builds it on
-matrix runners with the proper system deps.
-
-## Deployment
-
-Deployment to a self-hosted compose stack is documented end-to-end in
-[`docs/HOMELAB-INTEGRATION.md`](docs/HOMELAB-INTEGRATION.md), including
-the exact `services:` block to merge into your compose file, secret
-provisioning, JWT-key bootstrap, and bring-up sequence. CI publishes
-container images on tag push (`v*`) via
-[`.github/workflows/release.yml`](.github/workflows/release.yml).
-
 ## What StarStats does NOT do
 
-- Read game memory
-- Inject into the game process
-- Hook game APIs
-- Sniff or modify game network traffic
-- Modify any game files
+- Read game memory.
+- Inject into the game process.
+- Hook game APIs.
+- Sniff or modify game network traffic.
+- Modify any game files.
+- Drive in-game input (no macros, no aimbots, no multiboxing
+  automation).
+- Touch other players' data — only your own log file and your own
+  RSI session.
 
-If it can be detected by EAC, it isn't in this tool.
+If a feature would require any of the above, it doesn't belong in
+StarStats and won't be merged.
+
+## Documentation
+
+- [`EAC-SAFETY.md`](EAC-SAFETY.md) — why this is safe, in technical
+  detail
+- [`SECURITY.md`](SECURITY.md) — coordinated disclosure policy
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup and workflow
+- [`CHANGELOG.md`](CHANGELOG.md) — release history
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design
+- [`docs/HOMELAB-INTEGRATION.md`](docs/HOMELAB-INTEGRATION.md) —
+  self-hosting runbook
+- [`NOTICE`](NOTICE) — third-party acknowledgements
+
+## Project status, honestly
+
+StarStats is pre-1.0 alpha software run by a single maintainer. The
+parser learns new event types as Star Citizen patches drop, and the
+tray, server, and web app are all still being shaped. Things that
+explicitly aren't done yet:
+
+- The `starstats.app` website is registered but not deployed — links
+  to it in this README are forward-looking.
+- macOS builds. Tauri targets it; CI doesn't yet.
+- Sharing UI in the web app is partial — public profile views are
+  there, granular per-event sharing isn't.
+- A formal stable API. Until 1.0 the OpenAPI spec is allowed to break
+  on minor releases.
+
+When something breaks, file an issue:
+<https://github.com/ntatschner/StarStats/issues>. For security
+problems, use the channels in [`SECURITY.md`](SECURITY.md) — not
+public issues.
 
 ## Licence
 
@@ -103,3 +232,7 @@ Licensed under the Mozilla Public License, v. 2.0. See
 copyleft: modifications to existing source files must be released
 under the same terms, but the code can be combined with proprietary
 or other-licensed code in larger works.
+
+Star Citizen is a trademark of Cloud Imperium Games. StarStats is not
+affiliated with, endorsed by, or sponsored by Cloud Imperium Games or
+the Roberts Space Industries website.
