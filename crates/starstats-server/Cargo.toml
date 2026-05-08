@@ -69,7 +69,7 @@ aws-smithy-runtime-api.workspace = true
 utoipa.workspace = true
 axum-extra = { version = "0.9", features = ["typed-header"] }
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 rsa = "0.9"
 rand = "0.8"
