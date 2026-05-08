@@ -12,7 +12,13 @@ interface Props {
   view: TrayView;
   onView: (next: TrayView) => void;
   isTailing: boolean;
-  version: string;
+  /**
+   * Cargo workspace version of the running binary. `null` while the
+   * IPC fetch is in flight — render the brand mark without a
+   * trailing version string in that case rather than flashing a
+   * stale fallback.
+   */
+  version: string | null;
 }
 
 const TABS: ReadonlyArray<TrayView> = ['status', 'logs', 'settings'];
@@ -55,7 +61,7 @@ export function TrayHeader({ view, onView, isTailing, version }: Props) {
             STARSTATS
           </div>
           <div style={{ fontSize: 10, color: 'var(--fg-dim)', letterSpacing: '0.04em' }}>
-            Tray client · v{version}
+            {version ? `Tray client · v${version}` : 'Tray client'}
           </div>
         </div>
       </div>

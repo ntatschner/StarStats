@@ -11,6 +11,12 @@ export default function App() {
   const [view, setView] = useState<TrayView>('status');
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Sourced via the Tauri command (Rust CARGO_PKG_VERSION) rather
+  // than a Vite build-time constant from `package.json`, because
+  // `package.json` was the wrong source of truth — it shipped at
+  // 0.1.0 while the workspace Cargo.toml advanced through several
+  // releases. One source of truth (the Rust binary), one fetch.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
   const { status, refresh: refreshStatus } = useStatusPolling({
     active: view === 'status',
@@ -29,6 +35,20 @@ export default function App() {
 
   useEffect(() => {
     void refreshConfig();
+    let cancelled = false;
+    api
+      .getAppVersion()
+      .then((v) => {
+        if (!cancelled) setAppVersion(v);
+      })
+      .catch(() => {
+        // Version is informational; if it fails the header just
+        // omits it. Already shown in Settings → Updates with its
+        // own error path, so silent fallback is fine here.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [refreshConfig]);
 
   const onSaveConfig = async (next: Config) => {
@@ -45,7 +65,7 @@ export default function App() {
         view={view}
         onView={setView}
         isTailing={isTailing}
-        version={__APP_VERSION__}
+        version={appVersion}
       />
       <main className="app__main">
         {error && <div className="error">Error: {error}</div>}
