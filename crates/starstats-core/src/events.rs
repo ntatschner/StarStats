@@ -21,6 +21,8 @@ pub enum GameEvent {
     SeedSolarSystem(SeedSolarSystem),
     ResolveSpawn(ResolveSpawn),
     ActorDeath(ActorDeath),
+    PlayerDeath(PlayerDeath),
+    PlayerIncapacitated(PlayerIncapacitated),
     VehicleDestruction(VehicleDestruction),
     HudNotification(HudNotification),
     LocationInventoryRequested(LocationInventoryRequested),
@@ -105,8 +107,64 @@ pub struct ResolveSpawn {
     pub fallback: bool,
 }
 
-/// `<Actor Death>` — combat kill / NPC death. NOT present in the
-/// session-only fixture; pattern derived from prior community captures.
+/// `<Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]>`
+/// filtered to the player's body line — the canonical "you died" event
+/// in modern (4.x+) Star Citizen builds.
+///
+/// CIG removed the explicit `<Actor Death>` event with attribution at
+/// some point pre-4.x. The remaining death signal is the corpse-cleanup
+/// burst that starts with the player's `body_*` actor item being marked
+/// for inventory-recovery entitlement; subsequent lines in the burst
+/// are the loadout items (armor, weapons, mags) and aren't classified
+/// individually — only the first `body_*` line counts as a death.
+///
+/// Only the local player's deaths are written to Game.log this way;
+/// NPC corpses don't go through `ItemRecoveryEntitlement`. So a match
+/// here means "I died" without ambiguity.
+///
+/// `zone` is `None` at classify time. A future enrichment pass walks
+/// recent `PlanetTerrainLoad` / `LocationInventoryRequested` events to
+/// fill it in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerDeath {
+    pub timestamp: String,
+    /// e.g. `body_01_noMagicPocket` — the body class without the
+    /// trailing instance ID.
+    pub body_class: String,
+    /// Trailing instance ID — same value also appears as `KeptId` on
+    /// the line. Useful for de-duping if the same line somehow lands
+    /// twice.
+    pub body_id: String,
+    /// Best-effort location-of-death string, derived post-classify by
+    /// scanning recent zone-relevant events. None at parse time.
+    pub zone: Option<String>,
+}
+
+/// `<SHUDEvent_OnNotification>` with body text starting with
+/// "Incapacitated:" — the survivable downed state. Emitted instead of
+/// the generic `HudNotification` so callers can distinguish it
+/// without parsing the banner text. Distinct from `PlayerDeath`:
+/// players can be revived from incapacitation, but if the
+/// "Time to Death" timer expires a `PlayerDeath` follows ~30s later.
+///
+/// `zone` is None at classify time, same enrichment story as
+/// `PlayerDeath`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerIncapacitated {
+    pub timestamp: String,
+    /// The notification queue id the engine appends in `[NN]`. Useful
+    /// for correlating with the matching `<UpdateNotificationItem>`
+    /// removal line if we ever care about how long the user spent
+    /// incapacitated.
+    pub queue_id: u64,
+    pub zone: Option<String>,
+}
+
+/// `<Actor Death>` — legacy combat kill / NPC death event. CIG no
+/// longer writes lines in this format in modern builds; the parser
+/// is kept against older log captures and the synthetic fixture in
+/// the unit tests so historical data still classifies. Live deaths
+/// flow through `PlayerDeath` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorDeath {
     pub timestamp: String,

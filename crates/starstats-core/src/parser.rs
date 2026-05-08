@@ -21,10 +21,10 @@
 use crate::events::{
     ActorDeath, AttachmentReceived, ChangeServer, CommodityBuyRequest, CommoditySellRequest,
     GameEvent, HudNotification, JoinPu, LauncherCategory, LegacyLogin, LocationInventoryRequested,
-    MissionEnd, MissionMarkerKind, MissionStart, PlanetTerrainLoad, ProcessInit,
-    QuantumTargetPhase, QuantumTargetSelected, ResolveSpawn, SeedSolarSystem, ServerPhase,
-    SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
-    VehicleStowed,
+    MissionEnd, MissionMarkerKind, MissionStart, PlanetTerrainLoad, PlayerDeath,
+    PlayerIncapacitated, ProcessInit, QuantumTargetPhase, QuantumTargetSelected, ResolveSpawn,
+    SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
+    VehicleDestruction, VehicleStowed,
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -286,6 +286,22 @@ static VEHICLE_DESTRUCTION_RE: Lazy<Regex> = Lazy::new(|| {
     ).expect("VEHICLE_DESTRUCTION_RE compiles")
 });
 
+// Modern (4.x+) player-death signal. The corpse-cleanup burst starts
+// with the player's body component being marked for inventory recovery
+// — that single line is the death event. Subsequent items in the same
+// burst (armor, weapons, mags) are ignored: they don't start with
+// `body_` so the regex won't match.
+//
+// Anchoring on the leading `Item 'body_` keeps us from misclassifying
+// equipment-cleanup lines that share the same event_name. The body_id
+// is the trailing instance number on the body item, which also appears
+// later as `KeptId`.
+static PLAYER_DEATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^Item\s*'(?P<body_class>body_[A-Za-z0-9_]+?)_(?P<body_id>\d+)\s*-\s*Class\(body_[A-Za-z0-9_]+\)"
+    ).expect("PLAYER_DEATH_RE compiles")
+});
+
 // HUD banner notifications (zone/jurisdiction/armistice). The text is
 // allowed to contain a trailing colon-space because the engine appends
 // a player or location after the colon; we keep what's inside the
@@ -533,6 +549,20 @@ pub fn classify(line: &LogLine<'_>) -> Option<GameEvent> {
         }
         "SHUDEvent_OnNotification" => {
             let c = HUD_NOTIFICATION_RE.captures(body)?;
+            let text = c["text"].to_string();
+            let id: u64 = c["id"].parse().ok()?;
+            // Promote "Incapacitated:" notifications to a dedicated
+            // PlayerIncapacitated event so callers can distinguish the
+            // recoverable downed state from generic HUD banners.
+            // PlayerDeath fires separately ~30s later if the
+            // "Time to Death" timer expires.
+            if text.starts_with("Incapacitated:") {
+                return Some(GameEvent::PlayerIncapacitated(PlayerIncapacitated {
+                    timestamp: ts.clone(),
+                    queue_id: id,
+                    zone: None,
+                }));
+            }
             // Treat the all-zero mission GUID as no mission to keep
             // the wire payload tidy.
             let mission = c
@@ -541,9 +571,24 @@ pub fn classify(line: &LogLine<'_>) -> Option<GameEvent> {
                 .filter(|m| !matches!(m.as_str(), "00000000-0000-0000-0000-000000000000"));
             Some(GameEvent::HudNotification(HudNotification {
                 timestamp: ts.clone(),
-                text: c["text"].to_string(),
-                notification_id: c["id"].parse().ok()?,
+                text,
+                notification_id: id,
                 mission_id: mission,
+            }))
+        }
+        "Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]" => {
+            // Modern player-death signal. Only matches the FIRST line
+            // of the cleanup burst — the one that names the player's
+            // body item (`body_*`). Equipment-cleanup lines from the
+            // same burst share this event_name but the regex rejects
+            // them, so they fall through to unknown_event_samples
+            // (where they're harmless noise).
+            let c = PLAYER_DEATH_RE.captures(body)?;
+            Some(GameEvent::PlayerDeath(PlayerDeath {
+                timestamp: ts.clone(),
+                body_class: c["body_class"].to_string(),
+                body_id: c["body_id"].to_string(),
+                zone: None,
             }))
         }
         "RequestLocationInventory" => {
@@ -1053,6 +1098,68 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn classifies_modern_player_death_from_real_capture() {
+        // Real line from the user's logbackups directory, redacted of
+        // secrets (none in this line). Modern (4.x+) SC writes player
+        // deaths as a corpse-cleanup burst; the FIRST line, naming the
+        // body item, is the death signal.
+        let line = "<2026-05-01T18:46:15.085Z> [Notice] <Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]> Item 'body_01_noMagicPocket_9754924365641 - Class(body_01_noMagicPocket) - Context(Streamable Runtime-spawned) - Socpak()', Recorded data is: Port Name 'Body_ItemPort', Class GUID: 'dbaa8a7d-755f-4104-8b24-7b58fd1e76f6', KeptId: '9754924365641' [Team_CoreGameplayFeatures][Unknown]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::PlayerDeath(d) => {
+                assert_eq!(d.timestamp, "2026-05-01T18:46:15.085Z");
+                assert_eq!(d.body_class, "body_01_noMagicPocket");
+                assert_eq!(d.body_id, "9754924365641");
+                assert_eq!(d.zone, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_death_burst_only_classifies_the_body_line() {
+        // The same burst spawns equipment-cleanup lines that share
+        // the event_name but don't start with `body_`. They MUST NOT
+        // classify as PlayerDeath — otherwise one death would surface
+        // as a dozen events in the timeline.
+        let undersuit = "<2026-05-01T18:46:15.087Z> [Notice] <Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]> Item 'vgl_undersuit_01_01_13_9982571228598 - Class(vgl_undersuit_01_01_13) - Context(Streamable Runtime-spawned) - Socpak()', Recorded data is: Port Name 'Armor_Undersuit', Class GUID: '1ae7202d-b9c0-4492-87e6-a46b2e80fc56' [Team_CoreGameplayFeatures][Unknown]";
+        let p = structural_parse(undersuit).unwrap();
+        // classify returns None — the body-anchored regex rejects
+        // non-body items in the burst.
+        assert!(classify(&p).is_none());
+    }
+
+    #[test]
+    fn classifies_player_incapacitated_from_real_capture() {
+        // Real "Incapacitated" notification line from the user's logs.
+        // Goes through SHUDEvent_OnNotification but the body-text
+        // discriminator promotes it to PlayerIncapacitated.
+        let line = "<2026-05-01T18:45:45.141Z> [Notice] <SHUDEvent_OnNotification> Added notification \"Incapacitated: While incapacitated, ask others in your party, in chat, or through rescue service beacons to revive you before the 'Time to Death' timer expires.\" [89] to queue. New queue size: 1, MissionId: [00000000-0000-0000-0000-000000000000], ObjectiveId: [] [Team_CoreGameplayFeatures][Missions][Comms]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        match event {
+            GameEvent::PlayerIncapacitated(i) => {
+                assert_eq!(i.timestamp, "2026-05-01T18:45:45.141Z");
+                assert_eq!(i.queue_id, 89);
+                assert_eq!(i.zone, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_incap_hud_notification_still_routes_to_hud_notification() {
+        // Sanity: the dedicated PlayerIncapacitated branch must NOT
+        // hijack other HUD banners. Generic "Entered jurisdiction"
+        // text stays as HudNotification.
+        let line = "<2026-05-02T12:00:00.000Z> [Notice] <SHUDEvent_OnNotification> Added notification \"Entered Hurston Dynamics Jurisdiction: \" [42] to queue. New queue size: 1, MissionId: [00000000-0000-0000-0000-000000000000], ObjectiveId: [] [Team][UI]";
+        let p = structural_parse(line).unwrap();
+        let event = classify(&p).unwrap();
+        assert!(matches!(event, GameEvent::HudNotification(_)));
     }
 
     // -- Launcher log parsing -------------------------------------
