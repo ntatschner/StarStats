@@ -197,6 +197,7 @@ fn main() {
                 Arc::new(parking_lot::Mutex::new(HangarStats::default()));
             let account_status = Arc::new(parking_lot::Mutex::new(AccountStatus::default()));
             let sync_kick = Arc::new(tokio::sync::Notify::new());
+            let hangar_kick = Arc::new(tokio::sync::Notify::new());
 
             // 2a/2b/2c. Sync worker + account-status hydration +
             //           hangar refresh worker.
@@ -206,6 +207,7 @@ fn main() {
                 Arc::clone(&hangar_stats),
                 Arc::clone(&account_status),
                 Arc::clone(&sync_kick),
+                Arc::clone(&hangar_kick),
             );
 
             // 3. Discover Game.log and start tailing the most recently
@@ -280,6 +282,7 @@ fn main() {
                 hangar_stats,
                 account_status,
                 sync_kick,
+                hangar_kick,
                 launcher_stats,
                 crash_stats,
                 backfill_stats,
@@ -317,6 +320,7 @@ fn main() {
             commands::pair_device,
             commands::refresh_account_info,
             commands::retry_sync_now,
+            commands::refresh_hangar_now,
             commands::set_rsi_cookie,
             commands::clear_rsi_cookie,
             commands::get_rsi_cookie_status,
@@ -449,6 +453,7 @@ fn start_sync_workers(
     hangar_stats: Arc<parking_lot::Mutex<HangarStats>>,
     account_status: Arc<parking_lot::Mutex<AccountStatus>>,
     sync_kick: Arc<tokio::sync::Notify>,
+    hangar_kick: Arc<tokio::sync::Notify>,
 ) {
     let app_config = config::load().unwrap_or_default();
 
@@ -473,6 +478,7 @@ fn start_sync_workers(
             token.clone(),
             Arc::clone(&hangar_stats),
             Arc::clone(&account_status),
+            Arc::clone(&hangar_kick),
         );
 
         let account_status_for_init = Arc::clone(&account_status);

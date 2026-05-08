@@ -97,12 +97,12 @@ pub struct HangarStats {
 /// at all (no API URL / no token => no spawn). Once spawned, the
 /// worker keeps running until the runtime drops; per-cycle decisions
 /// (cookie present? game running?) are made inside `refresh_once`.
-#[allow(dead_code)] // wired by Worker E
 pub fn start(
     api_url: String,
     access_token: String,
     hangar_stats: Arc<Mutex<HangarStats>>,
     account_status: Arc<Mutex<AccountStatus>>,
+    kick: Arc<tokio::sync::Notify>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let secret = match SecretStore::new(ACCOUNT_RSI_SESSION_COOKIE) {
@@ -123,7 +123,9 @@ pub fn start(
 
         // First cycle runs immediately so the user gets feedback on
         // the freshly-pasted cookie. Subsequent cycles wait the full
-        // REFRESH_INTERVAL.
+        // REFRESH_INTERVAL OR until `kick.notify_one()` cuts the
+        // sleep short — whichever happens first. The "Refresh now"
+        // tray button hits the kick path.
         loop {
             // Don't push to a server that has already rejected our
             // device token — the StarStats POST below would just 401
@@ -140,7 +142,12 @@ pub fn start(
                     s.last_error = Some(e.to_string());
                 }
             }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
+                _ = kick.notified() => {
+                    tracing::info!("hangar worker: kicked — running cycle now");
+                }
+            }
         }
     })
 }
