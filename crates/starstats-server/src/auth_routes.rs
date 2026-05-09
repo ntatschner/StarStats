@@ -18,6 +18,7 @@ use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::{AuthenticatedUser, TokenIssuer};
 use crate::devices::DeviceStore;
 use crate::mail::Mailer;
+use crate::staff_roles::{StaffRoleSet, StaffRoleStore};
 use crate::users::{hash_password, verify_password, PostgresUserStore, UserError, UserStore};
 use axum::{
     extract::State,
@@ -188,6 +189,13 @@ pub struct MeResponse {
     /// page uses this to branch the 2FA wizard between the "enable"
     /// and "manage" states without an extra round trip.
     pub totp_enabled: bool,
+    /// Site-wide staff grants the user holds, sorted alphabetically.
+    /// Empty for normal users; populated for moderators / admins.
+    /// The web client mirrors this into the session cookie so /admin
+    /// gating doesn't need an extra round trip per page nav.
+    /// Older clients tolerate the field via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub staff_roles: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -577,12 +585,28 @@ pub async fn delete_account<U: UserStore>(
 )]
 pub async fn get_me<U: UserStore>(
     State(users): State<Arc<U>>,
+    staff_roles: Option<Extension<Arc<dyn StaffRoleStore>>>,
     auth: AuthenticatedUser,
 ) -> impl IntoResponse {
     let user = match resolve_user(users.as_ref(), &auth).await {
         Ok(u) => u,
         Err(resp) => return resp,
     };
+
+    // Roles: only looked up if the StaffRoleStore extension is
+    // installed. Tests that don't wire the extension see an empty
+    // vec; production wires PostgresStaffRoleStore in main.
+    let roles = match staff_roles {
+        Some(Extension(store)) => match store.list_active_for_user(user.id).await {
+            Ok(set) => set.as_strings(),
+            Err(e) => {
+                tracing::error!(user_id = %user.id, err = ?e, "get_me: staff role lookup failed");
+                StaffRoleSet::new().as_strings()
+            }
+        },
+        None => StaffRoleSet::new().as_strings(),
+    };
+
     (
         StatusCode::OK,
         Json(MeResponse {
@@ -593,6 +617,7 @@ pub async fn get_me<U: UserStore>(
             pending_email: user.pending_email,
             rsi_verified: user.rsi_verified_at.is_some(),
             totp_enabled: user.totp_enabled_at.is_some(),
+            staff_roles: roles,
         }),
     )
         .into_response()
@@ -1104,6 +1129,8 @@ mod tests {
     use crate::auth::test_support::fresh_pair;
     use crate::auth::{AuthVerifier, TokenIssuer};
     use crate::mail::NoopMailer;
+    use crate::staff_roles::test_support::MemoryStaffRoleStore;
+    use crate::staff_roles::StaffRole;
     use crate::users::test_support::MemoryUserStore;
     use axum::body::to_bytes;
     use axum::http::Request;
@@ -1119,6 +1146,8 @@ mod tests {
         let issuer_arc = Arc::new(issuer);
         let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);
         let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let staff_roles_mem = Arc::new(MemoryStaffRoleStore::default());
+        let staff_roles_dyn: Arc<dyn StaffRoleStore> = staff_roles_mem.clone();
         let app = Router::new()
             .route("/v1/auth/signup", post(signup::<MemoryUserStore>))
             .route("/v1/auth/login", post(login::<MemoryUserStore>))
@@ -1129,6 +1158,7 @@ mod tests {
             .layer(Extension(issuer_arc))
             .layer(Extension(mailer))
             .layer(Extension(audit))
+            .layer(Extension(staff_roles_dyn))
             .with_state(users);
         (app, verifier)
     }
@@ -1139,13 +1169,20 @@ mod tests {
     /// on the recorded actions.
     fn account_router(
         users: Arc<MemoryUserStore>,
-    ) -> (Router, Arc<TokenIssuer>, Arc<MemoryAuditLog>) {
+    ) -> (
+        Router,
+        Arc<TokenIssuer>,
+        Arc<MemoryAuditLog>,
+        Arc<MemoryStaffRoleStore>,
+    ) {
         let (issuer, verifier) = fresh_pair();
         let issuer_arc = Arc::new(issuer);
         let verifier_arc = Arc::new(verifier);
         let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);
         let audit_mem = Arc::new(MemoryAuditLog::default());
         let audit_dyn: Arc<dyn AuditLog> = audit_mem.clone();
+        let staff_roles_mem = Arc::new(MemoryStaffRoleStore::default());
+        let staff_roles_dyn: Arc<dyn StaffRoleStore> = staff_roles_mem.clone();
 
         let app = Router::new()
             .route(
@@ -1164,9 +1201,10 @@ mod tests {
             .layer(Extension(verifier_arc))
             .layer(Extension(mailer))
             .layer(Extension(audit_dyn))
+            .layer(Extension(staff_roles_dyn))
             .with_state(users);
 
-        (app, issuer_arc, audit_mem)
+        (app, issuer_arc, audit_mem, staff_roles_mem)
     }
 
     /// Mint a user JWT for `user` so tests can hit the protected
@@ -1468,7 +1506,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, audit) = account_router(users.clone());
+        let (app, issuer, audit, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let body = serde_json::json!({
@@ -1508,7 +1546,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, audit) = account_router(users.clone());
+        let (app, issuer, audit, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let body = serde_json::json!({
@@ -1543,7 +1581,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, _) = account_router(users.clone());
+        let (app, issuer, _, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let body = serde_json::json!({
@@ -1567,7 +1605,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, audit) = account_router(users.clone());
+        let (app, issuer, audit, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let (status, bytes) = request_with_bearer::<serde_json::Value>(
@@ -1605,7 +1643,7 @@ mod tests {
         .await;
         users.mark_email_verified(user.id).await.unwrap();
 
-        let (app, issuer, _) = account_router(users.clone());
+        let (app, issuer, _, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let (status, bytes) = request_with_bearer::<serde_json::Value>(
@@ -1652,7 +1690,7 @@ mod tests {
             .await
             .unwrap());
 
-        let (app, issuer, audit) = account_router(users.clone());
+        let (app, issuer, audit, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let body = serde_json::json!({ "confirm_handle": "thecodesaiyan" });
@@ -1698,7 +1736,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, audit) = account_router(users.clone());
+        let (app, issuer, audit, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         let body = serde_json::json!({ "confirm_handle": "WrongHandle" });
@@ -1726,7 +1764,7 @@ mod tests {
             "TheCodeSaiyan",
         )
         .await;
-        let (app, issuer, _) = account_router(users.clone());
+        let (app, issuer, _, _) = account_router(users.clone());
         let token = token_for(&issuer, &user);
 
         // Unverified — flag should be false.
@@ -1748,5 +1786,40 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let parsed: MeResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(parsed.email_verified);
+    }
+
+    #[tokio::test]
+    async fn get_me_returns_staff_roles_when_granted() {
+        let users = Arc::new(MemoryUserStore::new());
+        let user = seed_user(
+            users.as_ref(),
+            "daisy@example.com",
+            "supersecret-1234",
+            "TheCodeSaiyan",
+        )
+        .await;
+        let (app, issuer, _, staff_roles_mem) = account_router(users.clone());
+        let token = token_for(&issuer, &user);
+
+        // No grants — staff_roles should be empty.
+        let (status, bytes) =
+            request_with_bearer::<serde_json::Value>(&app, "GET", "/v1/auth/me", &token, None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: MeResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed.staff_roles.is_empty());
+
+        // Grant admin — staff_roles should now contain "admin".
+        staff_roles_mem
+            .grant(user.id, StaffRole::Admin, None, None)
+            .await
+            .unwrap();
+
+        let (status, bytes) =
+            request_with_bearer::<serde_json::Value>(&app, "GET", "/v1/auth/me", &token, None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: MeResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.staff_roles, vec!["admin".to_string()]);
     }
 }

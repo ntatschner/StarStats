@@ -20,6 +20,10 @@
 // the main bin's: utoipa's derive macros walk these modules to
 // emit the schema.
 
+#[path = "../admin_routes.rs"]
+mod admin_routes;
+#[path = "../admin_submission_routes.rs"]
+mod admin_submission_routes;
 #[path = "../api_error.rs"]
 mod api_error;
 #[path = "../audit.rs"]
@@ -98,6 +102,8 @@ mod rsi_verify_routes;
 mod sharing_routes;
 #[path = "../spicedb.rs"]
 mod spicedb;
+#[path = "../staff_roles.rs"]
+mod staff_roles;
 #[path = "../submission_routes.rs"]
 mod submission_routes;
 #[path = "../submissions.rs"]

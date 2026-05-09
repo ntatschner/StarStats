@@ -123,6 +123,31 @@ pub struct SubmissionFilter {
     pub mine_only: bool,
 }
 
+/// Filter for the moderator queue. Only "actionable" states surface here;
+/// `accepted`, `shipped`, `rejected`, and `withdrawn` are intentionally
+/// excluded -- moderators don't need to see them in their work queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminQueueFilter {
+    /// Only `status = 'review'`.
+    Review,
+    /// Only `status = 'flagged'`.
+    Flagged,
+    /// Both `review` and `flagged` (NOT accepted/shipped/rejected/withdrawn).
+    All,
+}
+
+/// Outcome of an admin lifecycle transition. `was_changed=false` is
+/// returned for idempotent no-ops (e.g. accepting an already-accepted
+/// submission); the route layer uses that flag to skip writing an
+/// audit row when the state didn't actually move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionTransition {
+    pub id: Uuid,
+    pub previous_status: String,
+    pub new_status: String,
+    pub was_changed: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SubmissionError {
     #[error("submission not found")]
@@ -131,6 +156,8 @@ pub enum SubmissionError {
     Forbidden,
     #[error("submission can only be withdrawn while in review")]
     BadState,
+    #[error("illegal status transition from {from} to {to}")]
+    IllegalTransition { from: String, to: String },
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -188,6 +215,50 @@ pub trait SubmissionStore: Send + Sync + 'static {
         submission_id: Uuid,
         caller_id: Uuid,
     ) -> Result<Submission, SubmissionError>;
+
+    /// Moderator action: move `review`/`flagged` -> `accepted`. Idempotent:
+    /// accepting an already-accepted row returns
+    /// `was_changed=false` and no rows are touched. Anything outside
+    /// `{review, flagged, accepted}` returns `IllegalTransition`.
+    /// `moderator_id` is the staff user performing the action; stores
+    /// don't currently persist it themselves (the audit log carries the
+    /// actor), but the parameter is reserved for future moderator-id
+    /// columns.
+    async fn accept_submission(
+        &self,
+        submission_id: Uuid,
+        moderator_id: Uuid,
+    ) -> Result<SubmissionTransition, SubmissionError>;
+
+    /// Moderator action: move `review`/`flagged` -> `rejected`, storing
+    /// `reason` in `rejection_reason`. Idempotent: rejecting an
+    /// already-rejected row returns `was_changed=false` and never
+    /// rewrites the stored reason (treat differing reasons as a no-op).
+    async fn reject_submission(
+        &self,
+        submission_id: Uuid,
+        moderator_id: Uuid,
+        reason: &str,
+    ) -> Result<SubmissionTransition, SubmissionError>;
+
+    /// Moderator action: move `flagged` -> `review` so users can
+    /// re-vote / re-flag. Idempotent on `review` (returns
+    /// `was_changed=false`). Other states return `IllegalTransition`.
+    async fn dismiss_flag(
+        &self,
+        submission_id: Uuid,
+        moderator_id: Uuid,
+    ) -> Result<SubmissionTransition, SubmissionError>;
+
+    /// Paged list of moderator-actionable submissions. Mirrors `list`
+    /// but skips the per-viewer projection and applies the
+    /// admin-specific status filter (`review`/`flagged`/both).
+    async fn list_admin_queue(
+        &self,
+        filter: AdminQueueFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Submission>, SubmissionError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +507,208 @@ impl SubmissionStore for PostgresSubmissionStore {
             .map(|s| s.submission)
             .ok_or(SubmissionError::NotFound)
     }
+
+    async fn accept_submission(
+        &self,
+        submission_id: Uuid,
+        _moderator_id: Uuid,
+    ) -> Result<SubmissionTransition, SubmissionError> {
+        admin_transition(
+            &self.pool,
+            submission_id,
+            SubmissionStatus::Accepted,
+            None,
+            &[
+                SubmissionStatus::Review,
+                SubmissionStatus::Flagged,
+                SubmissionStatus::Accepted,
+            ],
+        )
+        .await
+    }
+
+    async fn reject_submission(
+        &self,
+        submission_id: Uuid,
+        _moderator_id: Uuid,
+        reason: &str,
+    ) -> Result<SubmissionTransition, SubmissionError> {
+        admin_transition(
+            &self.pool,
+            submission_id,
+            SubmissionStatus::Rejected,
+            Some(reason),
+            &[
+                SubmissionStatus::Review,
+                SubmissionStatus::Flagged,
+                SubmissionStatus::Rejected,
+            ],
+        )
+        .await
+    }
+
+    async fn dismiss_flag(
+        &self,
+        submission_id: Uuid,
+        _moderator_id: Uuid,
+    ) -> Result<SubmissionTransition, SubmissionError> {
+        admin_transition(
+            &self.pool,
+            submission_id,
+            SubmissionStatus::Review,
+            None,
+            &[SubmissionStatus::Flagged, SubmissionStatus::Review],
+        )
+        .await
+    }
+
+    async fn list_admin_queue(
+        &self,
+        filter: AdminQueueFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Submission>, SubmissionError> {
+        let statuses: &[&str] = match filter {
+            AdminQueueFilter::Review => &["review"],
+            AdminQueueFilter::Flagged => &["flagged"],
+            AdminQueueFilter::All => &["review", "flagged"],
+        };
+        // No viewer projection: the moderator queue is a moderator
+        // tool, not a personalised view. Reuse the materialised-count
+        // SELECT shape from `list_internal` for consistency.
+        let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "SELECT
+                s.id, s.submitter_id, u.preferred_username,
+                s.pattern, s.proposed_label, s.description,
+                s.sample_line, s.log_source, s.status, s.rejection_reason,
+                s.created_at, s.updated_at,
+                (SELECT COUNT(*) FROM submission_votes v WHERE v.submission_id = s.id)::BIGINT AS vote_count,
+                (SELECT COUNT(*) FROM submission_flags f WHERE f.submission_id = s.id)::BIGINT AS flag_count
+             FROM submissions s
+             JOIN users u ON u.id = s.submitter_id
+             WHERE s.status = ANY(",
+        );
+        let owned: Vec<String> = statuses.iter().map(|s| (*s).to_string()).collect();
+        qb.push_bind(owned);
+        qb.push(") ORDER BY s.updated_at DESC, s.id DESC LIMIT ");
+        qb.push_bind(limit);
+        qb.push(" OFFSET ");
+        qb.push_bind(offset);
+
+        let rows: Vec<(
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            i64,
+            i64,
+        )> = qb.build_query_as().fetch_all(&self.pool).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| Submission {
+                id: r.0,
+                submitter_id: r.1,
+                submitter_handle: r.2,
+                pattern: r.3,
+                proposed_label: r.4,
+                description: r.5,
+                sample_line: r.6,
+                log_source: r.7,
+                status: SubmissionStatus::parse(&r.8).unwrap_or(SubmissionStatus::Review),
+                rejection_reason: r.9,
+                created_at: r.10,
+                updated_at: r.11,
+                vote_count: r.12,
+                flag_count: r.13,
+            })
+            .collect())
+    }
+}
+
+/// Shared moderator-transition helper. `legal_priors` is the full set
+/// of states from which we accept this transition target -- including
+/// the target itself, so idempotent no-ops fall out naturally. Anything
+/// outside that set returns `IllegalTransition`.
+async fn admin_transition(
+    pool: &PgPool,
+    submission_id: Uuid,
+    target: SubmissionStatus,
+    reason: Option<&str>,
+    legal_priors: &[SubmissionStatus],
+) -> Result<SubmissionTransition, SubmissionError> {
+    let mut tx = pool.begin().await?;
+
+    // Lock the row so concurrent moderators can't both flip it. We
+    // need the prior status anyway for the response payload + audit.
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM submissions WHERE id = $1 FOR UPDATE")
+            .bind(submission_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let prior_str = row.ok_or(SubmissionError::NotFound)?.0;
+    let prior = SubmissionStatus::parse(&prior_str).ok_or(SubmissionError::NotFound)?;
+
+    if !legal_priors.contains(&prior) {
+        return Err(SubmissionError::IllegalTransition {
+            from: prior.as_str().to_string(),
+            to: target.as_str().to_string(),
+        });
+    }
+
+    if prior == target {
+        // Idempotent no-op: don't UPDATE, don't bump updated_at, don't
+        // overwrite stored rejection_reason.
+        tx.commit().await?;
+        return Ok(SubmissionTransition {
+            id: submission_id,
+            previous_status: prior.as_str().to_string(),
+            new_status: target.as_str().to_string(),
+            was_changed: false,
+        });
+    }
+
+    // Real transition. For reject we also persist the reason; for
+    // accept/dismiss the column stays as-is (we deliberately don't
+    // wipe a prior reason in case a row cycled through rejected once).
+    if reason.is_some() {
+        sqlx::query(
+            "UPDATE submissions
+             SET status = $2, rejection_reason = $3, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(submission_id)
+        .bind(target.as_str())
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE submissions
+             SET status = $2, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(submission_id)
+        .bind(target.as_str())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(SubmissionTransition {
+        id: submission_id,
+        previous_status: prior.as_str().to_string(),
+        new_status: target.as_str().to_string(),
+        was_changed: true,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -809,6 +1082,144 @@ pub mod test_support {
             sub.updated_at = Utc::now();
             Ok(sub.clone())
         }
+
+        async fn accept_submission(
+            &self,
+            submission_id: Uuid,
+            _moderator_id: Uuid,
+        ) -> Result<SubmissionTransition, SubmissionError> {
+            mem_transition(
+                self,
+                submission_id,
+                SubmissionStatus::Accepted,
+                None,
+                &[
+                    SubmissionStatus::Review,
+                    SubmissionStatus::Flagged,
+                    SubmissionStatus::Accepted,
+                ],
+            )
+        }
+
+        async fn reject_submission(
+            &self,
+            submission_id: Uuid,
+            _moderator_id: Uuid,
+            reason: &str,
+        ) -> Result<SubmissionTransition, SubmissionError> {
+            mem_transition(
+                self,
+                submission_id,
+                SubmissionStatus::Rejected,
+                Some(reason),
+                &[
+                    SubmissionStatus::Review,
+                    SubmissionStatus::Flagged,
+                    SubmissionStatus::Rejected,
+                ],
+            )
+        }
+
+        async fn dismiss_flag(
+            &self,
+            submission_id: Uuid,
+            _moderator_id: Uuid,
+        ) -> Result<SubmissionTransition, SubmissionError> {
+            mem_transition(
+                self,
+                submission_id,
+                SubmissionStatus::Review,
+                None,
+                &[SubmissionStatus::Flagged, SubmissionStatus::Review],
+            )
+        }
+
+        async fn list_admin_queue(
+            &self,
+            filter: AdminQueueFilter,
+            limit: i64,
+            offset: i64,
+        ) -> Result<Vec<Submission>, SubmissionError> {
+            let state = self.state.lock().expect("submissions memstore poisoned");
+            let want = |s: SubmissionStatus| match filter {
+                AdminQueueFilter::Review => s == SubmissionStatus::Review,
+                AdminQueueFilter::Flagged => s == SubmissionStatus::Flagged,
+                AdminQueueFilter::All => {
+                    s == SubmissionStatus::Review || s == SubmissionStatus::Flagged
+                }
+            };
+            let mut rows: Vec<Submission> = state
+                .submissions
+                .iter()
+                .filter(|s| want(s.status))
+                .map(|s| {
+                    let vote_count =
+                        state.votes.iter().filter(|(sid, _)| *sid == s.id).count() as i64;
+                    let flag_count = state
+                        .flags
+                        .iter()
+                        .filter(|(sid, _, _)| *sid == s.id)
+                        .count() as i64;
+                    Submission {
+                        vote_count,
+                        flag_count,
+                        ..s.clone()
+                    }
+                })
+                .collect();
+            rows.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then_with(|| b.id.cmp(&a.id))
+            });
+            let start = offset.max(0) as usize;
+            let take = limit.max(0) as usize;
+            Ok(rows.into_iter().skip(start).take(take).collect())
+        }
+    }
+
+    /// In-memory mirror of the Postgres `admin_transition` helper. Same
+    /// idempotent / illegal-transition semantics so route tests that
+    /// drive the memory store reproduce the production behaviour.
+    fn mem_transition(
+        store: &MemorySubmissionStore,
+        submission_id: Uuid,
+        target: SubmissionStatus,
+        reason: Option<&str>,
+        legal_priors: &[SubmissionStatus],
+    ) -> Result<SubmissionTransition, SubmissionError> {
+        let mut state = store.state.lock().expect("submissions memstore poisoned");
+        let sub = state
+            .submissions
+            .iter_mut()
+            .find(|s| s.id == submission_id)
+            .ok_or(SubmissionError::NotFound)?;
+        let prior = sub.status;
+        if !legal_priors.contains(&prior) {
+            return Err(SubmissionError::IllegalTransition {
+                from: prior.as_str().to_string(),
+                to: target.as_str().to_string(),
+            });
+        }
+        if prior == target {
+            return Ok(SubmissionTransition {
+                id: submission_id,
+                previous_status: prior.as_str().to_string(),
+                new_status: target.as_str().to_string(),
+                was_changed: false,
+            });
+        }
+        sub.status = target;
+        sub.updated_at = Utc::now();
+        if let Some(r) = reason {
+            sub.rejection_reason = Some(r.to_string());
+        }
+        Ok(SubmissionTransition {
+            id: submission_id,
+            previous_status: prior.as_str().to_string(),
+            new_status: target.as_str().to_string(),
+            was_changed: true,
+        })
     }
 }
 
