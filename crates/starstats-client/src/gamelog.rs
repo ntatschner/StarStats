@@ -10,12 +10,17 @@
 //! Truncation handling: at game launch the file is rotated. We detect
 //! this by `metadata.len() < offset` and reset to `0`.
 
+use crate::burst_rules::builtin_burst_rules;
 use crate::parser_defs::RuleCache;
 use crate::storage::Storage;
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use starstats_core::{apply_remote_rules, classify, structural_parse, GameEvent};
+use starstats_core::templates::{detect_bursts, BurstRule};
+use starstats_core::{
+    apply_remote_rules, classify, structural_parse, BurstSummary, GameEvent, LogLine,
+};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,6 +156,17 @@ async fn drain(
     let log_source = log_source_from_path(path);
 
     let rules_snapshot = rules.snapshot();
+    let burst_rules = builtin_burst_rules();
+
+    // Accumulate this drain's complete lines into a buffer so the
+    // burst matcher can see the run as a unit. Per-line ingest can't
+    // detect a burst because the first AttachmentReceived is already
+    // committed to storage by the time the second one arrives;
+    // batching at drain boundaries solves that without needing a
+    // cross-drain rolling buffer (live tails fire on every filesystem
+    // notify, so a burst that lands in one fsync arrives in one
+    // drain in practice).
+    let mut buffered_lines: Vec<(String, u64)> = Vec::new();
     loop {
         let line_start = *offset;
         buf.clear();
@@ -164,24 +180,142 @@ async fn drain(
         }
         *offset += n as u64;
 
-        process_line(
-            buf.trim_end_matches(['\r', '\n']),
+        let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+        buffered_lines.push((trimmed, line_start));
+    }
+
+    if !buffered_lines.is_empty() {
+        process_buffer(
+            &buffered_lines,
             storage,
             stats,
             &log_source,
-            line_start,
             &rules_snapshot,
+            &burst_rules,
         );
-
-        {
-            let mut s = stats.lock();
-            s.bytes_read = *offset;
-            s.lines_processed += 1;
-        }
+        let mut s = stats.lock();
+        s.bytes_read = *offset;
+        s.lines_processed += buffered_lines.len() as u64;
     }
 
     storage.write_cursor(path_str, *offset)?;
     Ok(())
+}
+
+/// Process a batch of lines from one drain. Three passes:
+///   1. Structural-parse every line into a `LogLine` (or `None`).
+///   2. Run [`detect_bursts`] over the parseable subset and translate
+///      member indices back to buffer positions; insert one
+///      [`BurstSummary`] per hit.
+///   3. Per-line classify+ingest for every line that wasn't claimed
+///      by a burst.
+///
+/// Bursts dedupe against re-drains via an offset-based idempotency
+/// key (the anchor line offset + the rule id + size), so a tray
+/// crash mid-flush re-emits the same summary on retry rather than
+/// producing duplicates.
+fn process_buffer(
+    buffer: &[(String, u64)],
+    storage: &Storage,
+    stats: &parking_lot::Mutex<TailStats>,
+    log_source: &str,
+    remote_rules: &[starstats_core::CompiledRemoteRule],
+    burst_rules: &[BurstRule],
+) {
+    // Pass 1: parse every line. The Vec<Option<LogLine>> preserves
+    // index alignment with `buffer` so we can map burst indices back
+    // to buffer positions in pass 2.
+    let parsed: Vec<Option<LogLine<'_>>> = buffer
+        .iter()
+        .map(|(line, _)| structural_parse(line))
+        .collect();
+
+    // Project to the parseable subset (with their original buffer
+    // indices) so the matcher sees a contiguous slice of LogLines.
+    let valid: Vec<(usize, LogLine<'_>)> = parsed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.as_ref().map(|line| (i, line.clone())))
+        .collect();
+    let valid_lines: Vec<LogLine<'_>> = valid.iter().map(|(_, l)| l.clone()).collect();
+
+    // Pass 2: burst detection. Indices are into `valid_lines`.
+    let bursts = detect_bursts(&valid_lines, burst_rules);
+
+    // Map burst-member indices back to original buffer indices for
+    // suppression in pass 3.
+    let mut suppressed: HashSet<usize> = HashSet::new();
+    for burst in &bursts {
+        for &valid_idx in &burst.member_indices {
+            suppressed.insert(valid[valid_idx].0);
+        }
+    }
+
+    // Pass 2b: emit one BurstSummary per burst.
+    for burst in &bursts {
+        let anchor_buf_idx = valid[burst.start_index].0;
+        let end_buf_idx = valid[burst.end_index].0;
+        let anchor_log = &valid_lines[burst.start_index];
+        let end_log = &valid_lines[burst.end_index];
+        let anchor_line = &buffer[anchor_buf_idx].0;
+        let anchor_offset = buffer[anchor_buf_idx].1;
+        // The anchor body can be huge (full inventory dump); cap
+        // before storing so the timeline doesn't carry kilobytes per
+        // burst summary.
+        let sample: String = anchor_log.body.chars().take(200).collect();
+        let summary = GameEvent::BurstSummary(BurstSummary {
+            timestamp: anchor_log.timestamp.to_string(),
+            rule_id: burst.rule_id.clone(),
+            size: burst.size as u32,
+            end_timestamp: end_log.timestamp.to_string(),
+            anchor_body_sample: if sample.is_empty() {
+                None
+            } else {
+                Some(sample)
+            },
+        });
+
+        let Some((event_type, ts, payload)) = serialise_event(&summary) else {
+            tracing::warn!(rule = %burst.rule_id, "burst summary failed to serialise");
+            continue;
+        };
+        // Synthetic key: anchor offset + rule id + size. Same
+        // (offset, rule, size) on retry produces the same key, so
+        // re-drains after a crash dedupe via the UNIQUE constraint.
+        // Anchor offset alone isn't enough — two rules could both
+        // anchor on the same offset (rare; first-rule-wins handles
+        // most cases, but the key is defensive).
+        let synthetic_line = format!("{anchor_line}|burst:{}:{}", burst.rule_id, burst.size);
+        let key = idempotency_key(log_source, anchor_offset, &synthetic_line);
+        // Idempotency already covers retries; if the insert fails for
+        // another reason, log and continue — better one missing summary
+        // than no events at all.
+        if let Err(e) = storage.insert_event(
+            &key,
+            &event_type,
+            &ts,
+            anchor_line,
+            &payload,
+            log_source,
+            anchor_offset,
+        ) {
+            tracing::warn!(error = %e, rule = %burst.rule_id, "insert burst summary failed");
+            continue;
+        }
+        let _ = end_buf_idx; // captured for future end-marker rendering
+        let mut s = stats.lock();
+        s.events_recognised += 1;
+        s.last_event_type = Some(event_type);
+        s.last_event_at = Some(ts);
+    }
+
+    // Pass 3: per-line ingest for everything not consumed by a burst.
+    for (i, (line, line_offset)) in buffer.iter().enumerate() {
+        if suppressed.contains(&i) {
+            continue;
+        }
+        process_line(line, storage, stats, log_source, *line_offset, remote_rules);
+    }
 }
 
 fn process_line(

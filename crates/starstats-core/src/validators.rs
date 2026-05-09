@@ -49,6 +49,7 @@ pub fn validate_event(event: &GameEvent) -> Result<(), ValidationError> {
         GameEvent::CommoditySellRequest(e) => &e.timestamp,
         GameEvent::SessionEnd(e) => &e.timestamp,
         GameEvent::RemoteMatch(e) => &e.timestamp,
+        GameEvent::BurstSummary(e) => &e.timestamp,
     };
     check_timestamp(ts)?;
 
@@ -78,6 +79,19 @@ pub fn validate_event(event: &GameEvent) -> Result<(), ValidationError> {
             if e.vehicle_class.is_empty() {
                 return Err(ValidationError::EmptyField("vehicle_class"));
             }
+        }
+        GameEvent::BurstSummary(e) => {
+            // Rule id is the join key consumers will key off — empty
+            // would break per-rule timeline aggregation. Size = 0
+            // means the producer emitted a phantom summary; reject so
+            // bad client logic doesn't silently corrupt the timeline.
+            if e.rule_id.is_empty() {
+                return Err(ValidationError::EmptyField("rule_id"));
+            }
+            if e.size == 0 {
+                return Err(ValidationError::EmptyField("size"));
+            }
+            check_timestamp(&e.end_timestamp)?;
         }
         _ => {}
     }
