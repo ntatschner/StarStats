@@ -6,6 +6,7 @@ import {
   getCurrentLocation,
   getMyHangar,
   getMyProfile,
+  getMyRsiOrgs,
   getSummary,
   getTimeline,
   getVehicleReferences,
@@ -14,6 +15,7 @@ import {
   type HangarSnapshot,
   type ProfileResponse,
   type ResolvedLocation,
+  type RsiOrgsSnapshot,
   type SummaryResponse,
   type TimelineResponse,
   type VehicleListResponse,
@@ -24,6 +26,7 @@ import { getSession } from '@/lib/session';
 import { LocationPill } from '@/components/LocationPill';
 import { DayHeatmap } from '@/components/DayHeatmap';
 import { HangarCard } from '@/components/HangarCard';
+import { OrgsCard } from '@/components/OrgsCard';
 import { ProfileCard } from '@/components/ProfileCard';
 
 const PAGE_LIMIT = 50;
@@ -124,6 +127,18 @@ export default async function DashboardPage(props: {
     logger.warn({ err: e }, 'load hangar snapshot failed');
   }
 
+  // RSI org memberships — server-scraped, refreshed manually from
+  // /settings#rsi. Same null-on-404 pattern as hangar.
+  let rsiOrgs: RsiOrgsSnapshot | null = null;
+  try {
+    rsiOrgs = await getMyRsiOrgs(session.token);
+  } catch (e) {
+    if (e instanceof ApiCallError && e.status === 401) {
+      redirect('/auth/login?next=/dashboard');
+    }
+    logger.warn({ err: e }, 'load rsi orgs snapshot failed');
+  }
+
   // Vehicle reference catalogue. Fetched separately from the primary
   // dashboard data so that a reference-API outage (or rate-limit hit)
   // degrades gracefully — the timeline simply renders raw class names
@@ -222,6 +237,8 @@ export default async function DashboardPage(props: {
       <ProfileCard profile={profile} showSettingsLink />
 
       <HangarCard snapshot={hangar} />
+
+      <OrgsCard snapshot={rsiOrgs} showSettingsLink />
 
       {summary.total === 0 ? (
         <section className="ss-card" style={{ padding: '40px 24px' }}>

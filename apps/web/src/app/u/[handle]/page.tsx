@@ -20,15 +20,18 @@ import {
   getFriendSummary,
   getFriendTimeline,
   getPublicProfile,
+  getPublicRsiOrgs,
   getPublicSummary,
   getPublicTimeline,
   type ProfileResponse,
   type PublicSummaryResponse,
   type PublicTimelineResponse,
+  type RsiOrgsSnapshot,
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { DayHeatmap } from '@/components/DayHeatmap';
+import { OrgsCard } from '@/components/OrgsCard';
 import { ProfileCard } from '@/components/ProfileCard';
 
 interface PageProps {
@@ -158,6 +161,17 @@ export default async function PublicProfilePage(props: PageProps) {
     }
   }
 
+  // RSI org memberships — only the public endpoint is exposed for
+  // strangers; there's no friend-scoped variant (sharing settings
+  // gate the public route too). `getPublicRsiOrgs` already converts
+  // 404/403 to null, so we just degrade quietly on any other error.
+  let rsiOrgs: RsiOrgsSnapshot | null = null;
+  try {
+    rsiOrgs = await getPublicRsiOrgs(handle);
+  } catch (e) {
+    logger.warn({ err: e }, 'public rsi orgs fetch failed');
+  }
+
   return (
     <div
       className="ss-screen-enter"
@@ -238,6 +252,8 @@ export default async function PublicProfilePage(props: PageProps) {
       </div>
 
       {profile && <ProfileCard profile={profile} />}
+
+      {rsiOrgs && <OrgsCard snapshot={rsiOrgs} />}
 
       {timeline && (
         <section className="ss-card">
