@@ -44,6 +44,34 @@ const KIND_META: Record<LogKind, { label: string; tone: string }> = {
   launcher_log: { label: 'LNCH', tone: 'var(--fg-muted)' },
 };
 
+/// Display order for the "Discovered logs" kind breakdown chips.
+/// Mirrors the declaration order of KIND_META so a freshly-added kind
+/// also picks up a chip slot without code changes elsewhere — but
+/// keeping the explicit array means the order is intentional, not
+/// accidentally object-key-iteration-dependent.
+const KIND_ORDER: LogKind[] = [
+  'channel_live',
+  'channel_archived',
+  'crash_report',
+  'launcher_log',
+];
+
+/// Group discovered logs by `kind` and return one row per non-empty
+/// bucket. Used by the Discovered logs card to render a compact
+/// breakdown chip row instead of a per-file list.
+function kindBreakdown(
+  logs: ReadonlyArray<{ kind: LogKind }>
+): Array<{ kind: LogKind; count: number }> {
+  const counts = new Map<LogKind, number>();
+  for (const log of logs) {
+    counts.set(log.kind, (counts.get(log.kind) ?? 0) + 1);
+  }
+  return KIND_ORDER.flatMap((kind) => {
+    const count = counts.get(kind);
+    return count ? [{ kind, count }] : [];
+  });
+}
+
 interface Props {
   status: StatusResponse;
   /// Web UI origin used by the email-verification banner link.
@@ -668,84 +696,42 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
             No Game.log files discovered.
           </p>
         ) : (
-          <ul
-            style={{
-              listStyle: 'none',
-              margin: 0,
-              padding: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 4,
-            }}
-          >
-            {discovered_logs.map((l) => {
-              const meta = KIND_META[l.kind];
-              return (
-                <li
-                  key={l.path}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'auto auto 1fr auto',
-                    gap: 8,
-                    alignItems: 'center',
-                    fontSize: 12,
-                    padding: '4px 0',
-                  }}
-                >
+          <>
+            <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
+              All {discovered_logs.length} discovered{' '}
+              {discovered_logs.length === 1 ? 'log is' : 'logs are'} being read;
+              events from each are included in the tray pipeline.
+            </p>
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                marginTop: 8,
+              }}
+            >
+              {kindBreakdown(discovered_logs).map(({ kind, count }) => {
+                const meta = KIND_META[kind];
+                return (
                   <span
-                    style={{
-                      background:
-                        l.channel === 'LIVE' ? 'var(--ok)' : 'var(--info)',
-                      color: 'var(--bg)',
-                      fontSize: 10,
-                      fontWeight: 700,
-                      padding: '1px 6px',
-                      borderRadius: 'var(--r-xs)',
-                      letterSpacing: '0.06em',
-                    }}
-                  >
-                    {l.channel}
-                  </span>
-                  <span
-                    title={l.kind}
+                    key={kind}
+                    title={kind}
                     style={{
                       background: meta.tone,
                       color: 'var(--bg)',
-                      fontSize: 9,
+                      fontSize: 10,
                       fontWeight: 700,
-                      padding: '1px 5px',
+                      padding: '2px 6px',
                       borderRadius: 'var(--r-xs)',
                       letterSpacing: '0.06em',
                     }}
                   >
-                    {meta.label}
+                    {count} {meta.label}
                   </span>
-                  <code
-                    style={{
-                      color: 'var(--fg)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 11,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title={l.path}
-                  >
-                    {l.path}
-                  </code>
-                  <span
-                    style={{
-                      color: 'var(--fg-muted)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 11,
-                    }}
-                  >
-                    {fmtBytes(l.size_bytes)}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+                );
+              })}
+            </div>
+          </>
         )}
       </TrayCard>
 
