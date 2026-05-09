@@ -23,6 +23,7 @@ use crate::reference_store::ReferenceStore;
 use crate::repo::PostgresStore;
 use crate::rsi_org_store::PostgresRsiOrgStore;
 use crate::spicedb::SpicedbClient;
+use crate::staff_roles::{PostgresStaffRoleStore, StaffRoleStore};
 use crate::telemetry::{init_telemetry, TelemetryHandles};
 use crate::users::PostgresUserStore;
 use axum::{
@@ -35,6 +36,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod admin_routes;
+mod admin_submission_routes;
 mod api_error;
 mod audit;
 mod audit_mirror;
@@ -75,6 +78,7 @@ mod rsi_verify;
 mod rsi_verify_routes;
 mod sharing_routes;
 mod spicedb;
+mod staff_roles;
 mod submission_routes;
 mod submissions;
 mod supporter_routes;
@@ -180,12 +184,41 @@ async fn main() -> anyhow::Result<()> {
     let submissions_store = Arc::new(submissions::PostgresSubmissionStore::new(pool.clone()));
     let supporter_store = Arc::new(supporters::PostgresSupporterStore::new(pool.clone()));
     let orders_store = Arc::new(orders::PostgresOrderStore::new(pool.clone()));
+    // Site-wide staff role store. Read by `get_me` (to surface roles
+    // in MeResponse) and by the admin extractors that gate /v1/admin/*.
+    // Constructed BEFORE the audit log because the audit constructor
+    // moves `pool`.
+    let staff_roles_store: Arc<PostgresStaffRoleStore> =
+        Arc::new(PostgresStaffRoleStore::new(pool.clone()));
 
     // Build the audit log with the optional mirror. `with_mirror(None)`
     // is the no-mirror path; `Some(...)` wires best-effort PUTs.
     let mirror_for_audit: Option<Arc<MinioMirror>> = minio_mirror.as_ref().clone().map(Arc::new);
     let audit: Arc<dyn AuditLog> =
         Arc::new(PostgresAuditLog::new(pool).with_mirror(mirror_for_audit));
+
+    // Type-erased handle for the StaffRoleStore extension. The admin
+    // extractors look up `Arc<dyn StaffRoleStore>` from request
+    // extensions; `get_me` does the same. The concrete `staff_roles_store`
+    // (constructed earlier) stays alongside for the bootstrap call below
+    // because the function takes `&S: StaffRoleStore` directly.
+    let staff_roles_dyn: Arc<dyn StaffRoleStore> = staff_roles_store.clone();
+
+    // Idempotently grant `admin` to every handle in
+    // STARSTATS_BOOTSTRAP_ADMIN_HANDLES (comma-separated). Failures
+    // inside the bootstrap (handle not found, audit-log write fail)
+    // are logged and DO NOT abort startup -- a typo in the env var
+    // shouldn't keep the server down.
+    if let Err(e) = staff_roles::bootstrap_admins_from_env(
+        users.as_ref(),
+        staff_roles_store.as_ref(),
+        audit.as_ref(),
+        "STARSTATS_BOOTSTRAP_ADMIN_HANDLES",
+    )
+    .await
+    {
+        tracing::error!(error = ?e, "staff_roles bootstrap returned an error");
+    }
 
     // Mail transport — Lettre when SMTP_URL is set, NoopMailer when
     // it isn't. `build_mailer` logs which path it took. The handler
@@ -256,7 +289,14 @@ async fn main() -> anyhow::Result<()> {
     let totp_router = totp_routes::routes(users.clone(), recovery_store);
     let org_router = org_routes::routes(orgs, users);
     let reference_router = reference_routes::routes(reference_store.clone());
-    let submission_router = submission_routes::routes(submissions_store);
+    let submission_router = submission_routes::routes(submissions_store.clone());
+    // Admin sub-routers — gated by RequireAdmin / RequireModerator
+    // extractors which read `Arc<dyn StaffRoleStore>` from request
+    // extensions (layered onto the outer `app` below). admin_routes
+    // exposes the extractors + a parameterless skeleton; the submission
+    // moderation routes mount under it.
+    let admin_router =
+        admin_routes::router().merge(admin_submission_routes::router(submissions_store));
     let supporter_router = supporter_routes::routes(supporter_store.clone());
     let donate_state =
         revolut_routes::build_state(orders_store, supporter_store, cfg.revolut.as_ref());
@@ -346,6 +386,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(reference_router)
         .merge(parser_def_routes::routes())
         .merge(submission_router)
+        .merge(admin_router)
         .merge(supporter_router)
         .merge(donate_router)
         // OpenAPI spec at /openapi.json — purely additive, no auth.
@@ -354,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(issuer))
         .layer(Extension(audit))
         .layer(Extension(device_store_dyn))
+        .layer(Extension(staff_roles_dyn))
         .layer(Extension(jwks_doc))
         .layer(Extension(discovery_cfg))
         .layer(Extension(prometheus))

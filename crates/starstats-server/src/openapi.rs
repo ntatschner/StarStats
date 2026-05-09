@@ -11,6 +11,7 @@
 //! to fetch live; the same spec is dumped to stdout by the
 //! `starstats-server-openapi` bin for offline TS codegen.
 
+use crate::admin_submission_routes;
 use crate::api_error;
 use crate::auth_routes;
 use crate::device_routes;
@@ -153,6 +154,10 @@ impl Modify for SecurityAddon {
         submission_routes::vote,
         submission_routes::flag,
         submission_routes::withdraw,
+        admin_submission_routes::accept,
+        admin_submission_routes::reject,
+        admin_submission_routes::dismiss_flag,
+        admin_submission_routes::queue,
         supporter_routes::get_me,
         revolut_routes::list_tiers,
         revolut_routes::checkout,
@@ -207,6 +212,10 @@ impl Modify for SecurityAddon {
         submission_routes::FlagRequest,
         submission_routes::FlagResponse,
         submission_routes::WithdrawResponse,
+        // Admin submission moderation
+        admin_submission_routes::SubmissionTransitionResponse,
+        admin_submission_routes::RejectRequest,
+        admin_submission_routes::AdminQueueResponse,
         // Supporter (donate) status
         supporter_routes::SupporterStatusDto,
         // Donate / Revolut
@@ -324,6 +333,7 @@ impl Modify for SecurityAddon {
         (name = "reference", description = "Star Citizen vehicle/item reference data (community-API-sourced)"),
         (name = "supporter", description = "Donate-status surface (read-only)"),
         (name = "donate", description = "Revolut hosted-checkout donate flow"),
+        (name = "admin", description = "Site-wide staff endpoints (moderator/admin role required)"),
     )
 )]
 pub struct ApiDoc;

@@ -92,6 +92,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/submissions/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_submissions_queue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/submissions/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_submissions_accept"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/submissions/{id}/dismiss-flag": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_submissions_dismiss_flag"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/submissions/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_submissions_reject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/devices": {
         parameters: {
             query?: never;
@@ -1257,6 +1321,15 @@ export interface components {
         AddMemberResponse: {
             added: boolean;
         };
+        AdminQueueResponse: {
+            /**
+             * @description Whether the next page would have more rows. Computed by asking
+             *     the store for `limit + 1` and trimming -- cheaper than a
+             *     separate COUNT query.
+             */
+            has_more: boolean;
+            items: components["schemas"]["SubmissionDto"][];
+        };
         /**
          * @description The single error envelope shape emitted by every API endpoint.
          *
@@ -1629,6 +1702,14 @@ export interface components {
              */
             rsi_verified: boolean;
             /**
+             * @description Site-wide staff grants the user holds, sorted alphabetically.
+             *     Empty for normal users; populated for moderators / admins.
+             *     The web client mirrors this into the session cookie so /admin
+             *     gating doesn't need an extra round trip per page nav.
+             *     Older clients tolerate the field via `#[serde(default)]`.
+             */
+            staff_roles?: string[];
+            /**
              * @description `true` once the user has confirmed a TOTP secret. The settings
              *     page uses this to branch the 2FA wizard between the "enable"
              *     and "manage" states without an extra round trip.
@@ -1791,6 +1872,13 @@ export interface components {
         };
         RegenerateRecoveryResponse: {
             recovery_codes: string[];
+        };
+        RejectRequest: {
+            /**
+             * @description Free-text rationale for rejection. Capped at
+             *     [`REJECT_REASON_MAX_LEN`].
+             */
+            reason: string;
         };
         RemoveMemberResponse: {
             removed: boolean;
@@ -2021,6 +2109,16 @@ export interface components {
             viewer_voted: boolean;
             /** Format: int64 */
             vote_count: number;
+        };
+        SubmissionTransitionResponse: {
+            id: string;
+            new_status: string;
+            previous_status: string;
+            /**
+             * @description `false` for idempotent no-ops (already in the target state). The
+             *     UI uses this to suppress the "moved to X" toast on hammer clicks.
+             */
+            was_changed: boolean;
         };
         SummaryResponse: {
             by_type: components["schemas"]["TypeCount"][];
@@ -2350,6 +2448,230 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReadyResponseSchema"];
+                };
+            };
+        };
+    };
+    admin_submissions_queue: {
+        parameters: {
+            query?: {
+                /** @description `review` (default), `flagged`, or `all`. Case-insensitive. */
+                status?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Page of moderator-actionable submissions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminQueueResponse"];
+                };
+            };
+            /** @description Invalid filter */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Caller is not a moderator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    admin_submissions_accept: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Submission UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Submission accepted (or already accepted) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubmissionTransitionResponse"];
+                };
+            };
+            /** @description Invalid id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Caller is not a moderator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission is in a terminal state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    admin_submissions_dismiss_flag: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Submission UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Flag dismissed; submission returned to review */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubmissionTransitionResponse"];
+                };
+            };
+            /** @description Invalid id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Caller is not a moderator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission is in a terminal state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    admin_submissions_reject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Submission UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RejectRequest"];
+            };
+        };
+        responses: {
+            /** @description Submission rejected (or already rejected) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubmissionTransitionResponse"];
+                };
+            };
+            /** @description Invalid id or reason */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Caller is not a moderator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Submission is in a terminal state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
                 };
             };
         };
