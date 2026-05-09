@@ -1003,6 +1003,14 @@ pub struct PairOutcome {
 struct RedeemResponseBody {
     token: String,
     label: String,
+    /// Server-assigned UUID for this device pairing. Surfaced for
+    /// future self-revoke + diagnostic logging — the tray captures
+    /// it now (rather than ignoring the field) so we have it on
+    /// disk if a later slice adds an "unpair this device" button.
+    /// `#[allow(dead_code)]` until that slice lands; matches the
+    /// pattern used for `RequireAdmin.0` in starstats-server.
+    #[allow(dead_code)]
+    device_id: uuid::Uuid,
 }
 
 /// Redeem an 8-character pairing code against the API and persist
