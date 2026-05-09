@@ -30,6 +30,10 @@ use uuid::Uuid;
 pub struct RequireModerator(pub AuthenticatedUser);
 
 /// Bearer-token-authenticated user that holds the `admin` staff role.
+/// Field is `#[allow(dead_code)]` because no /v1/admin/* route currently
+/// reads it — the moderation queue uses RequireModerator. Slice 3+
+/// (user/device admin, audit log viewer, role grants) will read it.
+#[allow(dead_code)]
 pub struct RequireAdmin(pub AuthenticatedUser);
 
 /// Pre-rendered rejection covering both gates. Defined locally instead
@@ -85,14 +89,11 @@ impl IntoResponse for AdminAuthRejection {
 
 /// Shared core. Resolves the JWT, parses the sub, looks up the store,
 /// and returns the [`AuthenticatedUser`] iff `predicate` says yes.
-async fn extract_with_role<S>(
+async fn extract_with_role(
     parts: &mut Parts,
     role_label: &'static str,
     predicate: impl Fn(&crate::staff_roles::StaffRoleSet) -> bool,
-) -> Result<AuthenticatedUser, AdminAuthRejection>
-where
-    S: Send + Sync,
-{
+) -> Result<AuthenticatedUser, AdminAuthRejection> {
     // Step 1: delegate to the existing JWT extractor. This handles
     // bearer parsing, signature/claims validation, and device-token
     // revocation in one shot — the admin gate is purely additive.
@@ -141,7 +142,7 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let user = extract_with_role::<S>(parts, "moderator", |set| set.has(StaffRole::Moderator))
+        let user = extract_with_role(parts, "moderator", |set| set.has(StaffRole::Moderator))
             .await
             .map_err(IntoResponse::into_response)?;
         Ok(RequireModerator(user))
@@ -156,7 +157,7 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let user = extract_with_role::<S>(parts, "admin", |set| set.has(StaffRole::Admin))
+        let user = extract_with_role(parts, "admin", |set| set.has(StaffRole::Admin))
             .await
             .map_err(IntoResponse::into_response)?;
         Ok(RequireAdmin(user))
