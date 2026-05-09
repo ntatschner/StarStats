@@ -1519,6 +1519,11 @@ export interface components {
             /** Format: date-time */
             last_seen?: string | null;
         };
+        EventsListResponse: {
+            events: components["schemas"]["EventDto"][];
+            /** Format: int64 */
+            next_after?: number | null;
+        };
         FlagRequest: {
             /** @description Optional free-text reason. Capped at FLAG_REASON_MAX_LEN. */
             reason?: string | null;
@@ -4229,7 +4234,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ListResponse"];
+                    "application/json": components["schemas"]["EventsListResponse"];
                 };
             };
             /** @description Invalid filter or cursor combination */

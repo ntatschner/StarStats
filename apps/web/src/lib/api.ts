@@ -241,17 +241,16 @@ export type EventDto = Omit<
   payload: unknown;
 };
 
-// `ListEventsResponse` keeps its local name even though the generated
-// schema calls the same shape `ListResponse` — the local name reads
-// better at call sites. We re-type `events` to use the tightened
-// `EventDto` above and force `next_after` to be a required-nullable.
-export type ListEventsResponse = Omit<
-  apiSchema['schemas']['ListResponse'],
-  'events' | 'next_after'
-> & {
+// Local mirror of the server's `EventsListResponse` schema. We declare
+// it directly rather than aliasing the generated type so we can use
+// the locally-tightened `EventDto` (which types `payload: unknown`
+// rather than the schema's `Record<string, never>`) and pin
+// `next_after` as required-nullable — the server always emits the
+// field, with `null` when there's no next page.
+export interface ListEventsResponse {
   events: EventDto[];
   next_after: number | null;
-};
+}
 
 export async function getSummary(bearer: string): Promise<SummaryResponse> {
   return request<SummaryResponse>('GET', '/v1/me/summary', undefined, bearer);
