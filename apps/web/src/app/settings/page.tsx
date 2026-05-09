@@ -8,6 +8,7 @@ import {
   deleteAccount,
   emailChangeStart,
   getMe,
+  getMyHangar,
   getMyProfile,
   getPreferences,
   getVisibility,
@@ -21,6 +22,7 @@ import {
   setVisibility,
   shareWithOrg,
   unshareWithOrg,
+  type HangarSnapshot,
   type ListOrgsResponse,
   type ListSharesResponse,
   type MeResponse,
@@ -28,6 +30,7 @@ import {
   type RsiStartResponse,
   type VisibilityResponse,
 } from '@/lib/api';
+import { HangarCard } from '@/components/HangarCard';
 import { logger } from '@/lib/logger';
 import { clearSession, getSession } from '@/lib/session';
 import { getTheme, isTheme, setTheme, type Theme } from '@/lib/theme';
@@ -409,6 +412,23 @@ export default async function SettingsPage(props: {
         profileLoadFailed = true;
       }
     }
+  }
+
+  // Hangar snapshot — pushed by the tray client, not the website.
+  // Surfaced here so users can confirm the tray is talking to the
+  // server without launching the tray itself. `getMyHangar` already
+  // converts 404 ("no_hangar_yet") into a typed null, so the only
+  // surprise we have to catch is a 401 (session expired).
+  // Hangar sync is independent of RSI verification — pairing a
+  // device is sufficient.
+  let hangar: HangarSnapshot | null = null;
+  try {
+    hangar = await getMyHangar(session.token);
+  } catch (e) {
+    if (e instanceof ApiCallError && e.status === 401) {
+      redirect('/auth/login?next=/settings');
+    }
+    logger.warn({ err: e }, 'load hangar snapshot failed');
   }
 
   async function themeAction(formData: FormData) {
@@ -958,6 +978,11 @@ export default async function SettingsPage(props: {
           )}
         </div>
       </section>
+
+      {/* Hangar sync status (read-only). The tray writes; the web
+          shows the result so the user can confirm the link is alive
+          without leaving the browser. */}
+      <HangarCard snapshot={hangar} />
 
       {/* Sharing */}
       <section className="ss-card" id="sharing">

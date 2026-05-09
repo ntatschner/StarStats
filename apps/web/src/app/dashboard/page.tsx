@@ -4,12 +4,14 @@ import { redirect } from 'next/navigation';
 import {
   ApiCallError,
   getCurrentLocation,
+  getMyHangar,
   getMyProfile,
   getSummary,
   getTimeline,
   getVehicleReferences,
   listEvents,
   type EventDto,
+  type HangarSnapshot,
   type ProfileResponse,
   type ResolvedLocation,
   type SummaryResponse,
@@ -20,6 +22,7 @@ import { formatEventSummary } from '@/lib/event-summary';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { LocationPill } from '@/components/LocationPill';
+import { HangarCard } from '@/components/HangarCard';
 import { ProfileCard } from '@/components/ProfileCard';
 
 const PAGE_LIMIT = 50;
@@ -105,6 +108,19 @@ export default async function DashboardPage(props: {
     if (!(e instanceof ApiCallError) || e.status !== 404) {
       logger.warn({ err: e }, 'load my profile snapshot failed');
     }
+  }
+
+  // Hangar snapshot from the tray's most recent push. `getMyHangar`
+  // already converts the server's 404 ("no_hangar_yet") into a typed
+  // null, so the only thing left is the 401 redirect path.
+  let hangar: HangarSnapshot | null = null;
+  try {
+    hangar = await getMyHangar(session.token);
+  } catch (e) {
+    if (e instanceof ApiCallError && e.status === 401) {
+      redirect('/auth/login?next=/dashboard');
+    }
+    logger.warn({ err: e }, 'load hangar snapshot failed');
   }
 
   // Vehicle reference catalogue. Fetched separately from the primary
@@ -203,6 +219,8 @@ export default async function DashboardPage(props: {
       <LocationPill location={location} />
 
       <ProfileCard profile={profile} showSettingsLink />
+
+      <HangarCard snapshot={hangar} />
 
       {summary.total === 0 ? (
         <section className="ss-card" style={{ padding: '40px 24px' }}>
