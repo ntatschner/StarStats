@@ -9,6 +9,7 @@
 pub mod events;
 pub mod parser;
 pub mod parser_defs;
+pub mod templates;
 pub mod transactions;
 pub mod validators;
 pub mod wire;
