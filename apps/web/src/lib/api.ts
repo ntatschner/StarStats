@@ -426,6 +426,38 @@ export async function getMyProfile(bearer: string): Promise<ProfileResponse> {
   return request<ProfileResponse>('GET', '/v1/me/profile', undefined, bearer);
 }
 
+/// Hangar snapshot — what the tray client most recently scraped from
+/// the user's RSI website pledges page. The server stores the snapshot
+/// in `hangar_snapshots`; the tray pushes via POST /v1/me/hangar; nothing
+/// on the web actually wrote one here, but the dashboard + settings
+/// pages now read it back so the user can see "yes, the tray fed us
+/// 17 ships at 14:02" without launching the tray.
+export type HangarSnapshot = apiSchema['schemas']['HangarSnapshot'];
+export type HangarShip = apiSchema['schemas']['HangarShipSchema'];
+
+/// 404 from the server means "no snapshot yet" — the user either
+/// hasn't installed the tray, or hasn't paired it, or hasn't seeded
+/// their RSI cookie. We surface that as a typed `null` rather than
+/// asking every caller to try/catch a status code; matches the
+/// `getCurrentLocation` pattern at `app/dashboard/page.tsx:74-81`.
+export async function getMyHangar(
+  bearer: string,
+): Promise<HangarSnapshot | null> {
+  try {
+    return await request<HangarSnapshot>(
+      'GET',
+      '/v1/me/hangar',
+      undefined,
+      bearer,
+    );
+  } catch (e) {
+    if (e instanceof ApiCallError && e.status === 404) {
+      return null;
+    }
+    throw e;
+  }
+}
+
 export async function getPublicProfile(
   handle: string,
 ): Promise<ProfileResponse> {
