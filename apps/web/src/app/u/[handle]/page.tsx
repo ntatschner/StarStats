@@ -10,20 +10,25 @@
  *   3. Otherwise render a generic not-found message — never disclose
  *      whether the user exists.
  *
- * Scope: summary + top types only. The timeline chart lives behind a
- * separate slice.
+ * Scope: summary + top types + 30-day activity heatmap. The same
+ * dual-mode resolution (`public` vs `shared`) drives which `/timeline`
+ * endpoint we call.
  */
 
 import {
   ApiCallError,
   getFriendSummary,
+  getFriendTimeline,
   getPublicProfile,
   getPublicSummary,
+  getPublicTimeline,
   type ProfileResponse,
   type PublicSummaryResponse,
+  type PublicTimelineResponse,
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
+import { DayHeatmap } from '@/components/DayHeatmap';
 import { ProfileCard } from '@/components/ProfileCard';
 
 interface PageProps {
@@ -132,6 +137,27 @@ export default async function PublicProfilePage(props: PageProps) {
     }
   }
 
+  // 30-day activity heatmap. Mirrors the dual-mode resolution above:
+  // the public path uses the no-auth endpoint, the shared path uses
+  // the friend endpoint (which the server gates via SpiceDB shares).
+  // 404/403 collapse to "no timeline" — same defensive posture as the
+  // profile snapshot above.
+  let timeline: PublicTimelineResponse | null = null;
+  try {
+    if (view.kind === 'public') {
+      timeline = await getPublicTimeline(handle, 30);
+    } else {
+      const session = await getSession();
+      if (session) {
+        timeline = await getFriendTimeline(session.token, handle, 30);
+      }
+    }
+  } catch (e) {
+    if (!(e instanceof ApiCallError) || (e.status !== 404 && e.status !== 403)) {
+      logger.warn({ err: e }, 'public/friend timeline fetch failed');
+    }
+  }
+
   return (
     <div
       className="ss-screen-enter"
@@ -212,6 +238,29 @@ export default async function PublicProfilePage(props: PageProps) {
       </div>
 
       {profile && <ProfileCard profile={profile} />}
+
+      {timeline && (
+        <section className="ss-card">
+          <header style={{ padding: '20px 24px 0' }}>
+            <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
+              Activity
+            </div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: 17,
+                fontWeight: 600,
+                letterSpacing: '-0.01em',
+              }}
+            >
+              Last {timeline.days} days
+            </h2>
+          </header>
+          <div style={{ padding: '16px 24px 22px' }}>
+            <DayHeatmap timeline={timeline} />
+          </div>
+        </section>
+      )}
 
       <section className="ss-card">
         <header style={{ padding: '20px 24px 0' }}>
