@@ -1639,7 +1639,8 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<EventsListResponse>(app, "/v1/me/events?since=2026-04-15T00:00:00Z", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?since=2026-04-15T00:00:00Z", &token)
+                .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parsed.events.len(), 2);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
@@ -1659,7 +1660,8 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<EventsListResponse>(app, "/v1/me/events?until=2026-04-15T00:00:00Z", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?until=2026-04-15T00:00:00Z", &token)
+                .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parsed.events.len(), 2);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
