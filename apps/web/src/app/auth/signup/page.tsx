@@ -75,9 +75,11 @@ export default async function SignupPage(props: {
       // here is non-fatal — degrade to `false` so the verify banner
       // shows up.
       let emailVerified = false;
+      let staffRoles: string[] = [];
       try {
         const me = await getMe(auth.token);
         emailVerified = me.email_verified;
+        staffRoles = me.staff_roles ?? [];
       } catch (meErr) {
         logger.warn({ err: meErr }, 'getMe after signup failed; defaulting emailVerified=false');
       }
@@ -86,6 +88,7 @@ export default async function SignupPage(props: {
         userId: auth.user_id,
         claimedHandle: auth.claimed_handle,
         emailVerified,
+        staffRoles,
       });
       authAttemptsTotal.inc({ action: 'signup', outcome: 'success' });
       logger.info({ user_id: auth.user_id }, 'signup success');

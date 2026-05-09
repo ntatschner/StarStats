@@ -29,7 +29,10 @@ export default async function RootLayout({
             style={{ position: 'relative', zIndex: 1, minHeight: '100vh' }}
           >
             <TopBar handle={session.claimedHandle} />
-            <LeftRail handle={session.claimedHandle} />
+            <LeftRail
+              handle={session.claimedHandle}
+              staffRoles={session.staffRoles}
+            />
             <DrawerScrim />
             <div className="ss-main">
               {!session.emailVerified && (

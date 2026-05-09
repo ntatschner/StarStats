@@ -79,6 +79,10 @@ export async function loginAs(
     userId?: string;
     handle?: string;
     emailVerified?: boolean;
+    /// Site-wide staff grants. Empty by default — tests opt in to
+    /// admin / moderator routes by passing `['admin']` or
+    /// `['moderator']`. Mirrors `staffRoles` in the Session type.
+    staffRoles?: string[];
   } = {},
 ): Promise<void> {
   const value = JSON.stringify({
@@ -86,6 +90,7 @@ export async function loginAs(
     u: opts.userId ?? 'user_test',
     h: opts.handle ?? 'TestPilot',
     v: opts.emailVerified ?? true,
+    r: opts.staffRoles ?? [],
   });
   await page.context().addCookies([
     {

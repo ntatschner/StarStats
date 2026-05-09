@@ -18,14 +18,23 @@ interface NavSection {
 
 interface Props {
   handle: string | null;
+  /**
+   * Site-wide staff grants for the current user (e.g. `["moderator"]`,
+   * `["admin"]`). Mirrored from `/v1/auth/me` into the session cookie
+   * at sign-in. We only render the Admin link when the user holds at
+   * least one role; the actual /admin route enforces the same check
+   * server-side, so this is purely a UX gate.
+   */
+  staffRoles: string[];
 }
 
 const SETTINGS_2FA = '/settings/2fa';
 
-function buildNav(handle: string | null): NavSection[] {
+function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
   const profileHref = (
     handle ? `/u/${encodeURIComponent(handle)}` : '/settings'
   ) as Route;
+  const isStaff = staffRoles.length > 0;
   return [
     {
       title: 'Main',
@@ -88,6 +97,23 @@ function buildNav(handle: string | null): NavSection[] {
         { label: 'Two-factor', href: SETTINGS_2FA },
       ],
     },
+    // Staff section — only present when the user holds a moderator or
+    // admin grant. The Admin route runs its own server-side gate so
+    // this is purely a UX affordance.
+    ...(isStaff
+      ? [
+          {
+            title: 'Staff',
+            items: [
+              {
+                label: 'Admin',
+                href: '/admin' as Route,
+                match: (p: string) => p === '/admin' || p.startsWith('/admin/'),
+              },
+            ],
+          },
+        ]
+      : []),
   ];
 }
 
@@ -96,9 +122,9 @@ function isActive(item: NavItem, pathname: string): boolean {
   return pathname === item.href;
 }
 
-export function LeftRail({ handle }: Props) {
+export function LeftRail({ handle, staffRoles }: Props) {
   const pathname = usePathname() ?? '';
-  const sections = buildNav(handle);
+  const sections = buildNav(handle, staffRoles);
 
   // Mobile drawer leaks across soft-navigations: clicking a nav link
   // closes the rail visually but leaves `body[data-drawer="open"]` set,

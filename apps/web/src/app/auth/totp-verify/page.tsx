@@ -140,9 +140,11 @@ export default async function TotpVerifyPage(props: {
 
     // Hydrate emailVerified — same as the password-login success path.
     let emailVerified = false;
+    let staffRoles: string[] = [];
     try {
       const me = await getMe(auth.token);
       emailVerified = me.email_verified;
+      staffRoles = me.staff_roles ?? [];
     } catch (meErr) {
       logger.warn(
         { err: meErr },
@@ -154,6 +156,7 @@ export default async function TotpVerifyPage(props: {
       userId: auth.user_id,
       claimedHandle: auth.claimed_handle,
       emailVerified,
+      staffRoles,
     });
     authAttemptsTotal.inc({ action: 'totp_verify', outcome: 'success' });
     logger.info({ user_id: auth.user_id }, 'totp verify success');
