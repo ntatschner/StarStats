@@ -14,6 +14,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backfill;
+mod burst_rules;
 mod commands;
 mod config;
 mod crashes;

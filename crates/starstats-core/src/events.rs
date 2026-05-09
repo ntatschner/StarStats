@@ -40,6 +40,7 @@ pub enum GameEvent {
     CommoditySellRequest(CommoditySellRequest),
     SessionEnd(SessionEnd),
     RemoteMatch(RemoteMatch),
+    BurstSummary(BurstSummary),
 }
 
 /// `<Init> Process sc-client started` — anchors the start of a session.
@@ -516,4 +517,40 @@ pub struct RemoteMatch {
     pub rule_id: String,
     pub event_name: String,
     pub fields: std::collections::BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------------
+// Burst-collapse aggregate (see crate::templates::BurstRule)
+//
+// Emitted by the tray's gamelog ingest when a `BurstRule` fires on a
+// run of N+ semantically-equivalent log lines (e.g. the 20+
+// `<AttachmentReceived>` shower fired by a player respawn, or the
+// `<StatObjLoad>` blast during planet entry). The constituent member
+// events are NOT uploaded — one summary stands in for the whole
+// group on the server timeline, while the local tray cache retains
+// the raw members for drill-in.
+// ---------------------------------------------------------------------
+
+/// Aggregate event for a collapsed burst.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BurstSummary {
+    /// Anchor line's timestamp — used as the ordering key on the
+    /// timeline. ISO-8601 UTC, same shape as every other event.
+    pub timestamp: String,
+    /// `BurstRule.id` that fired (e.g. `"loadout_restore_burst"`).
+    /// Drives downstream rendering and aggregation.
+    pub rule_id: String,
+    /// Total members in the burst (anchor + follow-ups). Always
+    /// `>= rule.min_burst_size`.
+    pub size: u32,
+    /// Last member's timestamp. Same as `timestamp` for atomic bursts
+    /// (loadout-restore is one millisecond); later for time-spread
+    /// runs. Lets the timeline show "burst of 20 attachments over 0.5s".
+    pub end_timestamp: String,
+    /// Truncated copy of the anchor line's body (capped at 200 chars
+    /// in the producer). Lets a generic timeline render
+    /// "burst started with: body_01_noMagicPocket..." without storing
+    /// every member. `None` if the producer didn't sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_body_sample: Option<String>,
 }

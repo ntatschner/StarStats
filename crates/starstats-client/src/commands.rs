@@ -987,6 +987,19 @@ fn format_summary(event: &GameEvent) -> String {
                 format!("[remote] {} ({})", e.event_name, preview.join(", "))
             }
         }
+        GameEvent::BurstSummary(e) => {
+            // Friendlier rendering for the four built-in rules; falls
+            // back to a generic "Burst: <id>" for anything else (e.g.
+            // future remote-served rules).
+            let label = match e.rule_id.as_str() {
+                "loadout_restore_burst" => "Loadout restored",
+                "terrain_load_burst" => "Terrain loaded",
+                "hud_notification_burst" => "Notifications",
+                "vehicle_stowed_burst" => "Vehicles stowed",
+                _ => "Burst",
+            };
+            format!("{} ({} events)", label, e.size)
+        }
     }
 }
 
