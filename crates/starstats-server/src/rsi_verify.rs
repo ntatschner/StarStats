@@ -358,45 +358,56 @@ async fn read_capped_text(mut resp: reqwest::Response, handle: &str) -> Option<S
 
 // -- Org listing parser ---------------------------------------------
 //
-// The orgs page renders one block per org. RSI's live markup
-// distinguishes the user's main org from affiliations by separate
-// containers (a `.main` block followed by an `.affiliation` list).
-// Inside each block, the relevant fields are:
-//   * the SID (uppercase short identifier) -- stable across renames
-//   * the org's display name
-//   * the user's rank within that org (optional)
+// Real RSI markup (verified 2026-05-09 against the live public orgs
+// page for `discolando`): one `<div class="box-content org main">` per
+// main org and `<div class="box-content org affiliation">` per
+// affiliation. Inside each block:
 //
-// Selectors here are deliberately defensive (label-led where possible,
-// class-led where the markup carries no labels). If a future RSI
-// reshuffle breaks the heuristics the parser returns an empty Vec
-// rather than panicking; the route layer maps "empty parse from a 200
-// page" to "user has no public orgs", which is also a valid real-world
-// state, so the failure mode is benign even if it temporarily masks a
-// markup change. Unit tests lock the contract so the change gets
-// caught at CI time when the fixture is updated to mirror the new
-// markup.
+//   <div class="info">
+//     <p class="entry"><a href="/orgs/SID" class="value">Org Name</a></p>
+//     <p class="entry">
+//       <span class="label">Spectrum Identification (SID)</span>
+//       <strong class="value">SID</strong>
+//     </p>
+//     <p class="entry">
+//       <span class="label">Organization rank</span>
+//       <strong class="value">Rank</strong>
+//     </p>
+//     ...
+//   </div>
 //
-// Fixture-driven contract (see tests below):
-//   * Each org sits inside a `.org` container.
-//   * The container carries a modifier class — `.org--main` for the
-//     primary org, `.org--affiliation` (or `.affiliation`) for the
-//     rest.
-//   * SID lives in `.org-sid` (or any descendant of the container with
-//     class `.sid`).
-//   * Display name lives in `.org-name`.
-//   * Rank lives in `.org-rank`; absence is fine.
+// Notes:
+//   * The SID lives in a labelled entry — there is no `.org-sid` /
+//     `.sid` class. Earlier versions of this parser used `.org-sid`
+//     against a synthetic fixture and silently returned empty for
+//     every real account; the labelled-entry approach matches the
+//     same posture as the profile parser elsewhere in this file.
+//   * The org name is the first `.entry > a.value` (the only entry
+//     in `.info` without a `.label` sibling). RSI sometimes appends
+//     obfuscated suffix classes (`a class="value data14"`); the
+//     `.value` class selector still matches.
+//   * Modifier class: `main` for the primary org, `affiliation` for
+//     everything else. We accept BEM-style `org--main` too so a
+//     future markup shift to BEM doesn't silently demote every
+//     primary org to an affiliation.
+//   * Hidden orgs render `visibility-H` instead of `visibility-V`;
+//     RSI strips the `<a>`/labelled rows entirely for hidden entries
+//     on the public page, so they fall through `parse_org_block` as
+//     "no SID found" and get dropped — which is the right outcome.
 //
-// Real RSI HTML is more verbose, but the parser only depends on the
-// distinguishing class names above, not on the broader DOM shape.
+// Empty parse from a 200 page is also a valid real-world state: a
+// citizen with no public orgs renders `<div class="empty">NO ORG
+// MEMBERSHIP FOUND IN PUBLIC RECORDS</div>`. The route layer treats
+// "empty Vec" as "no orgs", same as before.
 
 fn parse_orgs_html(body: &str) -> Vec<RsiOrg> {
     let doc = Html::parse_document(body);
 
-    // Top-level container selector. `.org` is intentionally generic so
-    // either `.org--main` or `.org--affiliation` (and their bare-class
-    // siblings `.main`, `.affiliation` if RSI ever drops the BEM
-    // prefix) match through descendant rules below.
-    let Ok(org_sel) = Selector::parse(".org") else {
+    // Container selector: every org is a `<div class="… org …">`. We
+    // anchor on `div.org` rather than the looser `.org` to avoid
+    // accidentally matching the `.org-listing` wrapper or other
+    // class names that happen to start with `org`.
+    let Ok(org_sel) = Selector::parse("div.org") else {
         return Vec::new();
     };
 
@@ -411,26 +422,31 @@ fn parse_orgs_html(body: &str) -> Vec<RsiOrg> {
 }
 
 fn parse_org_block(el: &scraper::ElementRef<'_>) -> Option<RsiOrg> {
-    let sid = find_first_text(el, &[".org-sid", ".sid"])?;
-    let sid = sid.trim().to_owned();
-    if sid.is_empty() {
-        return None;
-    }
+    // SID is the immutable join key — bail if we can't lift it.
+    // Accept the literal label and a shortened "SID" fallback in case
+    // RSI ever tightens the label text.
+    let sid = find_labelled_entry_value(el, "Spectrum Identification (SID)")
+        .or_else(|| find_labelled_entry_value(el, "SID"))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())?;
 
-    let name = find_first_text(el, &[".org-name", ".name"])?;
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        return None;
-    }
+    // Name: the first `.info .entry > a.value` (the unlabelled anchor
+    // row at the top of the info block). Fallback to a labelled
+    // "Name" entry in case RSI ever introduces one.
+    let name = find_first_anchor_value(el)
+        .or_else(|| find_labelled_entry_value(el, "Name"))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())?;
 
-    let rank = find_first_text(el, &[".org-rank", ".rank"])
+    let rank = find_labelled_entry_value(el, "Organization rank")
+        .or_else(|| find_labelled_entry_value(el, "Rank"))
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
 
-    // The "main" flag is signalled by a modifier class on the
-    // container. Accept both BEM-style (`org--main`) and plain
-    // (`main`) so a future RSI reshuffle that drops the BEM prefix
-    // doesn't silently demote every primary org to an affiliation.
+    // The "main" flag is a modifier class on the container. Accept
+    // both BEM-style (`org--main`) and plain (`main`) so a future
+    // RSI reshuffle that flips between them doesn't silently demote
+    // every primary org to an affiliation.
     let is_main = el
         .value()
         .classes()
@@ -444,20 +460,45 @@ fn parse_org_block(el: &scraper::ElementRef<'_>) -> Option<RsiOrg> {
     })
 }
 
-/// Walk the candidate selectors in order, return the trimmed text of
-/// the first matching descendant. Used so a single org block can carry
-/// either the BEM-prefixed class (`.org-sid`) or the bare class
-/// (`.sid`) without the parser caring which.
-fn find_first_text(el: &scraper::ElementRef<'_>, selectors: &[&str]) -> Option<String> {
-    for raw in selectors {
-        let Ok(sel) = Selector::parse(raw) else {
+/// Walk every `.entry` inside `el`, find one whose `.label` text
+/// matches `label` (case- and trailing-colon-insensitive), and return
+/// the trimmed `.value` text from that entry. Used for the labelled
+/// rows inside an `.info` block — SID, rank, etc.
+fn find_labelled_entry_value(el: &scraper::ElementRef<'_>, label: &str) -> Option<String> {
+    let entry_sel = Selector::parse(".entry").ok()?;
+    let label_sel = Selector::parse(".label").ok()?;
+    let value_sel = Selector::parse(".value").ok()?;
+
+    let target = label.trim().trim_end_matches(':').to_ascii_lowercase();
+
+    for entry in el.select(&entry_sel) {
+        let Some(label_el) = entry.select(&label_sel).next() else {
             continue;
         };
-        if let Some(child) = el.select(&sel).next() {
-            return Some(collect_text(&child));
+        let label_text = collect_text(&label_el)
+            .trim()
+            .trim_end_matches(':')
+            .to_ascii_lowercase();
+        if label_text != target {
+            continue;
+        }
+        if let Some(value_el) = entry.select(&value_sel).next() {
+            let value = collect_text(&value_el).trim().to_owned();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value);
         }
     }
     None
+}
+
+/// Return the text of the first `.info .entry > a.value` descendant.
+/// This is how RSI renders the org name (an anchor pointing to the
+/// org's home page).
+fn find_first_anchor_value(el: &scraper::ElementRef<'_>) -> Option<String> {
+    let sel = Selector::parse(".info .entry a.value").ok()?;
+    el.select(&sel).next().map(|a| collect_text(&a))
 }
 
 fn parse_profile_html(body: &str) -> RsiProfile {
@@ -484,17 +525,23 @@ fn parse_profile_html(body: &str) -> RsiProfile {
     }
 }
 
-/// Walk every `.entry` under `.profile`, return the trimmed `.value`
-/// text of the first one whose `.label` matches `label` (case- and
-/// trailing-colon-insensitive). RSI sometimes formats labels as
-/// "Enlisted" and sometimes as "Enlisted:" — normalising both makes
-/// the lookup robust.
+/// Walk every `.entry` under `.profile-content`, return the trimmed
+/// `.value` text of the first one whose `.label` matches `label`
+/// (case- and trailing-colon-insensitive). RSI sometimes formats
+/// labels as "Enlisted" and sometimes as "Enlisted:" — normalising
+/// both makes the lookup robust.
+///
+/// Scope is `.profile-content` (the page wrapper) rather than
+/// `.profile` (a sibling left-col block that contains ONLY the
+/// handle name). The earlier `.profile .entry` scope missed
+/// Enlisted/Location/Bio entirely because those rows live in a
+/// sibling `<div class="left-col">`, not a descendant of `.profile`.
 fn find_labelled_value(doc: &Html, label: &str) -> Option<String> {
     // `Selector::parse` only fails on malformed CSS. The literals
     // here are all static, so an `unwrap` is safe — but we still
     // guard with `ok()?` so a future selector typo degrades to "no
     // match" rather than a panic in a hot path.
-    let entry_sel = Selector::parse(".profile .entry").ok()?;
+    let entry_sel = Selector::parse(".profile-content .entry").ok()?;
     let label_sel = Selector::parse(".label").ok()?;
     let value_sel = Selector::parse(".value").ok()?;
 
@@ -527,8 +574,9 @@ fn find_labelled_value(doc: &Html, label: &str) -> Option<String> {
 fn find_bio(doc: &Html) -> Option<String> {
     let value = find_labelled_value(doc, "Bio").or_else(|| {
         // Fallback: some templates render bio as `.entry.bio .value`
-        // without a sibling `.label` we can match by text.
-        let sel = Selector::parse(".profile .entry.bio .value").ok()?;
+        // without a sibling `.label` we can match by text. Scoped to
+        // `.profile-content` for the same reason as `find_labelled_value`.
+        let sel = Selector::parse(".profile-content .entry.bio .value").ok()?;
         doc.select(&sel)
             .next()
             .map(|el| collect_text(&el).trim().to_owned())
@@ -544,7 +592,11 @@ fn find_bio(doc: &Html) -> Option<String> {
 }
 
 fn find_badges(doc: &Html) -> Vec<Badge> {
-    let Ok(sel) = Selector::parse(".profile .badges img") else {
+    // Scoped to `.profile-content` so the broader page wrapper covers
+    // both the badge strip (when present) and the existing fixture
+    // shape; current public profiles render no `.badges` block at
+    // all, but the parser still handles accounts that do.
+    let Ok(sel) = Selector::parse(".profile-content .badges img") else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -607,11 +659,17 @@ fn is_rsi_host(host: &str) -> bool {
 }
 
 fn find_primary_org_summary(doc: &Html) -> Option<String> {
-    // The main-org block carries the org name in `.entry .value`
-    // under `.profile .right-col .main-org .info`. Some pages don't
-    // render this section at all (no main org), in which case we
-    // return None rather than an empty string.
-    let sel = Selector::parse(".profile .right-col .main-org .info .entry .value").ok()?;
+    // The main-org block lives at `.profile-content .main-org`. Real
+    // RSI markup renders it as a SIBLING of `.profile` (not a
+    // descendant), so the earlier `.profile .right-col .main-org …`
+    // scope never matched and silently returned `None` for every
+    // verified account. The first `.info .entry > a.value` (the
+    // anchor RSI uses for the org name) is the canonical summary;
+    // accounts with no main org render `<div class="empty">…</div>`
+    // instead, in which case the selector finds nothing — correct.
+    let sel = Selector::parse(".profile-content .main-org .info .entry a.value")
+        .or_else(|_| Selector::parse(".profile-content .main-org .info .entry .value"))
+        .ok()?;
     let value = doc
         .select(&sel)
         .next()
@@ -717,44 +775,80 @@ mod tests {
         }
     }
 
-    /// Stripped-down version of the live citizen page. Keeps only the
-    /// nodes the parser walks; deliberately exercises the labelled
-    /// `.entry` lookup, multi-line bio collapse, badge alt/src
-    /// extraction, and the main-org summary path.
+    /// Mirrors the real `/citizens/{handle}` markup (verified
+    /// 2026-05-09). Notable structural details:
+    ///   * `<div class="profile-content">` is the wrapper; `<div
+    ///     class="profile left-col">` is a sibling block holding ONLY
+    ///     the handle name + display name.
+    ///   * Enlisted / Location / Bio live in a *separate* sibling
+    ///     `<div class="left-col">` outside `.profile`. The earlier
+    ///     fixture put them inside `.profile`, hiding the bug where
+    ///     `.profile .entry` scope missed them.
+    ///   * `<div class="main-org right-col">` is also a sibling, not
+    ///     a descendant, of `.profile`. Its name lives in an
+    ///     `<a class="value">…</a>` (anchor), the same convention as
+    ///     the orgs page.
     const FULL_FIXTURE: &str = r#"
         <html><body>
-        <div class="profile">
-            <div class="left-col">
-                <div class="entry">
-                    <span class="label">Handle name</span>
-                    <span class="value">TheCodeSaiyan</span>
-                </div>
-                <div class="entry">
-                    <span class="label">Enlisted</span>
-                    <span class="value">Mar 14, 2014</span>
-                </div>
-                <div class="entry">
-                    <span class="label">Location</span>
-                    <span class="value">United Kingdom, England</span>
-                </div>
-                <div class="entry bio">
-                    <span class="label">Bio</span>
-                    <span class="value">Line one.
-                        Line two with   extra spaces.</span>
-                </div>
-                <div class="badges">
-                    <img src="/badges/founder.png" alt="Original Backer" />
-                    <img src="/badges/dev.png" alt="Developer" />
-                    <img src="" alt="" />
+        <div class="profile-content overview-content clearfix">
+            <p class="entry citizen-record">
+                <span class="label">UEE Citizen Record</span>
+                <strong class="value">#201886</strong>
+            </p>
+            <div class="box-content profile-wrapper clearfix">
+                <div class="inner-bg clearfix">
+                    <div class="profile left-col">
+                        <span class="title">Profile</span>
+                        <div class="inner clearfix">
+                            <div class="info">
+                                <p class="entry">
+                                    <strong class="value">TheCodeSaiyan</strong>
+                                </p>
+                                <p class="entry">
+                                    <span class="label">Handle name</span>
+                                    <strong class="value">TheCodeSaiyan</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="main-org right-col visibility-V">
+                        <span class="title">Main organization</span>
+                        <div class="inner clearfix">
+                            <div class="thumb">
+                                <a href="/orgs/IMP"><img src="/media/imp/logo.png" /></a>
+                            </div>
+                            <div class="info">
+                                <p class="entry">
+                                    <a href="/orgs/IMP" class="value">Imperium</a>
+                                </p>
+                                <p class="entry">
+                                    <span class="label">Spectrum Identification (SID)</span>
+                                    <strong class="value">IMP</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div class="right-col">
-                <div class="main-org">
-                    <div class="info">
-                        <div class="entry">
-                            <span class="label">Name</span>
-                            <span class="value">Imperium</span>
-                        </div>
+            <div class="left-col">
+                <div class="inner">
+                    <p class="entry">
+                        <span class="label">Enlisted</span>
+                        <strong class="value">Mar 14, 2014</strong>
+                    </p>
+                    <p class="entry">
+                        <span class="label">Location</span>
+                        <strong class="value">United Kingdom, England</strong>
+                    </p>
+                    <div class="entry bio">
+                        <span class="label">Bio</span>
+                        <div class="value">Line one.
+                            Line two with   extra spaces.</div>
+                    </div>
+                    <div class="badges">
+                        <img src="/badges/founder.png" alt="Original Backer" />
+                        <img src="/badges/dev.png" alt="Developer" />
+                        <img src="" alt="" />
                     </div>
                 </div>
             </div>
@@ -792,14 +886,29 @@ mod tests {
 
     /// Sparser page: only the display-name row is set. Everything
     /// else must come back as `None` / empty so the snapshot stores
-    /// `NULL` rather than synthesised values.
+    /// `NULL` rather than synthesised values. Real RSI sparse pages
+    /// also wrap in `.profile-content`, with the handle name inside
+    /// the `.profile.left-col > .info` block.
     const SPARSE_FIXTURE: &str = r#"
         <html><body>
-        <div class="profile">
-            <div class="left-col">
-                <div class="entry">
-                    <span class="label">Handle name</span>
-                    <span class="value">QuietCitizen</span>
+        <div class="profile-content overview-content clearfix">
+            <div class="box-content profile-wrapper clearfix">
+                <div class="inner-bg clearfix">
+                    <div class="profile left-col">
+                        <div class="inner clearfix">
+                            <div class="info">
+                                <p class="entry">
+                                    <span class="label">Handle name</span>
+                                    <strong class="value">QuietCitizen</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="main-org right-col visibility-">
+                        <div class="inner clearfix">
+                            <div class="empty">NO MAIN ORG FOUND IN PUBLIC RECORDS</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -827,7 +936,7 @@ mod tests {
     fn parse_profile_html_drops_non_rsi_badge_urls() {
         const FIXTURE: &str = r#"
             <html><body>
-                <div class="profile">
+                <div class="profile-content overview-content">
                     <div class="badges">
                         <img alt="Bad SVG" src="data:image/svg+xml,<svg onload=alert(1)>">
                         <img alt="Bad JS" src="javascript:alert(1)">
@@ -864,34 +973,87 @@ mod tests {
 
     // -- Org listing parser fixtures ---------------------------------
     //
-    // These fixtures are hand-crafted to lock the parser's contract
-    // rather than mirror RSI's live markup verbatim. The contract:
-    //   * Each org sits in a `.org` container.
-    //   * `.org--main` modifier flags the primary org; everything else
-    //     is treated as an affiliation.
-    //   * `.org-sid` carries the stable Short ID (uppercase),
-    //     `.org-name` the display name, `.org-rank` the (optional)
-    //     rank.
-    // If RSI's actual markup diverges, update the fixture and the
-    // parser together — that's the whole point of locking the contract
-    // here.
+    // Fixtures mirror RSI's real `/citizens/{handle}/organizations`
+    // page (verified 2026-05-09 against `discolando` — see the
+    // comment block above `parse_orgs_html`). The structural contract:
+    //   * Each org is a `<div class="box-content org main|affiliation">`.
+    //   * `main` modifier flags the primary org (BEM `org--main` also
+    //     accepted for forward-compat).
+    //   * Inside `<div class="info">`, the org name is the first
+    //     `<a class="value">` (no sibling `.label`); SID and rank are
+    //     labelled `<p class="entry">` rows whose `.label` text is
+    //     "Spectrum Identification (SID)" / "Organization rank".
+    // RSI sometimes appends obfuscated suffix classes to .label/.value
+    // (`<span class="label data5">`); the class selectors still match.
 
     const ORGS_FULL_FIXTURE: &str = r#"
         <html><body>
-        <div class="orgs">
-            <div class="org org--main">
-                <span class="org-sid">IMP</span>
-                <span class="org-name">Imperium</span>
-                <span class="org-rank">Senior Officer</span>
+        <div class="profile-content orgs-content clearfix">
+            <div class="box-content org main visibility-V">
+                <div class="inner-bg clearfix">
+                    <div class="title">Main organization</div>
+                    <div class="left-col">
+                        <div class="inner clearfix">
+                            <div class="thumb">
+                                <a href="/orgs/IMP"><img src="/media/imp/logo.png" /></a>
+                                <span class="members">22 members</span>
+                            </div>
+                            <div class="info">
+                                <p class="entry">
+                                    <a href="/orgs/IMP" class="value">Imperium</a>
+                                </p>
+                                <p class="entry">
+                                    <span class="label">Spectrum Identification (SID)</span>
+                                    <strong class="value">IMP</strong>
+                                </p>
+                                <p class="entry">
+                                    <span class="label">Organization rank</span>
+                                    <strong class="value">Senior Officer</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="org org--affiliation">
-                <span class="org-sid">TESTSQDN</span>
-                <span class="org-name">Test Squadron</span>
-                <span class="org-rank">Recruit</span>
+            <div class="box-content org affiliation visibility-V">
+                <div class="inner-bg clearfix">
+                    <div class="title">Affiliation</div>
+                    <div class="left-col">
+                        <div class="inner clearfix">
+                            <div class="info">
+                                <p class="entry orgtitle">
+                                    <a href="/orgs/TESTSQDN" class="value data14">Test Squadron</a>
+                                </p>
+                                <p class="entry">
+                                    <span class="label data5">Spectrum Identification (SID)</span>
+                                    <strong class="value data2">TESTSQDN</strong>
+                                </p>
+                                <p class="entry">
+                                    <span class="label data2">Organization rank</span>
+                                    <strong class="value data3">Recruit</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="org org--affiliation">
-                <span class="org-sid">FOOBAR</span>
-                <span class="org-name">Foo Bar Industries</span>
+            <div class="box-content org affiliation visibility-V">
+                <div class="inner-bg clearfix">
+                    <div class="title">Affiliation</div>
+                    <div class="left-col">
+                        <div class="inner clearfix">
+                            <div class="info">
+                                <p class="entry orgtitle">
+                                    <a href="/orgs/FOOBAR" class="value">Foo Bar Industries</a>
+                                </p>
+                                <p class="entry">
+                                    <span class="label">Spectrum Identification (SID)</span>
+                                    <strong class="value">FOOBAR</strong>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         </body></html>
@@ -916,7 +1078,7 @@ mod tests {
 
         assert_eq!(parsed[2].sid, "FOOBAR");
         assert_eq!(parsed[2].name, "Foo Bar Industries");
-        // Missing `.org-rank` -> None, not empty string.
+        // No "Organization rank" labelled row -> None, not empty string.
         assert_eq!(parsed[2].rank, None);
         assert!(!parsed[2].is_main);
     }
@@ -928,22 +1090,51 @@ mod tests {
         // collapsing the entire result.
         const FIXTURE: &str = r#"
             <html><body>
-            <div class="orgs">
-                <div class="org org--main">
-                    <span class="org-name">Orphan No SID</span>
-                    <span class="org-rank">Captain</span>
+            <div class="profile-content orgs-content clearfix">
+                <div class="box-content org main visibility-V">
+                    <div class="info">
+                        <p class="entry">
+                            <a href="/orgs/ORPHAN" class="value">Orphan No SID</a>
+                        </p>
+                        <p class="entry">
+                            <span class="label">Organization rank</span>
+                            <strong class="value">Captain</strong>
+                        </p>
+                    </div>
                 </div>
-                <div class="org org--affiliation">
-                    <span class="org-sid">VALID</span>
-                    <span class="org-name">Valid Org</span>
+                <div class="box-content org affiliation visibility-V">
+                    <div class="info">
+                        <p class="entry">
+                            <a href="/orgs/VALID" class="value">Valid Org</a>
+                        </p>
+                        <p class="entry">
+                            <span class="label">Spectrum Identification (SID)</span>
+                            <strong class="value">VALID</strong>
+                        </p>
+                    </div>
                 </div>
-                <div class="org org--affiliation">
-                    <span class="org-sid">NONAME</span>
-                    <span class="org-rank">Ensign</span>
+                <div class="box-content org affiliation visibility-V">
+                    <div class="info">
+                        <p class="entry">
+                            <span class="label">Spectrum Identification (SID)</span>
+                            <strong class="value">NONAME</strong>
+                        </p>
+                        <p class="entry">
+                            <span class="label">Organization rank</span>
+                            <strong class="value">Ensign</strong>
+                        </p>
+                    </div>
                 </div>
-                <div class="org org--affiliation">
-                    <span class="org-sid">  </span>
-                    <span class="org-name">Whitespace SID</span>
+                <div class="box-content org affiliation visibility-V">
+                    <div class="info">
+                        <p class="entry">
+                            <a href="/orgs/BLANK" class="value">Whitespace SID</a>
+                        </p>
+                        <p class="entry">
+                            <span class="label">Spectrum Identification (SID)</span>
+                            <strong class="value">  </strong>
+                        </p>
+                    </div>
                 </div>
             </div>
             </body></html>
@@ -957,15 +1148,13 @@ mod tests {
 
     #[test]
     fn parse_orgs_html_handles_no_orgs() {
-        // A user with no public orgs lands on a page that renders the
-        // shell but no `.org` containers (RSI shows an "Empty" state).
-        // Parser must return an empty Vec, not panic.
+        // A citizen with no public orgs renders a server-side `.empty`
+        // state instead of any `.org` containers. Parser must return
+        // an empty Vec, not panic. (Verified shape on the live site.)
         const FIXTURE: &str = r#"
             <html><body>
-            <div class="orgs">
-                <div class="empty-state">
-                    <p>This citizen is not affiliated with any organization.</p>
-                </div>
+            <div class="profile-content orgs-content clearfix">
+                <div class="empty">NO ORG MEMBERSHIP FOUND IN PUBLIC RECORDS</div>
             </div>
             </body></html>
         "#;
@@ -982,5 +1171,36 @@ mod tests {
         const FIXTURE: &str = "<html><body><h1>Hello</h1><p>Nothing to see here.</p></body></html>";
         let parsed = parse_orgs_html(FIXTURE);
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_orgs_html_accepts_obfuscated_value_classes() {
+        // RSI sometimes appends opaque suffixes to `.value` /
+        // `.label` (`<a class="value data14">`). The class selector
+        // must still match — this guards against an over-tight rewrite
+        // (e.g. `[class="value"]` exact-equals) that would silently
+        // break extraction on accounts where the suffixes appear.
+        const FIXTURE: &str = r#"
+            <html><body>
+            <div class="profile-content orgs-content">
+                <div class="box-content org main">
+                    <div class="info">
+                        <p class="entry">
+                            <a href="/orgs/X" class="value data99">Suffix Org</a>
+                        </p>
+                        <p class="entry">
+                            <span class="label data1">Spectrum Identification (SID)</span>
+                            <strong class="value data42">SUFFIX</strong>
+                        </p>
+                    </div>
+                </div>
+            </div>
+            </body></html>
+        "#;
+        let parsed = parse_orgs_html(FIXTURE);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sid, "SUFFIX");
+        assert_eq!(parsed[0].name, "Suffix Org");
+        assert!(parsed[0].is_main);
     }
 }

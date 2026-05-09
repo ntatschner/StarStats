@@ -3,6 +3,12 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
+# --- Local RSI fetch cache (used during parser development to inspect
+# real RSI HTML/JSON without re-fetching). Contains fully-rendered
+# pages from RSI which may include account-private data when fetched
+# with a session cookie — must never be committed.
+.rsi-fetch/
+
 # --- Node / pnpm ---
 node_modules/
 .pnp
