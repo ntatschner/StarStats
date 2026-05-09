@@ -288,16 +288,11 @@ async fn fetch_pledges(
 /// ceiling, so a misbehaving upstream could balloon the allocation.
 async fn read_capped_text(mut resp: reqwest::Response) -> Result<String> {
     let mut buf: Vec<u8> = Vec::new();
-    loop {
-        match resp.chunk().await.context("read chunk")? {
-            Some(chunk) => {
-                if buf.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-                    anyhow::bail!("RSI pledges body exceeded {MAX_BODY_BYTES}-byte cap; aborting");
-                }
-                buf.extend_from_slice(&chunk);
-            }
-            None => break,
+    while let Some(chunk) = resp.chunk().await.context("read chunk")? {
+        if buf.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            anyhow::bail!("RSI pledges body exceeded {MAX_BODY_BYTES}-byte cap; aborting");
         }
+        buf.extend_from_slice(&chunk);
     }
     String::from_utf8(buf).context("RSI pledges body is not utf-8")
 }
@@ -339,44 +334,67 @@ fn field_too_long(s: &str) -> bool {
 
 // -- HTML parser ----------------------------------------------------
 //
-// RSI's pledges page is server-rendered HTML. The actual live markup
-// will likely differ from the fixture below — the parser is
-// deliberately defensive: every selector falls back to `None`, and
-// only `name` is required to retain the entry. The fixture locks the
-// CONTRACT the parser depends on, so when RSI reshuffles its markup
-// the fix is a fixture update + selector update in lockstep — caught
-// at CI time, not in production.
+// Real `/account/pledges` markup (verified 2026-05-09 against a live
+// account):
 //
-// Fixture-driven contract (see tests below):
-//   * Each pledge sits inside a container matching `.pledge` (or
-//     `article.pledge`).
-//   * Stable pledge identifier: the container's `data-pledge-id`
-//     attribute (RSI exposes one in their existing API surfaces).
-//   * Display name: a descendant matching `.pledge-name` (fallback
-//     `.js-pledge-name`).
-//   * Manufacturer: `.pledge-manufacturer` (fallback `.manufacturer`).
-//   * Kind / classification: `.pledge-kind` (fallback `.kind`).
+//   <ul class="list-items">
+//     <li>
+//       <div class="row …">
+//         <div class="basic-infos">
+//           <div class="item-image-wrapper">…</div>
+//           <div class="wrapper-col">
+//             <div class="title-col">
+//               <h3>{visible heading}</h3>
+//               <input type="hidden" class="js-pledge-id"   value="105938298">
+//               <input type="hidden" class="js-pledge-name" value="…">
+//               <input type="hidden" class="js-pledge-value" value="$8.80 USD">
+//               <input type="hidden" class="js-pledge-currency" value="Store Credit">
+//               <input type="hidden" class="js-pledge-last-alpha" value="0">
+//               <input type="hidden" class="js-pledge-not-buybackable" value="0">
+//               …
+//             </div>
+//             <div class="date-col"><label>Created:</label> May 04, 2026</div>
+//             <div class="items-col"><label>Contains:</label> Constellation - Polar Paint</div>
+//           </div>
+//         </div>
+//       </div>
+//     </li>
+//     …
+//   </ul>
 //
-// Real RSI HTML is more verbose; the parser only depends on the
-// distinguishing class names and the data attribute, not on the wider
-// DOM shape.
+// The fields the tray pushes (`pledge_id`, `name`) live on the hidden
+// inputs, NOT in element text. Reading `.text()` on `.js-pledge-name`
+// gets nothing — the `value` attribute is the source of truth. This
+// is the bug that made earlier versions silently push zero ships
+// regardless of pledge count.
+//
+// `manufacturer` and `kind` are best-effort heuristics from the
+// pledge name. RSI uses a "{Kind} - {Manufacturer/Subject} - {Variant}"
+// convention for accessory pledges (paints, gear, name reservations);
+// ship pledges typically don't follow it. Under-extracting (leave
+// fields `None`) is preferred to mis-extracting.
 
 /// Parse a pledges page body into a list of [`HangarShip`].
 ///
-/// Best-effort: missing fields collapse to `None`, malformed entries
-/// (no name) are dropped. Returns an empty vec on garbage input
-/// rather than panicking, matching the posture of `parse_orgs_html`
-/// on the server.
+/// Best-effort: a pledge missing both `js-pledge-name` AND `js-pledge-id`
+/// is dropped (no useful identity). Returns an empty vec on garbage
+/// input rather than panicking; the route layer treats "empty parse"
+/// the same as "no pledges", which matches the server's current
+/// behaviour for users with empty hangars.
 pub fn parse_pledges_html(body: &str) -> Vec<HangarShip> {
     let doc = Html::parse_document(body);
 
-    let Ok(pledge_sel) = Selector::parse(".pledge") else {
+    // Each pledge is a `<li>` directly under `<ul class="list-items">`.
+    // Anchoring on `ul.list-items > li` rather than just `li` keeps
+    // the parser from latching onto unrelated `<li>` elsewhere on
+    // the page (footer nav, side menu, etc.).
+    let Ok(item_sel) = Selector::parse("ul.list-items > li") else {
         return Vec::new();
     };
 
     let mut out = Vec::new();
-    for el in doc.select(&pledge_sel) {
-        let Some(parsed) = parse_pledge_block(&el) else {
+    for li in doc.select(&item_sel) {
+        let Some(parsed) = parse_pledge_block(&li) else {
             continue;
         };
         out.push(parsed);
@@ -384,24 +402,35 @@ pub fn parse_pledges_html(body: &str) -> Vec<HangarShip> {
     out
 }
 
-fn parse_pledge_block(el: &scraper::ElementRef<'_>) -> Option<HangarShip> {
-    let name = find_first_text(el, &[".pledge-name", ".js-pledge-name", ".name"])?;
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        return None;
-    }
+fn parse_pledge_block(li: &scraper::ElementRef<'_>) -> Option<HangarShip> {
+    // The four fields we read all live on hidden inputs whose `class`
+    // attribute carries a `js-pledge-*` hook. `read_input_value` reads
+    // the `value=` attribute, NOT element text — RSI uses these
+    // inputs as a JS data channel, the displayed text is in a
+    // sibling `<h3>` and may be reformatted.
+    let name_raw = read_input_value(li, "js-pledge-name");
+    let pledge_id = read_input_value(li, "js-pledge-id")
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
 
-    let manufacturer = find_first_text(el, &[".pledge-manufacturer", ".manufacturer"])
+    // Fallback for the display name: the `<h3>` inside `.title-col`.
+    // Only used if RSI ever drops the hidden input — staying robust
+    // to one channel disappearing without warning.
+    let name = name_raw
         .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let kind = find_first_text(el, &[".pledge-kind", ".kind"])
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let pledge_id = el
-        .value()
-        .attr("data-pledge-id")
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            Selector::parse(".title-col h3")
+                .ok()
+                .and_then(|s| li.select(&s).next())
+                .map(|el| collect_text(&el).trim().to_owned())
+                .filter(|s| !s.is_empty())
+        });
+
+    // Drop entries that have no name (and therefore no useful identity).
+    let name = name?;
+
+    let (kind, manufacturer) = derive_kind_and_manufacturer(&name);
 
     Some(HangarShip {
         name,
@@ -411,20 +440,38 @@ fn parse_pledge_block(el: &scraper::ElementRef<'_>) -> Option<HangarShip> {
     })
 }
 
-/// Walk the candidate selectors in order and return the trimmed text
-/// of the first matching descendant. Same pattern as the server's
-/// `rsi_verify::find_first_text` — duplicated rather than depended on
-/// to keep the tray's compile graph independent of the server crate.
-fn find_first_text(el: &scraper::ElementRef<'_>, selectors: &[&str]) -> Option<String> {
-    for raw in selectors {
-        let Ok(sel) = Selector::parse(raw) else {
-            continue;
-        };
-        if let Some(child) = el.select(&sel).next() {
-            return Some(collect_text(&child));
-        }
+/// Read the `value="…"` attribute of the first descendant
+/// `<input class="…class_hook…">` inside `el`. Used for the
+/// `js-pledge-id` / `js-pledge-name` / etc. hidden inputs.
+fn read_input_value(el: &scraper::ElementRef<'_>, class_hook: &str) -> Option<String> {
+    let sel_str = format!("input.{class_hook}");
+    let sel = Selector::parse(&sel_str).ok()?;
+    el.select(&sel)
+        .next()?
+        .value()
+        .attr("value")
+        .map(|s| s.to_owned())
+}
+
+/// Heuristic: many RSI accessory pledges follow a
+/// `"{Kind} - {Subject} - {Variant}"` naming convention
+/// (e.g. `"Paints - Constellation - Polar Paint"`,
+/// `"Gear - HighSec - Bundle"`). Split on `" - "` and take the first
+/// two segments as `kind` / `manufacturer` if both are present;
+/// otherwise leave them `None` rather than guess on a single-segment
+/// ship name like `"Aegis Avenger Titan"`.
+fn derive_kind_and_manufacturer(name: &str) -> (Option<String>, Option<String>) {
+    let parts: Vec<&str> = name.splitn(3, " - ").collect();
+    if parts.len() >= 2 {
+        let kind = parts[0].trim();
+        let manuf = parts[1].trim();
+        (
+            (!kind.is_empty()).then(|| kind.to_owned()),
+            (!manuf.is_empty()).then(|| manuf.to_owned()),
+        )
+    } else {
+        (None, None)
     }
-    None
 }
 
 /// Concatenate all descendant text inside an element, preserving a
@@ -451,25 +498,66 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
-    /// Stripped-down version of what we expect the live pledges page
-    /// to look like. Locks the parser's contract — when RSI reshuffles
-    /// markup, update this fixture + the selectors in lockstep.
+    /// Mirrors the real `/account/pledges` markup (verified 2026-05-09
+    /// against a live account). Locks the parser's contract — when
+    /// RSI reshuffles markup, update this fixture + the selectors in
+    /// lockstep, and the test failures point at the exact field
+    /// that broke.
     const FULL_FIXTURE: &str = r#"
         <html><body>
-        <div class="pledge-list">
-            <article class="pledge" data-pledge-id="12345678">
-                <h2 class="pledge-name">Aegis Avenger Titan</h2>
-                <span class="pledge-manufacturer">Aegis Dynamics</span>
-                <span class="pledge-kind">Standalone Ship</span>
-            </article>
-            <article class="pledge" data-pledge-id="87654321">
-                <h2 class="pledge-name">Greycat PTV</h2>
-                <span class="pledge-manufacturer">Greycat Industrial</span>
-                <span class="pledge-kind">Ground Vehicle</span>
-            </article>
-            <article class="pledge" data-pledge-id="55555555">
-                <h2 class="pledge-name">Mystery Skin</h2>
-            </article>
+        <div id="billing" class="content-wrapper content-block1 pledges">
+            <ul class="list-items">
+                <li>
+                    <div class="row trans-03s trans-background">
+                        <div class="basic-infos clearfix">
+                            <div class="item-image-wrapper content-block3">
+                                <div class="image"></div>
+                            </div>
+                            <div class="wrapper-col">
+                                <a class="arrow js-expand-arrow"></a>
+                                <div class="title-col">
+                                    <h3>Aegis Avenger Titan</h3>
+                                    <script class="js-pledge-name-reservations" type="application/json">[]</script>
+                                    <script class="js-pledge-nameable-ships" type="application/json">null</script>
+                                    <input type="hidden" class="js-pledge-id" value="12345678">
+                                    <input type="hidden" class="js-pledge-name" value="Aegis Avenger Titan">
+                                    <input type="hidden" class="js-pledge-value" value="$60.00 USD">
+                                    <input type="hidden" class="js-pledge-currency" value="Store Credit">
+                                </div>
+                                <div class="date-col"><label>Created:</label> May 04, 2026</div>
+                                <div class="items-col"><label>Contains:</label> Aegis Avenger Titan</div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+                <li>
+                    <div class="row dark trans-03s trans-background">
+                        <div class="basic-infos clearfix">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <h3>Paints - Constellation - Polar Paint</h3>
+                                    <input type="hidden" class="js-pledge-id" value="105938298">
+                                    <input type="hidden" class="js-pledge-name" value="Paints - Constellation - Polar Paint">
+                                    <input type="hidden" class="js-pledge-value" value="$8.80 USD">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+                <li>
+                    <div class="row trans-03s trans-background">
+                        <div class="basic-infos clearfix">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <h3>Gear - HighSec - Bundle</h3>
+                                    <input type="hidden" class="js-pledge-id" value="105938296">
+                                    <input type="hidden" class="js-pledge-name" value="Gear - HighSec - Bundle">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+            </ul>
         </div>
         </body></html>
     "#;
@@ -480,45 +568,102 @@ mod tests {
         assert_eq!(parsed.len(), 3);
 
         // Order is preserved from the page.
+        // First pledge: a single-segment ship name — no "{Kind} - {…}"
+        // pattern, so manufacturer + kind stay None (heuristic guard).
         assert_eq!(parsed[0].name, "Aegis Avenger Titan");
-        assert_eq!(parsed[0].manufacturer.as_deref(), Some("Aegis Dynamics"));
-        assert_eq!(parsed[0].kind.as_deref(), Some("Standalone Ship"));
         assert_eq!(parsed[0].pledge_id.as_deref(), Some("12345678"));
+        assert_eq!(parsed[0].manufacturer, None);
+        assert_eq!(parsed[0].kind, None);
 
-        assert_eq!(parsed[1].name, "Greycat PTV");
-        assert_eq!(
-            parsed[1].manufacturer.as_deref(),
-            Some("Greycat Industrial")
-        );
-        assert_eq!(parsed[1].kind.as_deref(), Some("Ground Vehicle"));
-        assert_eq!(parsed[1].pledge_id.as_deref(), Some("87654321"));
+        // Second pledge: "Paints - Constellation - Polar Paint" follows
+        // RSI's accessory naming convention; heuristic lifts the first
+        // two segments as kind + manufacturer.
+        assert_eq!(parsed[1].name, "Paints - Constellation - Polar Paint");
+        assert_eq!(parsed[1].pledge_id.as_deref(), Some("105938298"));
+        assert_eq!(parsed[1].kind.as_deref(), Some("Paints"));
+        assert_eq!(parsed[1].manufacturer.as_deref(), Some("Constellation"));
 
-        // Sparse entry: only name + pledge_id.
-        assert_eq!(parsed[2].name, "Mystery Skin");
-        assert_eq!(parsed[2].manufacturer, None);
-        assert_eq!(parsed[2].kind, None);
-        assert_eq!(parsed[2].pledge_id.as_deref(), Some("55555555"));
+        // Third pledge: "Gear - HighSec - Bundle" — same heuristic.
+        assert_eq!(parsed[2].name, "Gear - HighSec - Bundle");
+        assert_eq!(parsed[2].pledge_id.as_deref(), Some("105938296"));
+        assert_eq!(parsed[2].kind.as_deref(), Some("Gear"));
+        assert_eq!(parsed[2].manufacturer.as_deref(), Some("HighSec"));
     }
 
     #[test]
-    fn parse_pledges_drops_entries_without_name() {
-        // Mix of well-formed + malformed entries. The parser must skip
-        // anything missing the only required field (name) without
-        // collapsing the entire result.
+    fn parse_pledges_falls_back_to_h3_when_input_missing() {
+        // If RSI ever drops the hidden `js-pledge-name` input, the
+        // parser must still surface the heading text as the name.
+        // Pledge id is also omitted to make sure we don't depend on
+        // BOTH channels being intact.
         const FIXTURE: &str = r#"
             <html><body>
-            <div class="pledge-list">
-                <article class="pledge" data-pledge-id="111">
-                    <span class="pledge-manufacturer">Orphan No Name</span>
-                </article>
-                <article class="pledge" data-pledge-id="222">
-                    <h2 class="pledge-name">Valid Ship</h2>
-                </article>
-                <article class="pledge" data-pledge-id="333">
-                    <h2 class="pledge-name">   </h2>
-                    <span class="pledge-manufacturer">Whitespace Name</span>
-                </article>
-            </div>
+            <ul class="list-items">
+                <li>
+                    <div class="row">
+                        <div class="basic-infos">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <h3>Constellation Phoenix</h3>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+            </ul>
+            </body></html>
+        "#;
+        let parsed = parse_pledges_html(FIXTURE);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Constellation Phoenix");
+        assert_eq!(parsed[0].pledge_id, None);
+    }
+
+    #[test]
+    fn parse_pledges_drops_entries_with_no_name_or_id() {
+        // An `<li>` with no js-pledge-name input AND no <h3> heading
+        // is dropped. A blank-input li is also dropped. Well-formed
+        // entries in the same list must still come through.
+        const FIXTURE: &str = r#"
+            <html><body>
+            <ul class="list-items">
+                <li>
+                    <div class="row">
+                        <div class="basic-infos">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <input type="hidden" class="js-pledge-id" value="111">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+                <li>
+                    <div class="row">
+                        <div class="basic-infos">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <h3>Valid Ship</h3>
+                                    <input type="hidden" class="js-pledge-id" value="222">
+                                    <input type="hidden" class="js-pledge-name" value="Valid Ship">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+                <li>
+                    <div class="row">
+                        <div class="basic-infos">
+                            <div class="wrapper-col">
+                                <div class="title-col">
+                                    <h3>   </h3>
+                                    <input type="hidden" class="js-pledge-name" value="   ">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </li>
+            </ul>
             </body></html>
         "#;
         let parsed = parse_pledges_html(FIXTURE);
@@ -529,15 +674,13 @@ mod tests {
 
     #[test]
     fn parse_pledges_handles_empty_hangar() {
-        // A user with no pledges lands on a page that renders the shell
-        // but no `.pledge` containers. Parser must return an empty Vec,
-        // not panic.
+        // A user with no pledges lands on the same shell with no
+        // `<li>` entries. Parser must return an empty Vec, not panic.
         const FIXTURE: &str = r#"
             <html><body>
-            <div class="pledge-list">
-                <div class="empty-state">
-                    <p>You have no pledges yet.</p>
-                </div>
+            <div id="billing" class="pledges">
+                <ul class="list-items"></ul>
+                <div class="empty"><p>You have no pledges yet.</p></div>
             </div>
             </body></html>
         "#;
@@ -554,6 +697,33 @@ mod tests {
         const FIXTURE: &str = "<html><body><h1>Hello</h1><p>Nothing to see here.</p></body></html>";
         let parsed = parse_pledges_html(FIXTURE);
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_pledges_ignores_unrelated_li_elements() {
+        // Many `<li>` exist on the page (footer nav, side menu). The
+        // parser must only descend into `ul.list-items > li` and not
+        // collapse a footer entry into a phantom pledge.
+        const FIXTURE: &str = r#"
+            <html><body>
+            <nav><ul><li>Home</li><li>About</li></ul></nav>
+            <ul class="list-items">
+                <li>
+                    <div class="row"><div class="basic-infos"><div class="wrapper-col">
+                        <div class="title-col">
+                            <input type="hidden" class="js-pledge-id" value="999">
+                            <input type="hidden" class="js-pledge-name" value="Real Pledge">
+                        </div>
+                    </div></div></div>
+                </li>
+            </ul>
+            <footer><ul><li>Contact</li></ul></footer>
+            </body></html>
+        "#;
+        let parsed = parse_pledges_html(FIXTURE);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Real Pledge");
+        assert_eq!(parsed[0].pledge_id.as_deref(), Some("999"));
     }
 
     #[test]

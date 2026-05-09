@@ -347,8 +347,7 @@ const MAX_TIMELINE_LIMIT: usize = 5_000;
 fn clamp_timeline_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(DEFAULT_TIMELINE_LIMIT)
-        .min(MAX_TIMELINE_LIMIT)
-        .max(1)
+        .clamp(1, MAX_TIMELINE_LIMIT)
 }
 
 #[tauri::command]

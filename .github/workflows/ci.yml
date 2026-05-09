@@ -29,12 +29,20 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ matrix.os }}
+    # Tauri (used by starstats-client) needs the GTK + WebKit2 stack
+    # on Linux. Windows runners ship Edge WebView2 pre-installed, so
+    # the install step is gated to Ubuntu. Mirrors the release workflow.
+    - name: Linux Tauri deps
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
     - name: cargo fmt
       run: cargo fmt --all --check
-    - name: cargo clippy (server + core)
-      run: cargo clippy -p starstats-core -p starstats-server --all-targets -- -D warnings
-    - name: cargo test (server + core)
-      run: cargo test -p starstats-core -p starstats-server --all-targets
+    - name: cargo clippy (workspace)
+      run: cargo clippy -p starstats-core -p starstats-server -p starstats-client --all-targets -- -D warnings
+    - name: cargo test (workspace)
+      run: cargo test -p starstats-core -p starstats-server -p starstats-client --all-targets
 
   web:
     name: Web (Next.js)
