@@ -15,6 +15,7 @@ import {
   listOrgs,
   listShares,
   refreshProfile,
+  refreshRsiOrgs,
   removeShare,
   resendVerification,
   rsiVerifyCheck,
@@ -518,6 +519,32 @@ export default async function SettingsPage(props: {
     redirect('/settings?status=profile_refreshed#rsi');
   }
 
+  async function refreshRsiOrgsAction() {
+    'use server';
+    const session = await getSession();
+    if (!session) redirect('/auth/login?next=/settings');
+    try {
+      await refreshRsiOrgs(session.token);
+    } catch (e) {
+      if (e instanceof ApiCallError) {
+        if (e.status === 401) redirect('/auth/login?next=/settings');
+        if (e.status === 422) {
+          redirect('/settings?error=rsi_handle_not_verified#rsi');
+        }
+        if (e.status === 429) {
+          redirect('/settings?error=orgs_refresh_too_soon#rsi');
+        }
+        if (e.status === 404) {
+          redirect('/settings?error=rsi_handle_not_found#rsi');
+        }
+        if (e.status === 503) redirect('/settings?error=rsi_unavailable#rsi');
+      }
+      logger.error({ err: e }, 'refresh rsi orgs failed');
+      redirect('/settings?error=unexpected#rsi');
+    }
+    redirect('/settings?status=orgs_refreshed#rsi');
+  }
+
   async function emailChangeAction(formData: FormData) {
     'use server';
     const session = await getSession();
@@ -891,15 +918,25 @@ export default async function SettingsPage(props: {
                   public profile.
                 </p>
               )}
-              <form action={refreshProfileAction} style={formStyle}>
-                <button
-                  type="submit"
-                  className="ss-btn ss-btn--ghost"
-                  style={{ alignSelf: 'flex-start' }}
-                >
-                  Refresh now
-                </button>
-              </form>
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                  alignItems: 'center',
+                }}
+              >
+                <form action={refreshProfileAction}>
+                  <button type="submit" className="ss-btn ss-btn--ghost">
+                    Refresh profile
+                  </button>
+                </form>
+                <form action={refreshRsiOrgsAction}>
+                  <button type="submit" className="ss-btn ss-btn--ghost">
+                    Refresh orgs
+                  </button>
+                </form>
+              </div>
             </>
           ) : rsiLoadFailed ? (
             <p style={mutedStyle}>
@@ -1519,6 +1556,8 @@ function labelForStatus(code: string): string {
       return 'RSI handle verified. You can take the code back out of your bio now.';
     case 'profile_refreshed':
       return 'Profile snapshot refreshed.';
+    case 'orgs_refreshed':
+      return 'Org snapshot refreshed.';
     case 'theme_updated':
       return 'Theme updated.';
     default:
@@ -1564,6 +1603,8 @@ function labelForError(code: string): string {
       return 'Something went wrong checking your bio. Please try again.';
     case 'refresh_too_soon':
       return 'Profile was just refreshed — please wait a few minutes before refreshing again.';
+    case 'orgs_refresh_too_soon':
+      return 'Orgs were just refreshed — please wait a few minutes before refreshing again.';
     case 'invalid_theme':
       return "That theme isn't recognised. Pick one of the four shown.";
     case 'unexpected':

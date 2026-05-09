@@ -468,6 +468,63 @@ export async function getPublicProfile(
   );
 }
 
+// -- RSI org snapshots ---------------------------------------------
+//
+// Triad mirrors the citizen-profile flow above:
+//   * `refreshRsiOrgs` — owner pokes the server to scrape their
+//     public RSI org page and persist a snapshot.
+//   * `getMyRsiOrgs` — owner reads the most recent snapshot.
+//   * `getPublicRsiOrgs` — anyone reads the snapshot for `handle`
+//     if visibility allows (the server enforces public/share gating).
+//
+// All three return `RsiOrgsSnapshot { captured_at, orgs }`. 404 on
+// the read endpoints means "no snapshot yet" / "not visible" — the
+// callers convert that to a typed null using the same pattern as
+// `getMyHangar`.
+
+export type RsiOrgsSnapshot = apiSchema['schemas']['RsiOrgsSnapshot'];
+export type RsiOrg = apiSchema['schemas']['RsiOrg'];
+
+export async function refreshRsiOrgs(bearer: string): Promise<RsiOrgsSnapshot> {
+  return postJson<RsiOrgsSnapshot>('/v1/auth/rsi/orgs/refresh', {}, bearer);
+}
+
+export async function getMyRsiOrgs(
+  bearer: string,
+): Promise<RsiOrgsSnapshot | null> {
+  try {
+    return await request<RsiOrgsSnapshot>(
+      'GET',
+      '/v1/me/rsi-orgs',
+      undefined,
+      bearer,
+    );
+  } catch (e) {
+    if (e instanceof ApiCallError && e.status === 404) {
+      return null;
+    }
+    throw e;
+  }
+}
+
+export async function getPublicRsiOrgs(
+  handle: string,
+): Promise<RsiOrgsSnapshot | null> {
+  try {
+    return await request<RsiOrgsSnapshot>(
+      'GET',
+      `/v1/public/u/${encodeURIComponent(handle)}/orgs`,
+      undefined,
+      undefined,
+    );
+  } catch (e) {
+    if (e instanceof ApiCallError && (e.status === 404 || e.status === 403)) {
+      return null;
+    }
+    throw e;
+  }
+}
+
 // -- Magic-link sign-in --------------------------------------------
 //
 // `start` is anti-enumeration: always returns 200 even on miss.
