@@ -81,10 +81,6 @@ impl StaffRoleSet {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn as_strings(&self) -> Vec<String> {
         let mut v: Vec<String> = self.0.iter().map(|r| r.as_str().to_owned()).collect();
         v.sort();
