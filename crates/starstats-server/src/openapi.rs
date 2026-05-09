@@ -202,6 +202,8 @@ impl Modify for SecurityAddon {
         query::TravelStatsResponse,
         query::LoadoutStatsResponse,
         query::StabilityStatsResponse,
+        query::CommerceRecentResponse,
+        query::CommerceTransactionDto,
         // Submissions
         submission_routes::SubmissionDto,
         submission_routes::ListResponse,
