@@ -977,18 +977,27 @@ export type CommerceTxStatus =
   | 'timed_out'
   | 'submitted';
 
-export interface CommerceTransaction {
+// Drift fix #5: switch the field shapes to come from the generated
+// schema (server now registers CommerceTransactionDto +
+// CommerceRecentResponse in openapi.rs). The two `kind` / `status`
+// fields stay re-typed to the local literal unions because the
+// server returns plain `String` — narrowing on the client side
+// preserves call-site exhaustiveness checks (e.g.
+// `formatCommerceStatus` in journey/page.tsx). Trade-off: a new
+// kind/status variant added on the server will silently fall outside
+// the union here until this file is updated. Long-term fix is to
+// turn the Rust types into enums; until then, this comment + the
+// narrowing is the contract.
+export type CommerceTransaction = Omit<
+  apiSchema['schemas']['CommerceTransactionDto'],
+  'kind' | 'status'
+> & {
   kind: CommerceTxKind;
   status: CommerceTxStatus;
-  started_at: string;
-  confirmed_at: string | null;
-  shop_id: string | null;
-  item: string | null;
-  quantity: number | null;
-  raw_request: string;
-  raw_response: string | null;
-}
-
+};
+// `CommerceRecentResponse` mirrors the server schema but with the
+// inner array re-typed to the narrowed `CommerceTransaction` so the
+// kind/status unions reach call sites.
 export interface CommerceRecentResponse {
   transactions: CommerceTransaction[];
 }
@@ -1288,15 +1297,10 @@ export async function unshareWithOrg(
 
 // -- User preferences ----------------------------------------------
 //
-// The backend ships `GET/PUT /v1/me/preferences` with body
-// `{ theme: string | null }`. The shape isn't yet in the generated
-// OpenAPI schema (parallel worker is adding it), so we hand-roll the
-// type here and keep the field optional+nullable to match the
-// server's `Option<String>`. When the codegen catches up, swap this
-// for an `apiSchema['schemas']['UserPreferences']` alias.
-export interface UserPreferences {
-  theme?: string | null;
-}
+// Aliased to the generated schema's `UserPreferencesSchema`. Drift
+// fix #5: the codegen has had this type for a while; lib/api.ts was
+// just lagging behind its own TODO.
+export type UserPreferences = apiSchema['schemas']['UserPreferencesSchema'];
 
 export async function getPreferences(
   bearer: string,

@@ -1423,6 +1423,27 @@ export interface components {
             kills: number;
             top_weapons: components["schemas"]["StatsBucket"][];
         };
+        /** @description Wire-format wrapper for the commerce endpoint. */
+        CommerceRecentResponse: {
+            /** @description Paired transactions, newest first by started_at. */
+            transactions: components["schemas"]["CommerceTransactionDto"][];
+        };
+        /**
+         * @description Mirrors `starstats_core::Transaction` but in a utoipa-friendly
+         *     shape. Field-for-field identical at the JSON layer.
+         */
+        CommerceTransactionDto: {
+            confirmed_at?: string | null;
+            item?: string | null;
+            kind: string;
+            /** Format: double */
+            quantity?: number | null;
+            raw_request: string;
+            raw_response?: string | null;
+            shop_id?: string | null;
+            started_at: string;
+            status: string;
+        };
         CreateOrgRequest: {
             name: string;
         };
