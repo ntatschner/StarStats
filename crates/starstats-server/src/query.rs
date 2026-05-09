@@ -127,7 +127,7 @@ pub struct TimelineBucket {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ListResponse {
+pub struct EventsListResponse {
     pub events: Vec<EventDto>,
     pub next_after: Option<i64>,
 }
@@ -164,7 +164,7 @@ pub struct TypeCount {
     tag = "query",
     params(ListParams),
     responses(
-        (status = 200, description = "Paginated event stream for the caller", body = ListResponse),
+        (status = 200, description = "Paginated event stream for the caller", body = EventsListResponse),
         (status = 400, description = "Invalid filter or cursor combination", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid bearer token"),
         (status = 500, description = "Query failed"),
@@ -229,7 +229,7 @@ pub async fn list_events<Q: EventQuery>(
                 .collect();
             (
                 StatusCode::OK,
-                Json(ListResponse {
+                Json(EventsListResponse {
                     events: dtos,
                     next_after,
                 }),
@@ -1528,7 +1528,7 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        let parsed: ListResponse = serde_json::from_slice(&bytes).unwrap();
+        let parsed: EventsListResponse = serde_json::from_slice(&bytes).unwrap();
 
         // Only Alice's two events.
         assert_eq!(parsed.events.len(), 2);
@@ -1621,7 +1621,7 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<ListResponse>(app, "/v1/me/events?event_type=join_pu", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?event_type=join_pu", &token).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parsed.events.len(), 2);
         assert!(parsed.events.iter().all(|e| e.event_type == "join_pu"));
@@ -1639,7 +1639,7 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<ListResponse>(app, "/v1/me/events?since=2026-04-15T00:00:00Z", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?since=2026-04-15T00:00:00Z", &token).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parsed.events.len(), 2);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
@@ -1659,7 +1659,7 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<ListResponse>(app, "/v1/me/events?until=2026-04-15T00:00:00Z", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?until=2026-04-15T00:00:00Z", &token).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parsed.events.len(), 2);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
@@ -1681,7 +1681,7 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<ListResponse>(app, "/v1/me/events?before_seq=4&limit=2", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?before_seq=4&limit=2", &token).await;
         assert_eq!(status, StatusCode::OK);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
         // Strictly less than 4, DESC, limit 2 -> [3, 2].
@@ -1702,7 +1702,7 @@ mod tests {
         let token = sign_token(&issuer, "Alice");
 
         let (status, parsed) =
-            get_json::<ListResponse>(app, "/v1/me/events?after_seq=2&limit=2", &token).await;
+            get_json::<EventsListResponse>(app, "/v1/me/events?after_seq=2&limit=2", &token).await;
         assert_eq!(status, StatusCode::OK);
         let seqs: Vec<i64> = parsed.events.iter().map(|e| e.seq).collect();
         // Strictly greater than 2, ASC, limit 2 -> [3, 4].

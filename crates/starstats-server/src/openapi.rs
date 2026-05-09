@@ -179,7 +179,7 @@ impl Modify for SecurityAddon {
         ingest::IngestBatchSchema,
         ingest::EventEnvelopeSchema,
         // Query
-        query::ListResponse,
+        query::EventsListResponse,
         query::EventDto,
         query::SummaryResponse,
         query::TypeCount,
