@@ -596,6 +596,11 @@ export type FlagRequest = apiSchema['schemas']['FlagRequest'];
 export type FlagResponse = apiSchema['schemas']['FlagResponse'];
 export type WithdrawResponse = apiSchema['schemas']['WithdrawResponse'];
 
+export type AdminQueueResponse =
+  apiSchema['schemas']['AdminQueueResponse'];
+export type SubmissionTransitionResponse =
+  apiSchema['schemas']['SubmissionTransitionResponse'];
+
 export type SubmissionStatus =
   | 'review'
   | 'accepted'
@@ -684,6 +689,70 @@ export async function withdrawSubmission(
   return request<WithdrawResponse>(
     'POST',
     `/v1/submissions/${encodeURIComponent(id)}/withdraw`,
+    undefined,
+    bearer,
+  );
+}
+
+// -- Admin (moderator + admin) -------------------------------------
+//
+// All four endpoints below require a staff role (moderator or admin)
+// — server-side enforced via `StaffRoleSet::has`. The web client gates
+// the /admin route surface on `session.staffRoles` for UX, but never
+// trusts the cookie alone for authorization.
+
+export async function getAdminSubmissionQueue(
+  bearer: string,
+  params: {
+    status: 'review' | 'flagged' | 'all';
+    limit?: number;
+    offset?: number;
+  },
+): Promise<AdminQueueResponse> {
+  const qs = new URLSearchParams();
+  qs.set('status', params.status);
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  return request<AdminQueueResponse>(
+    'GET',
+    `/v1/admin/submissions/queue?${qs.toString()}`,
+    undefined,
+    bearer,
+  );
+}
+
+export async function acceptSubmission(
+  bearer: string,
+  id: string,
+): Promise<SubmissionTransitionResponse> {
+  return request<SubmissionTransitionResponse>(
+    'POST',
+    `/v1/admin/submissions/${encodeURIComponent(id)}/accept`,
+    undefined,
+    bearer,
+  );
+}
+
+export async function rejectSubmission(
+  bearer: string,
+  id: string,
+  reason: string,
+): Promise<SubmissionTransitionResponse> {
+  return request<SubmissionTransitionResponse>(
+    'POST',
+    `/v1/admin/submissions/${encodeURIComponent(id)}/reject`,
+    { reason },
+    bearer,
+  );
+}
+
+export async function dismissSubmissionFlag(
+  bearer: string,
+  id: string,
+): Promise<SubmissionTransitionResponse> {
+  return request<SubmissionTransitionResponse>(
+    'POST',
+    `/v1/admin/submissions/${encodeURIComponent(id)}/dismiss-flag`,
     undefined,
     bearer,
   );

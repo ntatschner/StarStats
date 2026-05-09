@@ -114,9 +114,11 @@ export default async function MagicLinkRedeemPage(props: {
   }
 
   let emailVerified = false;
+  let staffRoles: string[] = [];
   try {
     const me = await getMe(auth.token);
     emailVerified = me.email_verified;
+    staffRoles = me.staff_roles ?? [];
   } catch (meErr) {
     logger.warn(
       { err: meErr },
@@ -128,6 +130,7 @@ export default async function MagicLinkRedeemPage(props: {
     userId: auth.user_id,
     claimedHandle: auth.claimed_handle,
     emailVerified,
+    staffRoles,
   });
   authAttemptsTotal.inc({ action: 'magic_redeem', outcome: 'success' });
   logger.info({ user_id: auth.user_id }, 'magic link redeem success');

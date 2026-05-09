@@ -100,9 +100,11 @@ export default async function LoginPage(props: {
     // Failure here is non-fatal: we degrade to `false` so the user
     // sees the verify banner, which is the safer default.
     let emailVerified = false;
+    let staffRoles: string[] = [];
     try {
       const me = await getMe(auth.token);
       emailVerified = me.email_verified;
+      staffRoles = me.staff_roles ?? [];
     } catch (meErr) {
       logger.warn(
         { err: meErr },
@@ -114,6 +116,7 @@ export default async function LoginPage(props: {
       userId: auth.user_id,
       claimedHandle: auth.claimed_handle,
       emailVerified,
+      staffRoles,
     });
     authAttemptsTotal.inc({ action: 'login', outcome: 'success' });
     logger.info({ user_id: auth.user_id }, 'login success');

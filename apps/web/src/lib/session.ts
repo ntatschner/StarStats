@@ -28,6 +28,18 @@ export interface Session {
    * the server-side state is verified.
    */
   emailVerified: boolean;
+  /**
+   * Site-wide staff grants the user holds (e.g. `["moderator"]`,
+   * `["admin"]`). Captured from `/v1/auth/me` at session-mint time so
+   * `/admin` gating doesn't need an extra API call per page nav. Admin
+   * implies moderator on the server side, so role checks here can use
+   * `.some(r => r === 'admin' || r === 'moderator')`.
+   *
+   * Legacy cookies minted before this field existed default to `[]`
+   * on read — degraded mode where staff users lose admin access until
+   * they re-authenticate.
+   */
+  staffRoles: string[];
 }
 
 interface SerialisedSession {
@@ -36,6 +48,8 @@ interface SerialisedSession {
   h: string;
   /** email_verified — optional in JSON for backwards compat. */
   v?: boolean;
+  /** staff_roles — optional in JSON for backwards compat. */
+  r?: string[];
 }
 
 export async function setSession(session: Session): Promise<void> {
@@ -45,6 +59,7 @@ export async function setSession(session: Session): Promise<void> {
     u: session.userId,
     h: session.claimedHandle,
     v: session.emailVerified,
+    r: session.staffRoles,
   };
   jar.set({
     name: COOKIE_NAME,
@@ -68,6 +83,7 @@ export async function getSession(): Promise<Session | null> {
       userId: parsed.u,
       claimedHandle: parsed.h,
       emailVerified: parsed.v ?? false,
+      staffRoles: parsed.r ?? [],
     };
   } catch {
     // Tampered or stale cookie — treat as no session.
