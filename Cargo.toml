@@ -56,7 +56,7 @@ unnecessary_map_or = "allow"
 starstats-core = { path = "crates/starstats-core" }
 
 # Async runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 
 # Serde
 serde = { version = "1.0", features = ["derive"] }
@@ -175,9 +175,9 @@ spicedb-grpc = "0.1"
 # because the SDK default pulls in the full `aws-config` credential
 # chain (STS / SSO / IMDS) which we deliberately avoid — the homelab
 # uses a static MinIO access key from a Docker secret.
-aws-sdk-s3 = { version = "=1.110.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.121.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-credential-types = ">=1.2.8, <1.2.12"
-aws-smithy-runtime-api = ">=1.10, <1.11.1"
+aws-smithy-runtime-api = ">=1.10, <1.11.4"
 
 [profile.release]
 lto = "thin"
