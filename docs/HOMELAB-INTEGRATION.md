@@ -437,17 +437,34 @@ docker compose logs starstats-api --tail=50
 docker compose logs starstats-web --tail=50
 ```
 
-After first bring-up, apply the SpiceDB schema:
+### REQUIRED on first deploy: apply the SpiceDB schema
+
+`spicedb-migrate` brings the datastore tables to head but does NOT write the
+authz schema — that's a separate, one-time step. Skipping it means every
+`check_permission` call returns "deny" because no relations are defined yet.
+
+Run from a checkout of this repo on a host that can reach the `t2_proxy`
+network (the dockerprime host itself works; the network name in
+`compose/starstats/compose.yml` is `t2_proxy`, not the older
+`voyager_t2_proxy`):
 
 ```bash
-docker run --rm --network voyager_t2_proxy \
-  -v ${DOCKERDIR}/starstats/spicedb:/schema:ro \
+docker run --rm --network t2_proxy \
+  -v "$(pwd)/infra/spicedb:/schema:ro" \
   authzed/zed:latest \
   --endpoint spicedb:50051 \
   --token "$(cat ${SECRETSDIR}/spicedb_preshared_key)" \
   --insecure \
   schema write /schema/schema.zed
 ```
+
+Subsequent deploys are no-ops for the schema unless `infra/spicedb/schema.zed`
+itself changed — `zed schema write` is idempotent on byte-identical input.
+
+> The older `${DOCKERDIR}/starstats/spicedb/` host bind-mount is obsolete: as
+> of the config-images split (Release workflow → `config-images` matrix), the
+> SpiceDB schema source-of-truth is the in-repo file. There's no rsync to
+> keep in sync anymore — checkout the repo, run the command, done.
 
 ## Connect Grafana datasources
 
