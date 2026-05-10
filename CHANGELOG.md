@@ -31,6 +31,152 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.3.10-alpha] — 2026-05-10
+
+### Added
+
+- **Core:** New `templates` module providing two deterministic
+  group-recognition primitives — `EventTemplate` for fixed-sequence
+  ritual matching with drift detection, and `BurstRule` for
+  variable-cardinality clustering with anchor + member + slack
+  budget. Both serialise/deserialise as JSON so future remote
+  delivery via `/v1/parser-definitions` is a drop-in.
+- **Core:** New `GameEvent::BurstSummary` variant carrying
+  `rule_id`, `size`, `end_timestamp`, and a truncated
+  `anchor_body_sample`. Validated server-side (non-empty rule id,
+  size > 0, ISO-8601 end timestamp).
+- **Tray:** Four built-in `BurstRule` definitions in
+  `crates/starstats-client/src/burst_rules.rs` —
+  `loadout_restore_burst`, `terrain_load_burst`,
+  `hud_notification_burst`, `vehicle_stowed_burst` — collapse the
+  four spammiest event clusters observed in real Game.log captures.
+- **Tray:** `gamelog::process_buffer` ingests in drain-bounded
+  batches; `detect_bursts` runs over the structurally-parsed subset,
+  emits one `BurstSummary` per hit, and suppresses member events
+  from being inserted at all. Idempotency key includes
+  `(anchor_offset, rule_id, size)` so retries after a tray crash
+  dedupe cleanly.
+- **Web:** Timeline renders `burst_summary` events with friendly
+  per-rule labels ("Loadout restored", "Terrain loaded",
+  "Notifications", "Vehicles stowed"); future remote-served rules
+  fall back to a generic "Burst" label.
+
+## [0.3.9-alpha] — 2026-05-09
+
+### Changed
+
+- **Tray:** "Discovered logs" status card collapses the per-file
+  list into a count + per-kind chip breakdown. Removes 4–10 rows of
+  per-path detail from the main status surface; the tray still
+  reads every discovered log, the UI just summarises.
+
+## [0.3.8-alpha] — 2026-05-09
+
+### Fixed
+
+- **RSI parsers:** All three HTML scrapers (orgs, public profile,
+  tray hangar) silently produced empty results because their CSS
+  selectors were authored against synthetic test fixtures rather
+  than RSI's real markup. Rewritten against verified live DOM
+  captured 2026-05-09: orgs key off `box-content org main|affiliation`
+  containers with labelled SID/rank entries; profile widens scope
+  from `.profile .entry` to `.profile-content .entry` (Enlisted /
+  Location / Bio live in a sibling `.left-col` outside `.profile`);
+  pledges read hidden-input `value=` attributes (not text content).
+
+### Changed
+
+- **CI:** clippy + test gate widened from `core+server` to
+  `core+server+client`. Adds `pnpm install` + tray-ui Vite build +
+  Linux Tauri system deps (libwebkit2gtk-4.1-dev, libgtk-3-dev,
+  etc.) so the Tauri proc-macro can compile against a populated
+  `apps/tray-ui/dist`. Pre-existing client clippy warnings resolved
+  (`while_let_loop` in `read_capped_text`, `manual_clamp` in
+  `clamp_timeline_limit`).
+
+## [0.3.7-alpha] — 2026-05-09
+
+### Added
+
+- **Server:** Admin foundation. New `staff_roles` table with
+  soft-delete revocation (`partial unique index … WHERE
+  revoked_at IS NULL`); `RequireModerator` / `RequireAdmin` axum
+  extractors; bootstrap-from-env helper
+  (`STARSTATS_BOOTSTRAP_ADMIN_HANDLES`); admin submission
+  moderation routes (accept / reject / dismiss-flag / queue) with
+  idempotent state transitions and audit-log writes.
+- **Web:** `/admin` shell + `/admin/submissions` moderation queue
+  with status filters, paginated list, and per-row server actions.
+  Left-rail conditionally renders "Staff › Admin" when the session
+  carries staff roles.
+- **Web:** RSI-orgs surface — `getMyRsiOrgs` / `getPublicRsiOrgs` /
+  `refreshRsiOrgs` API helpers; `OrgsCard` component shared between
+  dashboard and `/u/[handle]`; main org sorted first.
+- **Web:** Public/friend timeline heatmap rendered on
+  `/u/[handle]` mirroring the dashboard treatment.
+- **Web:** Hangar parity — `getMyHangar` (404 → null) + new
+  `HangarCard` component on dashboard and settings.
+
+### Changed
+
+- **Server:** Renamed `query::ListResponse` → `query::EventsListResponse`
+  to eliminate an OpenAPI schema collision with
+  `submission_routes::ListResponse` (utoipa keys component schemas
+  by Rust type name; the collision silently dropped one of the two
+  from the spec).
+- **Web:** Replaced hand-rolled `CommerceTransaction` and
+  `UserPreferences` types with intersections over the generated
+  `apiSchema` types; the narrow `kind` / `status` unions are
+  preserved via `Omit<…> &` overlay.
+
+### Fixed
+
+- **Tray:** `RedeemResponse.device_id` is now captured into
+  storage instead of being dropped (held under `#[allow(dead_code)]`
+  until the self-revoke UI lands).
+
+## [0.3.6-alpha] — 2026-05-08
+
+### Added
+
+- **Tray:** Hangar card surfaces affirmative RSI-fetch status
+  (last successful refresh + ship count) instead of a silent empty
+  pane when the cookie path is healthy.
+
+## [0.3.5-alpha] — 2026-05-08
+
+### Fixed
+
+- **Tray:** `set_rsi_cookie` IPC contract — frontend was sending a
+  flat `{cookie}` payload while the Tauri command expected a
+  wrapped struct; dropped the wrapper so the IPC matches.
+
+## [0.3.4-alpha] — 2026-05-08
+
+### Fixed
+
+- **Tray:** Header version now reads from the real Cargo workspace
+  `[workspace.package].version` instead of a stale hard-coded
+  constant.
+
+## [0.3.3-alpha] — 2026-05-08
+
+### Added
+
+- **Tray:** *Re-ingest* button under the Events tab — replays the
+  raw rotated `Game-*.log` files through the current parser, so
+  newly-added event types backfill historical sessions without
+  requiring the user to keep the original `Game.log` around.
+- **Repo:** Project front-door (CONTRIBUTING, SECURITY,
+  CODE_OF_CONDUCT, EAC-SAFETY, NOTICE) + starstats.app domain
+  wiring across README and docs.
+
+### Fixed
+
+- **Storage:** `for_each_event` releases the per-batch SQLite
+  connection lock between batches so the writer can make progress
+  on large local stores during a Re-parse.
+
 ## [0.3.2-alpha] — 2026-05-08
 
 ### Fixed
