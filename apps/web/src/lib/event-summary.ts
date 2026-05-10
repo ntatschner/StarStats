@@ -72,6 +72,13 @@ type GameEventPayload =
       type: 'vehicle_stowed';
       vehicle_id: string;
       landing_area: string;
+    })
+  | (BaseEvent & {
+      type: 'burst_summary';
+      rule_id: string;
+      size: number;
+      end_timestamp: string;
+      anchor_body_sample?: string | null;
     });
 
 /**
@@ -156,6 +163,23 @@ function formatKnown(
         .replace(/^\[PROC\]/, '')
         .replace(/^LandingArea_/, '');
       return `Ship ${event.vehicle_id} stowed at ${area}`;
+    }
+    case 'burst_summary': {
+      // Friendly per-rule labels for the four built-in BurstRules in
+      // `crates/starstats-client/src/burst_rules.rs`. Falls back to a
+      // generic "Burst" for any future remote-served rule we don't
+      // know about, so the timeline never renders blank.
+      const label =
+        event.rule_id === 'loadout_restore_burst'
+          ? 'Loadout restored'
+          : event.rule_id === 'terrain_load_burst'
+            ? 'Terrain loaded'
+            : event.rule_id === 'hud_notification_burst'
+              ? 'Notifications'
+              : event.rule_id === 'vehicle_stowed_burst'
+                ? 'Vehicles stowed'
+                : 'Burst';
+      return `${label} (${event.size} events)`;
     }
   }
 }
