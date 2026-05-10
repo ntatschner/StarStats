@@ -524,6 +524,10 @@ function eventBorderColor(eventType: string): string {
     case 'quantum_target_selected':
       return 'var(--accent)';
     case 'vehicle_stowed':
+    case 'burst_summary':
+      // Bursts collapse repetitive events into one summary row;
+      // share the `--info` accent with `vehicle_stowed` since those
+      // members are now folded into the summary in most cases.
       return 'var(--info)';
     case 'actor_death':
     case 'vehicle_destruction':
