@@ -25,12 +25,16 @@ definition stats_record {
     relation share_with_user: user
     relation public_view: user:*  // wildcard = anyone, including unauthenticated
 
-    permission view  = owner
-                     + share_with_user
-                     + share_with_org->view
-                     + share_with_org->view_all_member_stats
-                     + public_view
-    permission edit  = owner
+    // Single line on purpose: SpiceDB's schema parser does NOT accept
+    // a leading `+` on a continuation line — it terminates the
+    // expression at the previous line's last operand and then chokes
+    // on `+` as an unexpected token (caught on first dockerprime
+    // deploy: "parse error ... line N column 8: Expected end of
+    // statement or definition, found: TokenTypePlus"). If splitting
+    // for readability, put the `+` at the END of the previous line,
+    // not the start of the next one — that the parser does accept.
+    permission view = owner + share_with_user + share_with_org->view + share_with_org->view_all_member_stats + public_view
+    permission edit = owner
 }
 
 // 3rd-party OAuth application registered by a user
