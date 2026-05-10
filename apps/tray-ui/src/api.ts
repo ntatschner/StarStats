@@ -202,6 +202,14 @@ export interface ReparseStats {
   updated: number;
   kept_unmatched: number;
   promoted_unknowns: number;
+  /** Bursts retroactively detected over already-stored events. Each
+   *  hit produces one `burst_summary` row; the original member rows
+   *  are deleted. Sessions already collapsed at live-tail time are a
+   *  no-op (idempotency key matches the live shape). */
+  bursts_collapsed: number;
+  /** Total per-line member rows deleted as part of `bursts_collapsed`.
+   *  A single burst commonly absorbs 20+ rows. */
+  members_suppressed: number;
   error: string | null;
 }
 

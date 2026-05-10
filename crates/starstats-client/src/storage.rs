@@ -59,6 +59,20 @@ pub struct EventRow {
     pub source_offset: u64,
 }
 
+/// Lean projection used by the retro-burst phase of re-parse. Carries
+/// only the columns `detect_bursts` needs (raw line for
+/// `structural_parse`, offset for the idempotency key) plus the row
+/// `id` so members can be deleted after the summary is inserted, and
+/// `event_type` so already-collapsed `burst_summary` rows can be
+/// trivially skipped without re-parsing them.
+#[derive(Debug, Clone)]
+pub struct BurstScanRow {
+    pub id: i64,
+    pub raw_line: String,
+    pub source_offset: u64,
+    pub event_type: String,
+}
+
 /// One row from `unknown_event_samples`. Mirrors every non-id column
 /// in the table; the command layer maps it onto its serialised wire
 /// counterpart.
@@ -509,6 +523,51 @@ impl Storage {
             "UPDATE events SET type = ?, timestamp = ?, payload = ? WHERE id = ?",
             params![event_type, timestamp, payload_json, id],
         )?;
+        Ok(n)
+    }
+
+    /// Distinct `log_source` values present in `events`. Used by the
+    /// retro-burst phase of re-parse to walk one source's history at a
+    /// time so detect_bursts sees a single contiguous source-offset
+    /// stream rather than an interleaved multi-channel mix.
+    pub fn distinct_log_sources(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let mut stmt = conn.prepare("SELECT DISTINCT log_source FROM events ORDER BY log_source")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Lean projection of one `log_source`'s events, ordered by
+    /// `source_offset` (then `id` as a stable tiebreaker). Skips the
+    /// payload column because retro-burst only needs the raw line for
+    /// `structural_parse` and the offset for the idempotency key.
+    pub fn events_for_burst_scan(&self, log_source: &str) -> Result<Vec<BurstScanRow>> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, raw, source_offset, type
+             FROM events
+             WHERE log_source = ?
+             ORDER BY source_offset ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![log_source], |row| {
+            Ok(BurstScanRow {
+                id: row.get(0)?,
+                raw_line: row.get(1)?,
+                source_offset: row.get::<_, i64>(2)?.max(0) as u64,
+                event_type: row.get(3)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Hard-delete a single event row by id. Used by retro-burst to
+    /// suppress members that have been collapsed into a synthesised
+    /// `BurstSummary`. We delete rather than soft-delete because the
+    /// timeline reader has no notion of a tombstone column and a
+    /// soft-delete would force every read site to learn one.
+    pub fn delete_event_by_id(&self, id: i64) -> Result<usize> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let n = conn.execute("DELETE FROM events WHERE id = ?", params![id])?;
         Ok(n)
     }
 
