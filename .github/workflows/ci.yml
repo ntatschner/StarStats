@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: dtolnay/rust-toolchain@1.100.0
       with:
         components: clippy, rustfmt
     - uses: Swatinem/rust-cache@v2
@@ -85,7 +85,7 @@ jobs:
     # against the committed `schema.ts` — non-zero diff fails the job.
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: dtolnay/rust-toolchain@1.100.0
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: openapi-ubuntu-latest
@@ -170,7 +170,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: dtolnay/rust-toolchain@1.100.0
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: tauri-${{ matrix.os }}
