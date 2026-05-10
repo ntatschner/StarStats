@@ -22,7 +22,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@1.88.0
       with:
         components: clippy, rustfmt
@@ -63,7 +63,7 @@ jobs:
     name: Web (Next.js)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: pnpm/action-setup@v4
       with:
         version: 9.15.0
@@ -84,7 +84,7 @@ jobs:
     # generate the spec from the freshly-built Cargo bin and diff
     # against the committed `schema.ts` — non-zero diff fails the job.
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@1.88.0
     - uses: Swatinem/rust-cache@v2
       with:
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: web
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: pnpm/action-setup@v4
       with:
         version: 9.15.0
@@ -149,7 +149,7 @@ jobs:
     name: Tray UI (Vite)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: pnpm/action-setup@v4
       with:
         version: 9.15.0
@@ -169,7 +169,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@1.88.0
     - uses: Swatinem/rust-cache@v2
       with:
