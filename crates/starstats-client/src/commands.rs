@@ -14,8 +14,10 @@ use crate::secret::{SecretStore, ACCOUNT_RSI_SESSION_COOKIE};
 use crate::state::{AccountStatus, AppState};
 use crate::sync::{self, SyncStats};
 use serde::{Deserialize, Serialize};
+use starstats_core::templates::detect_bursts;
 use starstats_core::{
-    apply_remote_rules, classify, pair_transactions, structural_parse, GameEvent, Transaction,
+    apply_remote_rules, classify, pair_transactions, structural_parse, BurstSummary, GameEvent,
+    LogLine, Transaction,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -481,6 +483,15 @@ pub struct ReparseStats {
     /// Unknowns whose sample line now classifies. The first occurrence
     /// of each is promoted into `events`; the unknown row is removed.
     pub promoted_unknowns: u64,
+    /// Bursts retroactively detected over already-stored events. Each
+    /// hit produces one `burst_summary` row; the original member rows
+    /// are deleted. Sessions already collapsed at live-tail time are a
+    /// no-op here because the idempotency key matches the live shape.
+    pub bursts_collapsed: u64,
+    /// Total per-line member rows deleted as part of `bursts_collapsed`.
+    /// Surfaced separately so the user can see the spam-reduction effect
+    /// (a single burst commonly absorbs 20+ rows).
+    pub members_suppressed: u64,
     pub error: Option<String>,
 }
 
@@ -515,6 +526,8 @@ fn run_reparse(
         updated: 0,
         kept_unmatched: 0,
         promoted_unknowns: 0,
+        bursts_collapsed: 0,
+        members_suppressed: 0,
         error: None,
     };
 
@@ -632,7 +645,132 @@ fn run_reparse(
         stats.promoted_unknowns += 1;
     }
 
+    // Phase 3 — retro-burst detection. Walk each `log_source`'s history
+    // in source-offset order, run `detect_bursts` over the
+    // structural-parsed view, and replace matched runs with a single
+    // synthetic `BurstSummary` row plus member deletions. The
+    // idempotency key matches the live-tail format (UUIDv5 over
+    // `log_source : anchor_offset : "{raw_line}|burst:{rule_id}:{size}"`)
+    // so a session that was already collapsed live can never produce a
+    // duplicate summary, and re-running this phase is a strict no-op
+    // once the members have been deleted.
+    let burst_rules = crate::burst_rules::builtin_burst_rules();
+    let sources = match storage.distinct_log_sources() {
+        Ok(s) => s,
+        Err(e) => {
+            stats.error = Some(format!("phase 3: distinct_log_sources: {e}"));
+            return Ok(stats);
+        }
+    };
+    for source in sources {
+        let rows = match storage.events_for_burst_scan(&source) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, log_source = %source, "phase 3: events_for_burst_scan");
+                continue;
+            }
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        // Project to (parseable_index → row_idx) so detect_bursts sees a
+        // contiguous LogLine stream without holes from corrupt or
+        // truncated raw lines. Also skip already-collapsed
+        // `burst_summary` rows from a previous pass — re-parsing them
+        // would just no-op anyway, but skipping is cheaper than
+        // re-running detect_bursts over them.
+        let parsed: Vec<(usize, LogLine<'_>)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.event_type != "burst_summary")
+            .filter_map(|(idx, r)| structural_parse(&r.raw_line).map(|l| (idx, l)))
+            .collect();
+        if parsed.len() < 2 {
+            continue;
+        }
+        let log_lines: Vec<LogLine<'_>> = parsed.iter().map(|(_, l)| l.clone()).collect();
+        let hits = detect_bursts(&log_lines, &burst_rules);
+
+        for hit in hits {
+            // Map BurstHit indices (into `log_lines`) back to row
+            // positions, then back to a BurstScanRow ref for the anchor
+            // (the only one we need a stable id/offset/raw_line for —
+            // the end position contributes only its timestamp via
+            // `end_log` below).
+            let anchor_row_idx = parsed[hit.start_index].0;
+            let anchor_row = &rows[anchor_row_idx];
+            let anchor_log = &log_lines[hit.start_index];
+            let end_log = &log_lines[hit.end_index];
+            let member_db_ids: Vec<i64> = hit
+                .member_indices
+                .iter()
+                .map(|&i| rows[parsed[i].0].id)
+                .collect();
+
+            // Cap the anchor body before storing so a 20-page inventory
+            // dump doesn't end up in the timeline payload. Matches the
+            // 200-char cap in `process_buffer`.
+            let sample: String = anchor_log.body.chars().take(200).collect();
+            let summary = GameEvent::BurstSummary(BurstSummary {
+                timestamp: anchor_log.timestamp.to_string(),
+                rule_id: hit.rule_id.clone(),
+                size: hit.size as u32,
+                end_timestamp: end_log.timestamp.to_string(),
+                anchor_body_sample: if sample.is_empty() {
+                    None
+                } else {
+                    Some(sample)
+                },
+            });
+
+            let Some((event_type, ts, payload)) = serialise_for_reparse(&summary) else {
+                tracing::warn!(rule = %hit.rule_id, "phase 3: serialise BurstSummary");
+                continue;
+            };
+
+            let synthetic_line =
+                format!("{}|burst:{}:{}", anchor_row.raw_line, hit.rule_id, hit.size);
+            let key = burst_idempotency_key(&source, anchor_row.source_offset, &synthetic_line);
+
+            if let Err(e) = storage.insert_event(
+                &key,
+                &event_type,
+                &ts,
+                &anchor_row.raw_line,
+                &payload,
+                &source,
+                anchor_row.source_offset,
+            ) {
+                tracing::warn!(error = %e, rule = %hit.rule_id, "phase 3: insert burst summary");
+                continue;
+            }
+
+            // Delete each member row. The summary itself was inserted
+            // under a fresh idempotency key (different from any
+            // member's), so deleting members can never delete the
+            // summary we just wrote.
+            for id in &member_db_ids {
+                match storage.delete_event_by_id(*id) {
+                    Ok(n) => stats.members_suppressed = stats.members_suppressed.saturating_add(n as u64),
+                    Err(e) => tracing::warn!(error = %e, id = id, "phase 3: delete member"),
+                }
+            }
+            stats.bursts_collapsed += 1;
+        }
+    }
+
     Ok(stats)
+}
+
+/// Idempotency key for a retro-emitted burst summary. Same shape as
+/// `gamelog::idempotency_key` (UUIDv5 over `source:offset:line`) so a
+/// session that was already collapsed at live-tail time produces an
+/// identical key and the `ON CONFLICT DO NOTHING` clause keeps the
+/// existing row instead of inserting a duplicate.
+fn burst_idempotency_key(log_source: &str, offset: u64, synthetic_line: &str) -> String {
+    use uuid::Uuid;
+    let payload = format!("{log_source}:{offset}:{synthetic_line}");
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, payload.as_bytes()).to_string()
 }
 
 /// Outcome of `reingest_rotated_logs`. Mirrors the on-disk shape of
@@ -1261,8 +1399,98 @@ fn redact(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_timeline_limit, redact, validate_pair_url, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT,
+        clamp_timeline_limit, redact, run_reparse, validate_pair_url, DEFAULT_TIMELINE_LIMIT,
+        MAX_TIMELINE_LIMIT,
     };
+    use crate::storage::Storage;
+    use tempfile::TempDir;
+
+    /// Phase 3 retro-burst end-to-end test. Seeds a fresh SQLite with a
+    /// 5-line `AttachmentReceived` run (matches the
+    /// `loadout_restore_burst` rule's min_burst_size of 3), runs
+    /// `run_reparse`, and asserts the row count collapsed to 1
+    /// `burst_summary` plus the expected stat fields.
+    ///
+    /// Re-running the same `run_reparse` over the post-collapse state
+    /// must be a strict no-op (idempotency invariant).
+    #[test]
+    fn retro_burst_collapses_attachment_run() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("retro_burst.sqlite3");
+        let storage = Storage::open(&path).expect("open storage");
+
+        // Seed 5 AttachmentReceived lines + 1 unrelated line at the end
+        // so we can verify the unrelated row survives. Use plausible
+        // raw lines that `structural_parse` accepts and that the
+        // `loadout_restore_burst` rule matches (event_name
+        // `AttachmentReceived` + tag `Inventory`).
+        let attachment_line = |i: u64| {
+            format!(
+                "<2026-05-10T12:00:0{}.000Z> [Notice] <AttachmentReceived> body_{} [Inventory]",
+                i, i
+            )
+        };
+        for i in 0..5u64 {
+            let line = attachment_line(i);
+            let key = format!("seed:LIVE:{}:{}", i * 100, line);
+            let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string();
+            storage
+                .insert_event(
+                    &key,
+                    "attachment_received",
+                    &format!("2026-05-10T12:00:0{}.000Z", i),
+                    &line,
+                    "{}",
+                    "LIVE",
+                    i * 100,
+                )
+                .expect("insert attachment");
+        }
+        let unrelated = "<2026-05-10T12:01:00.000Z> [Notice] <Join PU> address[1.2.3.4] port[1234] shard[pub_x_1_1] locationId[1] [Team_GameServices]";
+        let key = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("seed:LIVE:9999:{}", unrelated).as_bytes(),
+        )
+        .to_string();
+        storage
+            .insert_event(
+                &key,
+                "join_pu",
+                "2026-05-10T12:01:00.000Z",
+                unrelated,
+                "{}",
+                "LIVE",
+                9999,
+            )
+            .expect("insert unrelated");
+
+        assert_eq!(storage.total_events().expect("count"), 6);
+
+        // Pass empty remote rules — Phase 3 (retro-burst) is the only
+        // path under test; built-in classification on the seed lines is
+        // immaterial.
+        let stats = run_reparse(&storage, &[]).expect("reparse");
+        assert!(stats.error.is_none(), "reparse error: {:?}", stats.error);
+        assert_eq!(stats.bursts_collapsed, 1, "expected one burst collapsed");
+        assert_eq!(
+            stats.members_suppressed, 5,
+            "expected all 5 attachment rows suppressed"
+        );
+
+        // After collapse: 1 burst_summary + 1 unrelated event = 2 rows.
+        assert_eq!(
+            storage.total_events().expect("count"),
+            2,
+            "expected 5 attachments collapsed into 1 summary + 1 unrelated row"
+        );
+
+        // Idempotency: running again finds nothing new.
+        let stats2 = run_reparse(&storage, &[]).expect("reparse #2");
+        assert!(stats2.error.is_none(), "reparse #2 error: {:?}", stats2.error);
+        assert_eq!(stats2.bursts_collapsed, 0, "second pass must be a no-op");
+        assert_eq!(stats2.members_suppressed, 0);
+        assert_eq!(storage.total_events().expect("count"), 2);
+    }
 
     #[test]
     fn clamp_timeline_limit_uses_default_when_none() {

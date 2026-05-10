@@ -31,6 +31,29 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.3.11-alpha] — 2026-05-10
+
+### Added
+
+- **Tray:** Re-parse now retroactively detects bursts over already-
+  stored events. New Phase 3 walks each `log_source` in
+  `source_offset` order, runs `detect_bursts` over the
+  structural-parsed view, inserts one `BurstSummary` per hit, and
+  hard-deletes the member rows. Surfaces `bursts_collapsed` and
+  `members_suppressed` in `ReparseStats`; the *Re-parse* status line
+  reports `…collapsed N bursts (suppressed M spam rows)…` when the
+  pass fires. Idempotency key reuses the live-tail format
+  (`UUIDv5(log_source : anchor_offset : "{raw_line}|burst:{rule_id}:{size}")`)
+  so a session already collapsed at live-ingest time stays a
+  strict no-op, and re-running Phase 3 over post-collapse history
+  finds nothing to do.
+- **Storage:** Three new lean helpers on `Storage` —
+  `distinct_log_sources()`, `events_for_burst_scan(log_source)`
+  (returns `(id, raw, source_offset, type)` ordered by source
+  offset), and `delete_event_by_id(id)`. The first two scope retro-
+  burst's working set to one channel at a time so spam-clusters
+  spanning channel boundaries can't accidentally fuse.
+
 ## [0.3.10-alpha] — 2026-05-10
 
 ### Added
@@ -284,7 +307,8 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
   `GameCrash`, `LauncherActivity`, `RemoteMatch`,
   `MissionStart` / `MissionEnd`, `SessionEnd`.
 
-[Unreleased]: https://github.com/ntatschner/StarStats/compare/v0.3.2-alpha...HEAD
+[Unreleased]: https://github.com/ntatschner/StarStats/compare/v0.3.11-alpha...HEAD
+[0.3.11-alpha]: https://github.com/ntatschner/StarStats/compare/v0.3.10-alpha...v0.3.11-alpha
 [0.3.2-alpha]: https://github.com/ntatschner/StarStats/compare/v0.3.1-alpha...v0.3.2-alpha
 [0.3.1-alpha]: https://github.com/ntatschner/StarStats/compare/v0.3.0-alpha...v0.3.1-alpha
 [0.3.0-alpha]: https://github.com/ntatschner/StarStats/compare/v0.2.0-alpha...v0.3.0-alpha

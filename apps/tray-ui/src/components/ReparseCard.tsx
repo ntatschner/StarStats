@@ -91,8 +91,22 @@ function ReparseStatusLine({ state }: { state: State }) {
     );
   }
 
-  const { examined, updated, kept_unmatched, promoted_unknowns } = state.result;
-  const noChanges = updated === 0 && promoted_unknowns === 0;
+  const {
+    examined,
+    updated,
+    kept_unmatched,
+    promoted_unknowns,
+    bursts_collapsed,
+    members_suppressed,
+  } = state.result;
+  const noChanges =
+    updated === 0 && promoted_unknowns === 0 && bursts_collapsed === 0;
+  const burstFragment =
+    bursts_collapsed > 0
+      ? `, collapsed ${bursts_collapsed.toLocaleString()} burst${
+          bursts_collapsed === 1 ? '' : 's'
+        } (suppressed ${members_suppressed.toLocaleString()} spam rows)`
+      : '';
   return (
     <div
       style={{
@@ -103,7 +117,7 @@ function ReparseStatusLine({ state }: { state: State }) {
     >
       {noChanges
         ? `Examined ${examined.toLocaleString()} events — no changes`
-        : `Updated ${updated.toLocaleString()} events, promoted ${promoted_unknowns.toLocaleString()} unknowns (examined ${examined.toLocaleString()}, kept ${kept_unmatched.toLocaleString()} as-is).`}
+        : `Updated ${updated.toLocaleString()} events, promoted ${promoted_unknowns.toLocaleString()} unknowns${burstFragment} (examined ${examined.toLocaleString()}, kept ${kept_unmatched.toLocaleString()} as-is).`}
     </div>
   );
 }
