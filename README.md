@@ -79,6 +79,13 @@ Pulled from RSI (when you've pasted your session cookie):
 - **Transaction pairing.** Buy and sell requests are matched against
   their flow-response confirmations into a single completed order
   with price, quantity, and location resolved.
+- **Burst collapse.** Spammy multi-line bursts in `Game.log` —
+  loadout-restore shower, terrain-load blast, jurisdiction HUD
+  stutters, hangar vehicle-stowed runs — fold into one
+  `BurstSummary` row per group via the deterministic
+  template/burst matcher in `crates/starstats-core/src/templates.rs`.
+  Members are suppressed at ingest; the web timeline renders the
+  summary with a friendly per-rule label and event count.
 - **Web companion.** A Next.js dashboard that surfaces the same data
   with sharing controls and a longer history view than the tray
   affords.
