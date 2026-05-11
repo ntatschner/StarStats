@@ -169,6 +169,33 @@ impl SpicedbClient {
     // `WriteRelationships` RPC per call. None of these methods batch
     // — share grants/revokes are user-initiated and rare.
 
+    /// Write the owner relationship for a stats_record, encoding
+    /// "this handle owns its own stats record":
+    /// `stats_record:<handle>#owner@user:<handle>`.
+    ///
+    /// Called once per signup. Idempotent (TOUCH semantics) — also
+    /// safe to invoke from any path that wants to ensure the
+    /// relation exists (e.g. a future backfill for accounts that
+    /// pre-date this wiring).
+    ///
+    /// Without this relation, the `stats_record.view` permission
+    /// (which sums `owner + share_with_user + share_with_org->view +
+    /// share_with_org->view_all_member_stats + public_view`) is empty
+    /// for a freshly-created account — so any reinstated SpiceDB
+    /// self-view gate would 403 the owner of the data. See the
+    /// `query::summary` comment block (which skips SpiceDB on
+    /// self-view today) for the historical context.
+    pub async fn write_owner(&self, handle: &str) -> Result<()> {
+        let mut req = WriteRelationshipsRequest::default();
+        req.update_relationship("stats_record", handle, "owner", "user", handle);
+        let mut inner = self.inner.clone();
+        inner
+            .write_relationships(req)
+            .await
+            .context("SpiceDB WriteRelationships (owner) failed")?;
+        Ok(())
+    }
+
     /// Mark a stats_record as publicly viewable by writing the
     /// wildcard relationship `stats_record:<handle>#public_view@user:*`.
     ///

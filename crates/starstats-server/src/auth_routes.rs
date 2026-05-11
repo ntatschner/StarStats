@@ -220,6 +220,7 @@ pub async fn signup<U: UserStore>(
     State(users): State<Arc<U>>,
     Extension(issuer): Extension<Arc<TokenIssuer>>,
     Extension(mailer): Extension<Arc<dyn Mailer>>,
+    Extension(spicedb): Extension<Arc<Option<crate::spicedb::SpicedbClient>>>,
     Json(req): Json<SignupRequest>,
 ) -> impl IntoResponse {
     if let Some(resp) = validate_signup(&req) {
@@ -255,6 +256,24 @@ pub async fn signup<U: UserStore>(
             return error(StatusCode::INTERNAL_SERVER_ERROR, "internal", None);
         }
     };
+
+    // Best-effort: register the new user as the owner of their own
+    // stats_record in SpiceDB. Without this relation, any future
+    // SpiceDB-gated read of the user's own data would 403 (the gate
+    // sees an empty `view` permission set). Failure here is logged
+    // and ignored — we don't block signup on a SpiceDB blip, and a
+    // missing relation is fixed by any subsequent call that re-issues
+    // the TOUCH (e.g. the user re-saving public_view from /settings).
+    if let Some(client) = spicedb.as_ref() {
+        if let Err(e) = client.write_owner(&user.claimed_handle).await {
+            tracing::warn!(
+                error = %e,
+                user_id = %user.id,
+                handle = %user.claimed_handle,
+                "SpiceDB owner relation write failed on signup"
+            );
+        }
+    }
 
     // Best-effort verification email. Token persistence and mail send
     // are both swallowed on failure — the user account exists, the
@@ -1159,6 +1178,11 @@ mod tests {
             .layer(Extension(mailer))
             .layer(Extension(audit))
             .layer(Extension(staff_roles_dyn))
+            // signup reads this and skips the SpiceDB call when None.
+            // Tests don't stand up a real SpiceDB; mirroring the
+            // optional-extension pattern from main.rs keeps the test
+            // path identical to a real "SPICEDB_URL not set" deploy.
+            .layer(Extension(Arc::new(None::<crate::spicedb::SpicedbClient>)))
             .with_state(users);
         (app, verifier)
     }
