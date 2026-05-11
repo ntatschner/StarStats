@@ -59,6 +59,64 @@ pub struct SyncStats {
     pub events_rejected: u64,
 }
 
+/// Abort the currently-running sync worker (if any) and spawn a
+/// fresh one with the current persisted config. Used by `save_config`
+/// and `redeem_pair` to pick up new tokens / endpoints / enabled-flag
+/// values without requiring an app restart.
+///
+/// Idempotent: calling it when the new config also fails to spawn a
+/// worker (e.g. `enabled = false`) just leaves `sync_handle` as
+/// `None`, which is the same state the boot path would produce.
+///
+/// Reads config from disk so the caller doesn't have to thread the
+/// fresh config in — there's exactly one place that mutates it
+/// (`config::save`), and it's always called before this helper.
+pub fn respawn(
+    storage: Arc<crate::storage::Storage>,
+    sync_stats: Arc<parking_lot::Mutex<SyncStats>>,
+    account_status: Arc<parking_lot::Mutex<crate::state::AccountStatus>>,
+    sync_kick: Arc<Notify>,
+    sync_handle: Arc<parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+) {
+    // Abort first so the old worker stops draining with stale auth
+    // before we spawn a new one. `abort()` is non-blocking; the
+    // tokio runtime cleans up at the next poll.
+    if let Some(old) = sync_handle.lock().take() {
+        old.abort();
+        tracing::info!("sync: aborted previous worker");
+    }
+
+    let cfg = match crate::config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "sync respawn: config load failed; leaving worker stopped");
+            return;
+        }
+    };
+
+    let new_handle = start(
+        cfg.remote_sync.clone(),
+        storage,
+        sync_stats,
+        account_status,
+        sync_kick,
+    );
+
+    if new_handle.is_some() {
+        tracing::info!(
+            enabled = cfg.remote_sync.enabled,
+            has_api_url = cfg.remote_sync.api_url.is_some(),
+            "sync: spawned fresh worker"
+        );
+    } else {
+        tracing::info!(
+            enabled = cfg.remote_sync.enabled,
+            "sync: config incomplete or disabled; no worker running"
+        );
+    }
+    *sync_handle.lock() = new_handle;
+}
+
 /// Spawn the sync worker. The returned task handle drops with the
 /// runtime; the worker runs forever (or until shutdown). Returns
 /// `None` if remote sync is disabled or the config is incomplete.

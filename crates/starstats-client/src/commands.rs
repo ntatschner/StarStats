@@ -257,8 +257,21 @@ pub async fn install_update_for_channel(
 }
 
 #[tauri::command]
-pub fn save_config(cfg: Config) -> Result<(), String> {
-    config::save(&cfg).map_err(|e| e.to_string())
+pub fn save_config(state: State<'_, AppState>, cfg: Config) -> Result<(), String> {
+    config::save(&cfg).map_err(|e| e.to_string())?;
+    // Respawn the sync worker so a toggle of `remote_sync.enabled`
+    // (or any other field — URL, token, batch size, etc.) takes
+    // effect immediately instead of waiting for the next app start.
+    // Idempotent: when the new config disables sync, respawn aborts
+    // the old worker and leaves the handle as None.
+    sync::respawn(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.sync_stats),
+        Arc::clone(&state.account_status),
+        Arc::clone(&state.sync_kick),
+        Arc::clone(&state.sync_handle),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -1219,16 +1232,27 @@ pub async fn pair_device(
     cfg.remote_sync.enabled = true;
     config::save(&cfg).map_err(|e| e.to_string())?;
 
-    // Reset auth_lost — we just minted a fresh token. The running
-    // sync worker (if any) was spawned with the old token and won't
-    // pick up the new one until the next app start; that's acceptable
-    // for now and matches the existing "Save settings → restart"
-    // contract. Future: respawn the worker here.
+    // Reset auth_lost — we just minted a fresh token. Order matters:
+    // clear auth_lost BEFORE respawn so the new worker doesn't read
+    // a stale `auth_lost = true` from the previous session and skip
+    // its first drain.
     {
         let mut s = state.account_status.lock();
         s.auth_lost = false;
         s.email_verified = None;
     }
+
+    // Respawn the sync worker with the just-persisted token. Previously
+    // this required a tray restart — the worker spawned at boot with
+    // `enabled = false` returned None and there was no mechanism to
+    // start a fresh one. Mirrors the save_config respawn pattern.
+    sync::respawn(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.sync_stats),
+        Arc::clone(&state.account_status),
+        Arc::clone(&state.sync_kick),
+        Arc::clone(&state.sync_handle),
+    );
 
     // Best-effort: hydrate email_verified for the UI banner. If the
     // call fails (network blip), the banner just stays absent until

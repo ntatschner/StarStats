@@ -201,8 +201,12 @@ fn main() {
             let hangar_kick = Arc::new(tokio::sync::Notify::new());
 
             // 2a/2b/2c. Sync worker + account-status hydration +
-            //           hangar refresh worker.
-            start_sync_workers(
+            //           hangar refresh worker. The sync handle is
+            //           stashed into AppState so `save_config` and
+            //           `redeem_pair` can abort+respawn this worker
+            //           when the user toggles `remote_sync.enabled`
+            //           or pairs a new device.
+            let initial_sync_handle = start_sync_workers(
                 Arc::clone(&storage),
                 Arc::clone(&sync_stats),
                 Arc::clone(&hangar_stats),
@@ -210,6 +214,7 @@ fn main() {
                 Arc::clone(&sync_kick),
                 Arc::clone(&hangar_kick),
             );
+            let sync_handle = Arc::new(parking_lot::Mutex::new(initial_sync_handle));
 
             // 3. Discover Game.log and start tailing the most recently
             //    modified one (LIVE if the user just played).
@@ -288,6 +293,7 @@ fn main() {
                 crash_stats,
                 backfill_stats,
                 parser_def_cache,
+                sync_handle,
                 _tail_handle: parking_lot::Mutex::new(watcher),
                 _launcher_handle: parking_lot::Mutex::new(launcher_watcher),
             });
@@ -455,10 +461,10 @@ fn start_sync_workers(
     account_status: Arc<parking_lot::Mutex<AccountStatus>>,
     sync_kick: Arc<tokio::sync::Notify>,
     hangar_kick: Arc<tokio::sync::Notify>,
-) {
+) -> Option<tauri::async_runtime::JoinHandle<()>> {
     let app_config = config::load().unwrap_or_default();
 
-    let _sync_handle = sync::start(
+    let sync_handle = sync::start(
         app_config.remote_sync.clone(),
         storage,
         sync_stats,
@@ -506,6 +512,8 @@ fn start_sync_workers(
             }
         });
     }
+
+    sync_handle
 }
 
 /// Picks the largest discovered live `Game.log` and starts tailing

@@ -65,6 +65,12 @@ pub struct AppState {
     /// button — re-parsing should use the SAME rule set the live
     /// tail is using right then.
     pub parser_def_cache: crate::parser_defs::RuleCache,
+    /// Handle to the running sync worker. Wrapped in a Mutex so the
+    /// `save_config` and `redeem_pair` commands can abort it and spawn
+    /// a fresh one when the user toggles `remote_sync.enabled` or
+    /// pairs a new device — without requiring a full app restart.
+    /// `None` when sync is disabled or the config is incomplete.
+    pub sync_handle: Arc<parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
     /// Held for its lifetime — drop ends filesystem watching.
     pub _tail_handle: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
     /// Same as `_tail_handle` but for the launcher-log watcher.
