@@ -24,7 +24,7 @@
 //! the rest of the API.
 
 use crate::api_error::ApiErrorBody;
-use crate::auth::{AuthenticatedUser, TokenType};
+use crate::auth::AuthenticatedUser;
 use crate::rsi_org_store::{PostgresRsiOrgStore, RsiOrgStore};
 use crate::rsi_verify::{RsiClient, RsiOrg, RsiOrgsOutcome};
 use crate::spicedb::{ObjectRef, SpicedbClient};
@@ -155,19 +155,13 @@ fn sanitise_orgs(orgs: Vec<RsiOrg>) -> Vec<RsiOrg> {
         .collect()
 }
 
-/// Reject device tokens. The desktop client doesn't surface
-/// org-membership management; refresh + read-me are user-account ops
-/// mirroring the posture in `rsi_verify_routes` / `rsi_profile_routes`.
-fn require_user_token(user: &AuthenticatedUser) -> Option<Response> {
-    if !matches!(user.token_type, TokenType::User) {
-        return Some(error(
-            StatusCode::FORBIDDEN,
-            "user_token_required",
-            Some("device tokens cannot read or refresh RSI org snapshots".into()),
-        ));
-    }
-    None
-}
+// `require_user_token` (removed) used to 403 anything but user-session
+// JWTs. Pairing only mints device JWTs, so the gate left the tray
+// unable to push or read org membership snapshots (org affiliation
+// shipped alongside the v0.3.7-alpha public-profile work). Gate removed;
+// both endpoints now accept any authenticated JWT for the caller's own
+// user. Same posture and reasoning as the hangar_routes /
+// rsi_profile_routes fixes.
 
 use crate::users::validate_handle;
 
@@ -179,7 +173,6 @@ use crate::users::validate_handle;
     responses(
         (status = 200, description = "Snapshot refreshed", body = crate::rsi_org_store::RsiOrgsSnapshot),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 404, description = "RSI returned 404 for the claimed handle", body = ApiErrorBody),
         (status = 422, description = "Caller has not yet verified their RSI handle", body = ApiErrorBody),
         (status = 429, description = "Cooldown not elapsed; try again later", body = ApiErrorBody),
@@ -193,10 +186,6 @@ pub async fn refresh<U: UserStore, S: RsiOrgStore>(
     Extension(rsi): Extension<Arc<dyn RsiClient>>,
     auth: AuthenticatedUser,
 ) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     let user_id = match Uuid::parse_str(&auth.sub) {
         Ok(id) => id,
         Err(_) => {
@@ -280,17 +269,12 @@ pub async fn refresh<U: UserStore, S: RsiOrgStore>(
     responses(
         (status = 200, description = "Latest snapshot for the caller", body = crate::rsi_org_store::RsiOrgsSnapshot),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 404, description = "No snapshot has been captured yet", body = ApiErrorBody),
         (status = 500, description = "Server error", body = ApiErrorBody),
     ),
     security(("BearerAuth" = []))
 )]
 pub async fn me<S: RsiOrgStore>(State(store): State<Arc<S>>, auth: AuthenticatedUser) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     let user_id = match Uuid::parse_str(&auth.sub) {
         Ok(id) => id,
         Err(_) => {

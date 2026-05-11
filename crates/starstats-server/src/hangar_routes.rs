@@ -12,7 +12,7 @@
 //! API.
 
 use crate::api_error::ApiErrorBody;
-use crate::auth::{AuthenticatedUser, TokenType};
+use crate::auth::AuthenticatedUser;
 use crate::hangar_store::{HangarSnapshot, HangarStore};
 use axum::{
     extract::{DefaultBodyLimit, State},
@@ -87,19 +87,18 @@ pub struct HangarShipSchema {
     pub kind: Option<String>,
 }
 
-/// Reject device tokens. Hangar push + read are user-account ops; the
-/// desktop client uses its paired user JWT, not its device JWT, for
-/// these endpoints. Mirrors the posture in `rsi_profile_routes`.
-fn require_user_token(user: &AuthenticatedUser) -> Option<Response> {
-    if !matches!(user.token_type, TokenType::User) {
-        return Some(error(
-            StatusCode::FORBIDDEN,
-            "user_token_required",
-            Some("device tokens cannot read or push hangar snapshots".into()),
-        ));
-    }
-    None
-}
+// `require_user_token` was previously a gate that 403'd anything but
+// user-session JWTs. The intent (per its original comment: "the
+// desktop client uses its paired user JWT, not its device JWT, for
+// these endpoints") was never wired — pairing only mints device
+// JWTs, so the tray was the ONLY system that could fetch hangar
+// data (via the user's RSI session cookie, held in the OS keychain
+// on the tray's host) and the gate left it unable to deliver. Gate
+// removed; both endpoints now accept any authenticated JWT for the
+// caller's own user. Authentication identity is still verified by
+// `AuthenticatedUser`; ingest-adjacent code cross-checks the bearer
+// against `claimed_handle` so a token can't push under another
+// user's handle.
 
 fn error(status: StatusCode, code: &'static str, detail: Option<String>) -> Response {
     (
@@ -122,7 +121,6 @@ fn error(status: StatusCode, code: &'static str, detail: Option<String>) -> Resp
         (status = 200, description = "Snapshot persisted", body = HangarSnapshot),
         (status = 400, description = "Schema-level rejection", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 500, description = "Server error", body = ApiErrorBody),
     ),
     security(("BearerAuth" = []))
@@ -132,10 +130,6 @@ pub async fn push<S: HangarStore>(
     auth: AuthenticatedUser,
     Json(body): Json<starstats_core::wire::HangarPushRequest>,
 ) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     if body.schema_version != 1 {
         return error(
             StatusCode::BAD_REQUEST,
@@ -208,17 +202,12 @@ fn validate_ships(ships: &[HangarShip]) -> Option<String> {
     responses(
         (status = 200, description = "Latest hangar snapshot for the caller", body = HangarSnapshot),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 404, description = "No snapshot has been pushed yet", body = ApiErrorBody),
         (status = 500, description = "Server error", body = ApiErrorBody),
     ),
     security(("BearerAuth" = []))
 )]
 pub async fn me<S: HangarStore>(State(store): State<Arc<S>>, auth: AuthenticatedUser) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     let user_id = match Uuid::parse_str(&auth.sub) {
         Ok(id) => id,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "bad_subject", None),

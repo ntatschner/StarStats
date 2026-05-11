@@ -30,7 +30,7 @@
 //! away from utoipa-derived clients keeps working.
 
 use crate::api_error::ApiErrorBody;
-use crate::auth::{AuthenticatedUser, TokenType};
+use crate::auth::AuthenticatedUser;
 use crate::profile_store::{
     PostgresProfileStore, ProfileSnapshot, ProfileStore, ProfileStoreError,
 };
@@ -182,19 +182,14 @@ fn error(status: StatusCode, code: &'static str, detail: Option<String>) -> Resp
         .into_response()
 }
 
-/// Reject device tokens. The desktop client doesn't surface profile
-/// management; refresh + read-me are user-account ops mirroring the
-/// posture in `rsi_verify_routes`.
-fn require_user_token(user: &AuthenticatedUser) -> Option<Response> {
-    if !matches!(user.token_type, TokenType::User) {
-        return Some(error(
-            StatusCode::FORBIDDEN,
-            "user_token_required",
-            Some("device tokens cannot read or refresh RSI profile snapshots".into()),
-        ));
-    }
-    None
-}
+// `require_user_token` (removed) used to 403 anything but user-session
+// JWTs. The original comment said "the desktop client doesn't surface
+// profile management" — but the tray DOES surface RSI profile pushes
+// (see CHANGELOG v0.3.7-alpha: public-profile snapshot handle / citizen
+// number / enlisted-since). Pairing only mints device JWTs, so the gate
+// left the tray unable to deliver any of that data. Gate removed; both
+// endpoints now accept any authenticated JWT for the caller's own user.
+// Same posture and reasoning as the hangar_routes fix.
 
 use crate::users::validate_handle;
 
@@ -206,7 +201,6 @@ use crate::users::validate_handle;
     responses(
         (status = 200, description = "Snapshot refreshed", body = ProfileResponse),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 404, description = "RSI returned 404 for the claimed handle", body = ApiErrorBody),
         (status = 422, description = "Caller has not yet verified their RSI handle", body = ApiErrorBody),
         (status = 429, description = "Cooldown not elapsed; try again later", body = ApiErrorBody),
@@ -220,10 +214,6 @@ pub async fn refresh<U: UserStore, P: ProfileStore>(
     Extension(rsi): Extension<Arc<dyn RsiClient>>,
     auth: AuthenticatedUser,
 ) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     let user_id = match Uuid::parse_str(&auth.sub) {
         Ok(id) => id,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "bad_subject", None),
@@ -320,7 +310,6 @@ pub async fn refresh<U: UserStore, P: ProfileStore>(
     responses(
         (status = 200, description = "Latest snapshot for the caller", body = ProfileResponse),
         (status = 401, description = "Missing or invalid bearer token"),
-        (status = 403, description = "Caller is a device token", body = ApiErrorBody),
         (status = 404, description = "No snapshot has been captured yet", body = ApiErrorBody),
         (status = 500, description = "Server error", body = ApiErrorBody),
     ),
@@ -330,10 +319,6 @@ pub async fn me<P: ProfileStore>(
     State(profiles): State<Arc<P>>,
     auth: AuthenticatedUser,
 ) -> Response {
-    if let Some(resp) = require_user_token(&auth) {
-        return resp;
-    }
-
     let user_id = match Uuid::parse_str(&auth.sub) {
         Ok(id) => id,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "bad_subject", None),
