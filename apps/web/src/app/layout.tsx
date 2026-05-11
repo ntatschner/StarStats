@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getSession } from '@/lib/session';
 import { getTheme } from '@/lib/theme';
-import { QuantumWarp } from '@/components/shell/QuantumWarp';
+import { QuantumWarpBackground } from '@/components/shell/QuantumWarpBackground';
 import { TopBar } from '@/components/shell/TopBar';
 import { LeftRail } from '@/components/shell/LeftRail';
 import { DrawerScrim } from '@/components/shell/DrawerScrim';
@@ -22,7 +22,7 @@ export default async function RootLayout({
   return (
     <html lang="en" data-theme={theme}>
       <body>
-        <QuantumWarp />
+        <QuantumWarpBackground />
         {hasSession ? (
           <div
             className="ss-app"

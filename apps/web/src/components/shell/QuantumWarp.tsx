@@ -171,7 +171,13 @@ export function QuantumWarp({ angle = 180 }: QuantumWarpProps = {}) {
       let diff = s.targetAngle - s.angle;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      s.angle += diff * 0.04; // 4%/frame → ~25 frames to settle
+      // 8%/frame → ~12 frames to settle (~200ms @ 60fps). Bumped
+      // from 0.04 because the slower rate was visually indistinguishable
+      // from "didn't change" given particle inertia — existing
+      // streaks keep flying along their old vector until they leave
+      // the screen, so the new direction needs to assert itself
+      // quickly to be perceptible within the ~500ms expected.
+      s.angle += diff * 0.08;
 
       const dx = Math.cos(s.angle);
       const dy = Math.sin(s.angle);
