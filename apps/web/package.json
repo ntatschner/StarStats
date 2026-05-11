@@ -15,13 +15,13 @@
   "dependencies": {
     "api-client-ts": "workspace:*",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/auto-instrumentations-node": "^0.74.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.216.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.75.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.217.0",
     "@opentelemetry/resources": "^2.7.1",
-    "@opentelemetry/sdk-node": "^0.216.0",
+    "@opentelemetry/sdk-node": "^0.217.0",
     "@opentelemetry/semantic-conventions": "^1.40.0",
-    "@sentry/node": "^8.55.0",
-    "next": "15.5.15",
+    "@sentry/node": "^10.52.0",
+    "next": "15.5.18",
     "pino": "^9.6.0",
     "prom-client": "^15.1.3",
     "react": "19.0.0",
@@ -35,7 +35,7 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "eslint": "^9.17.0",
-    "eslint-config-next": "15.5.15",
+    "eslint-config-next": "15.5.18",
     "pino-pretty": "^13.0.0",
     "typescript": "^5.7.2"
   }
