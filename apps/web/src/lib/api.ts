@@ -99,6 +99,10 @@ export type DeviceDto = apiSchema['schemas']['DeviceDto'];
 
 export type VerifyEmailResponse = apiSchema['schemas']['VerifyEmailResponse'];
 
+export type SmtpConfigResponse = apiSchema['schemas']['SmtpConfigResponse'];
+export type SmtpConfigRequest = apiSchema['schemas']['SmtpConfigRequest'];
+export type TestSendResponse = apiSchema['schemas']['TestSendResponse'];
+
 export interface ApiError {
   error: string;
   detail?: string;
@@ -1350,4 +1354,31 @@ export async function getVehicleReferences(): Promise<VehicleListResponse> {
     throw new ApiCallError(resp.status, errBody);
   }
   return (await resp.json()) as VehicleListResponse;
+}
+
+// -- Admin: SMTP config ---------------------------------------------
+
+/** Fetch current SMTP config (password redacted; presence flag is on
+ *  the response as `password_set`). 403 if caller isn't an admin. */
+export async function getSmtpConfig(
+  bearer: string,
+): Promise<SmtpConfigResponse> {
+  return request<SmtpConfigResponse>('GET', '/v1/admin/smtp', undefined, bearer);
+}
+
+/** Persist a new SMTP config + hot-swap the runtime mailer. The
+ *  `password` field on the body tri-state: omit (null) = keep
+ *  existing, "" = clear auth, non-empty = set new. Returns the
+ *  re-read row so the form can refresh state from the server. */
+export async function putSmtpConfig(
+  body: SmtpConfigRequest,
+  bearer: string,
+): Promise<SmtpConfigResponse> {
+  return putJson<SmtpConfigResponse>('/v1/admin/smtp', body, bearer);
+}
+
+/** Trigger a diagnostic email to the calling admin's verified
+ *  address. 400 if email is unverified, 502 if the SMTP send fails. */
+export async function testSmtp(bearer: string): Promise<TestSendResponse> {
+  return postJson<TestSendResponse>('/v1/admin/smtp/test', {}, bearer);
 }

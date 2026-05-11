@@ -9,7 +9,7 @@
 import Link from 'next/link';
 import type { Route } from 'next';
 
-type CurrentTab = 'dashboard' | 'submissions' | 'audit';
+type CurrentTab = 'dashboard' | 'submissions' | 'smtp' | 'audit';
 
 const TABS: ReadonlyArray<{
   id: CurrentTab;
@@ -27,6 +27,7 @@ const TABS: ReadonlyArray<{
     // ("nothing to triage" lands you on the right bucket).
     href: '/admin/submissions?status=review' as Route,
   },
+  { id: 'smtp', label: 'SMTP', href: '/admin/smtp' as Route },
   {
     // Slice 5 — audit log endpoint not yet implemented; render the
     // tab as a disabled placeholder so the eventual landing spot is
