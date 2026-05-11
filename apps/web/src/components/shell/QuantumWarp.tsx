@@ -96,11 +96,43 @@ export function QuantumWarp({ angle = 180 }: QuantumWarpProps = {}) {
     angle: (angle * Math.PI) / 180,
     targetAngle: (angle * Math.PI) / 180,
   });
+  // Handle to the running RAF loop's tick() — set inside the main
+  // useEffect below. Lets the [angle] effect stamp a few extra frames
+  // under prefers-reduced-motion, where the loop auto-stops at mount
+  // and would otherwise miss any subsequent angle prop changes.
+  const tickRef = useRef<(() => void) | null>(null);
 
   // Update target on prop change so the angle tweens smoothly rather
   // than jumping when a route navigates and supplies a different angle.
+  // The diagnostic console.debug confirms this effect actually fires
+  // when navigating between screens. If you don't see it but direction
+  // stays stuck, the bug is upstream (prop plumbing or a remount).
+  // Filter Devtools console on "QuantumWarp" if it gets noisy.
   useEffect(() => {
-    stateRef.current.targetAngle = (angle * Math.PI) / 180;
+    const s = stateRef.current;
+    const target = (angle * Math.PI) / 180;
+    // eslint-disable-next-line no-console
+    console.debug('[QuantumWarp] angle →', angle, '(rad', target.toFixed(3), ')');
+    s.targetAngle = target;
+
+    // Under `prefers-reduced-motion: reduce`, the main RAF loop ticked
+    // 12 frames at mount and stopped — subsequent prop changes would
+    // mutate targetAngle invisibly and never repaint. Snap angle to
+    // target (no tween — the user opted out of motion) and stamp a
+    // handful of frames via the tick handle so the new direction
+    // actually renders to canvas.
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ) {
+      s.angle = target;
+      if (tickRef.current) {
+        // 8 frames is enough to (a) clearRect the previous direction's
+        // gradients and (b) advance particles a few steps along the
+        // new vector so the change is unambiguous.
+        for (let i = 0; i < 8; i++) tickRef.current();
+      }
+    }
   }, [angle]);
 
   useEffect(() => {
@@ -200,6 +232,12 @@ export function QuantumWarp({ angle = 180 }: QuantumWarpProps = {}) {
       if (!reduced) raf = requestAnimationFrame(tick);
     };
 
+    // Expose tick() to the [angle] effect's reduced-motion branch so
+    // it can stamp a fresh batch of frames after a prop change. Set
+    // back to null in cleanup so the closure can be GC'd if React
+    // remounts (StrictMode double-invoke in dev, etc).
+    tickRef.current = tick;
+
     stateRef.current.accent = readAccent();
     init();
     if (reduced) {
@@ -224,6 +262,7 @@ export function QuantumWarp({ angle = 180 }: QuantumWarpProps = {}) {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       window.clearInterval(accentInterval);
+      tickRef.current = null;
     };
   }, []);
 
