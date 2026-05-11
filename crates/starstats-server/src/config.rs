@@ -214,9 +214,9 @@ pub struct MinioConfig {
     /// `MINIO_SECRET_KEY_FILE` — the same secret-from-file pattern as
     /// the Postgres password and SpiceDB preshared key.
     pub secret_key: String,
-    /// Bucket that receives mirrored audit entries. Should be the
-    /// Object-Lock-in-Compliance-mode bucket created in the homelab
-    /// runbook (see `docs/HOMELAB-INTEGRATION.md` "Bucket setup").
+    /// Bucket that receives mirrored audit entries. Should be an
+    /// Object-Lock-in-Compliance-mode bucket so retained audit rows
+    /// can't be tampered with after write.
     pub audit_bucket: String,
 }
 

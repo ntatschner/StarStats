@@ -227,7 +227,6 @@ Download client page (read `GET /releases/latest`), Components sheet (dev-only),
 
 ## 10. References
 
-- Source design package: `C:\Users\nrtat\Downloads\StarStats (1).zip`
-- Extracted at: `%TEMP%\starstats-design\design_handoff_starstats\`
+- Source design package: archived by the maintainer locally.
 - Read-only mirror in repo (proposed Wave 8.1): `design/`
 - Existing similar plan docs: `docs/ARCHITECTURE.md`, `docs/AUDIT.md`

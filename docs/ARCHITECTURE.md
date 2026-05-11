@@ -1,10 +1,9 @@
 # Architecture
 
 End-to-end view of how StarStats is laid out, how data moves, and
-why the major shape decisions were made. For deployment specifics
-see [`HOMELAB-INTEGRATION.md`](HOMELAB-INTEGRATION.md); for telemetry
-plumbing see [`OBSERVABILITY.md`](OBSERVABILITY.md); for the audit
-log specifically see [`AUDIT.md`](AUDIT.md).
+why the major shape decisions were made. For telemetry plumbing see
+[`OBSERVABILITY.md`](OBSERVABILITY.md); for the audit log
+specifically see [`AUDIT.md`](AUDIT.md).
 
 ## Threat model
 
@@ -297,6 +296,6 @@ StarStats/
 ├── packages/
 │   └── api-client-ts/        generated TS client (from server's OpenAPI)
 ├── infra/                    config images (init, loki, tempo, prom, otel-collector, spicedb schema)
-├── docs/                     ARCHITECTURE | AUDIT | OBSERVABILITY | HOMELAB-INTEGRATION
+├── docs/                     ARCHITECTURE | AUDIT | OBSERVABILITY
 └── prototypes/python-spike/  archived Python prototype (not part of build)
 ```

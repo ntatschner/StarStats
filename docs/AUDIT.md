@@ -125,8 +125,8 @@ retried — we never block the user-facing action on mirror health.
 **Policy:** Postgres retains `audit_log` rows for 90 days; older rows
 are pruned. The MinIO mirror is the long-term system of record and
 retains 7 years via Object Lock in compliance mode (set at bucket
-creation — see the "Bucket setup" section of
-`docs/HOMELAB-INTEGRATION.md`). Compliance-mode locks cannot be
+creation by the operator's MinIO setup script). Compliance-mode
+locks cannot be
 shortened or removed even by the bucket owner, so MinIO is the trust
 anchor for any after-the-fact audit query that exceeds 90 days.
 

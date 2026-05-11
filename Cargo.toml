@@ -170,10 +170,10 @@ spicedb-grpc = "0.1"
 # protection — it provides the default tokio-based async sleep impl that
 # protection needs. Without it `Client::from_conf` panics at runtime with
 # "An async sleep implementation is required for stalled stream
-# protection to work" (caught on first dockerprime deploy of v0.3.11).
+# protection to work" (caught on first production deploy of v0.3.11).
 # We can't take the easier path of restoring `default-features = true`
 # because the SDK default pulls in the full `aws-config` credential
-# chain (STS / SSO / IMDS) which we deliberately avoid — the homelab
+# chain (STS / SSO / IMDS) which we deliberately avoid — production
 # uses a static MinIO access key from a Docker secret.
 aws-sdk-s3 = { version = "=1.110.0", default-features = false, features = ["rustls", "behavior-version-latest", "rt-tokio"] }
 aws-credential-types = ">=1.2.8, <1.2.12"

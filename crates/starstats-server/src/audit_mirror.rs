@@ -3,8 +3,7 @@
 //! The Postgres `audit_log` table is the system of record. This module
 //! supplements it with a write-side mirror to an S3-compatible bucket
 //! (`starstats-audit` in production, with Object Lock in Compliance
-//! mode — see `docs/AUDIT.md` "Mirroring" and
-//! `docs/HOMELAB-INTEGRATION.md` "Bucket setup"). Object Lock provides
+//! mode — see `docs/AUDIT.md` "Mirroring"). Object Lock provides
 //! long-term immutability beyond what the Postgres triggers can offer
 //! against a privileged DBA.
 //!

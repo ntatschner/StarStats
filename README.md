@@ -173,10 +173,9 @@ StarStats/
 │   └── web/                    Next.js dashboard
 ├── packages/
 │   └── api-client-ts/          generated TS client (from server's OpenAPI spec)
-├── infra/                      docker-compose configs (synced to homelab host)
+├── infra/                      docker-compose configs for self-hosted bring-up
 ├── docs/
 │   ├── ARCHITECTURE.md         end-to-end system design
-│   ├── HOMELAB-INTEGRATION.md  bring-up runbook for self-hosting the API
 │   ├── OBSERVABILITY.md        per-component telemetry matrix
 │   └── AUDIT.md                tamper-evident audit log design
 ├── release-manifests/          per-channel updater manifests (alpha/rc/live)
@@ -208,8 +207,6 @@ StarStats and won't be merged.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design
-- [`docs/HOMELAB-INTEGRATION.md`](docs/HOMELAB-INTEGRATION.md) —
-  self-hosting runbook
 - [`NOTICE`](NOTICE) — third-party acknowledgements
 
 ## Project status, honestly
