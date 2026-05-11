@@ -58,6 +58,17 @@ jobs:
           ${{ secrets.REGISTRY_URL }}/starstats/web:latest
           ${{ secrets.REGISTRY_URL }}/starstats/web:${{ steps.meta.outputs.tag }}
           ${{ secrets.REGISTRY_URL }}/starstats/web:${{ github.sha }}
+        # Server Actions encryption key — baked into the bundle at
+        # build time so action IDs are stable across deploys. The
+        # runtime env must carry the SAME value or the server will
+        # fail to decrypt incoming action references. Build-arg
+        # syntax (not `secrets:`) because Next reads it as a regular
+        # env var via `process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`
+        # inside `next build`. Soft-degrades when the GH secret is
+        # unset — expansion is empty, matching the pre-fix behaviour
+        # of a fresh random key per build.
+        build-args: |
+          NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
         cache-from: type=gha,scope=web
         cache-to: type=gha,mode=max,scope=web
 

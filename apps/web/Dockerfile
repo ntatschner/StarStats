@@ -17,6 +17,22 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# Pin Server Actions encryption key across builds. Without this,
+# `next build` generates a fresh random key per build, so every Web
+# image gets different content-addressed Server Action IDs — and any
+# browser tab open before a deploy 404s on the next form submit
+# ("UnrecognizedActionError: Server Action … was not found on the
+# server"). Supplied as a docker build-arg sourced from a GH Actions
+# secret + matching runtime env. MUST be the same value at build
+# time and at runtime.
+#
+# Generate once with `openssl rand -base64 32`. Empty value is
+# allowed (matches the pre-fix behaviour) but defeats the purpose;
+# CI should always pass a real key.
+ARG NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=""
+ENV NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=${NEXT_SERVER_ACTIONS_ENCRYPTION_KEY}
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
 COPY . .
