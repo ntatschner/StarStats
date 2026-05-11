@@ -100,6 +100,10 @@ mod rsi_verify;
 mod rsi_verify_routes;
 #[path = "../sharing_routes.rs"]
 mod sharing_routes;
+#[path = "../smtp_admin_routes.rs"]
+mod smtp_admin_routes;
+#[path = "../smtp_config_store.rs"]
+mod smtp_config_store;
 #[path = "../spicedb.rs"]
 mod spicedb;
 #[path = "../staff_roles.rs"]

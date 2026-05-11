@@ -77,6 +77,8 @@ mod rsi_profile_routes;
 mod rsi_verify;
 mod rsi_verify_routes;
 mod sharing_routes;
+mod smtp_admin_routes;
+mod smtp_config_store;
 mod spicedb;
 mod staff_roles;
 mod submission_routes;
@@ -195,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
     // is the no-mirror path; `Some(...)` wires best-effort PUTs.
     let mirror_for_audit: Option<Arc<MinioMirror>> = minio_mirror.as_ref().clone().map(Arc::new);
     let audit: Arc<dyn AuditLog> =
-        Arc::new(PostgresAuditLog::new(pool).with_mirror(mirror_for_audit));
+        Arc::new(PostgresAuditLog::new(pool.clone()).with_mirror(mirror_for_audit));
 
     // Type-erased handle for the StaffRoleStore extension. The admin
     // extractors look up `Arc<dyn StaffRoleStore>` from request
@@ -220,21 +222,60 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(error = ?e, "staff_roles bootstrap returned an error");
     }
 
-    // Mail transport — Lettre when SMTP_URL is set, NoopMailer when
-    // it isn't. `build_mailer` logs which path it took. The handler
-    // signature is `Arc<dyn Mailer>` so the choice is invisible to
-    // signup beyond the trace it emits when SMTP fails.
-    let mailer: Arc<dyn Mailer> = mail::build_mailer(cfg.smtp.as_ref());
+    // KEK for envelope encryption at rest (TOTP secrets and SMTP
+    // password). Loaded or generated; missing file is auto-fixed
+    // (with 0600 perms). Moved ahead of the mailer init so the DB
+    // SMTP config — which decrypts the password under this key — can
+    // feed the initial mailer build.
+    let kek = Arc::new(Kek::load_or_generate(&cfg.kek.path)?);
+    tracing::info!(path = %cfg.kek.path.display(), "KEK loaded");
+
+    // Trait import needed for the `.get()` / `.put()` calls on
+    // `Arc<PostgresSmtpConfigStore>` immediately below.
+    use crate::smtp_config_store::SmtpConfigStore as _;
+
+    // DB-backed SMTP config store. The singleton row is seeded by
+    // migration 0020 so `get()` always returns; the `enabled` flag
+    // decides whether we honour it.
+    let smtp_config_store = Arc::new(smtp_config_store::PostgresSmtpConfigStore::new(
+        pool.clone(),
+    ));
+
+    // Mail transport precedence:
+    //   1. DB row when `enabled = true` — admin-managed via /v1/admin/smtp.
+    //   2. Env-based SmtpConfig (existing posture) when DB is disabled
+    //      or unreadable.
+    //   3. NoopMailer fallback (built into `mail::build_mailer`).
+    //
+    // The chosen transport is wrapped in `SwappableMailer` so the
+    // admin save flow can hot-reload it without restarting the server.
+    let initial_mailer: Arc<dyn Mailer> = match smtp_config_store.get(&kek).await {
+        Ok(rec) if rec.enabled => {
+            tracing::info!(
+                host = %rec.host,
+                "SMTP: using DB-managed config (admin set enabled = true)"
+            );
+            mail::build_mailer_from_record(&rec)
+        }
+        Ok(_) => {
+            tracing::info!("SMTP: DB config disabled; falling back to env-based config");
+            mail::build_mailer(cfg.smtp.as_ref())
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "SMTP: DB config read failed; falling back to env-based config"
+            );
+            mail::build_mailer(cfg.smtp.as_ref())
+        }
+    };
+    let mailer_swap = Arc::new(mail::SwappableMailer::new(initial_mailer));
+    let mailer: Arc<dyn Mailer> = mailer_swap.clone();
 
     // HTTP client for the RSI bio scrape. A reqwest build failure
     // here is fatal: there is no degraded mode for "we couldn't
     // configure TLS" — the verify endpoint would return 503 forever.
     let rsi_client: Arc<dyn rsi_verify::RsiClient> = Arc::new(rsi_verify::HttpRsiClient::new()?);
-
-    // KEK for TOTP shared-secret encryption at rest. Loaded or
-    // generated; missing file is auto-fixed (with 0600 perms).
-    let kek = Arc::new(Kek::load_or_generate(&cfg.kek.path)?);
-    tracing::info!(path = %cfg.kek.path.display(), "TOTP KEK loaded");
 
     // Tauri auto-updater config. The struct itself is always
     // constructed (default path); the file at that path may be
@@ -287,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
     let preferences_router = preferences_routes::routes(preferences);
     let magic_router = magic_link_routes::routes(users.clone(), magic_link_store);
     let totp_router = totp_routes::routes(users.clone(), recovery_store);
-    let org_router = org_routes::routes(orgs, users);
+    let org_router = org_routes::routes(orgs, users.clone());
     let reference_router = reference_routes::routes(reference_store.clone());
     let submission_router = submission_routes::routes(submissions_store.clone());
     // Admin sub-routers — gated by RequireAdmin / RequireModerator
@@ -295,8 +336,12 @@ async fn main() -> anyhow::Result<()> {
     // extensions (layered onto the outer `app` below). admin_routes
     // exposes the extractors + a parameterless skeleton; the submission
     // moderation routes mount under it.
-    let admin_router =
-        admin_routes::router().merge(admin_submission_routes::router(submissions_store));
+    let admin_router = admin_routes::router()
+        .merge(admin_submission_routes::router(submissions_store))
+        .merge(smtp_admin_routes::router(
+            smtp_config_store.clone(),
+            users.clone(),
+        ));
     let supporter_router = supporter_routes::routes(supporter_store.clone());
     let donate_state =
         revolut_routes::build_state(orders_store, supporter_store, cfg.revolut.as_ref());
@@ -403,6 +448,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(spicedb))
         .layer(Extension(minio_mirror))
         .layer(Extension(mailer))
+        .layer(Extension(mailer_swap))
         .layer(Extension(rsi_client))
         .layer(Extension(kek))
         .layer(Extension(updater_cfg));

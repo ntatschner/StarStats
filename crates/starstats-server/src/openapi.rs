@@ -32,6 +32,7 @@ use crate::rsi_profile_routes;
 use crate::rsi_verify;
 use crate::rsi_verify_routes;
 use crate::sharing_routes;
+use crate::smtp_admin_routes;
 use crate::submission_routes;
 use crate::supporter_routes;
 use crate::totp_routes;
@@ -158,6 +159,9 @@ impl Modify for SecurityAddon {
         admin_submission_routes::reject,
         admin_submission_routes::dismiss_flag,
         admin_submission_routes::queue,
+        smtp_admin_routes::get_smtp,
+        smtp_admin_routes::put_smtp,
+        smtp_admin_routes::test_smtp,
         supporter_routes::get_me,
         revolut_routes::list_tiers,
         revolut_routes::checkout,
@@ -218,6 +222,10 @@ impl Modify for SecurityAddon {
         admin_submission_routes::SubmissionTransitionResponse,
         admin_submission_routes::RejectRequest,
         admin_submission_routes::AdminQueueResponse,
+        // Admin SMTP config
+        smtp_admin_routes::SmtpConfigResponse,
+        smtp_admin_routes::SmtpConfigRequest,
+        smtp_admin_routes::TestSendResponse,
         // Supporter (donate) status
         supporter_routes::SupporterStatusDto,
         // Donate / Revolut

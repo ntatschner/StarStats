@@ -30,6 +30,7 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use std::sync::Arc;
 
 use crate::config::SmtpConfig;
+use crate::smtp_config_store::SmtpConfigRecord;
 
 /// Pluggable mailer interface so handlers can be parameterised over
 /// "send" without dragging in a real SMTP transport in tests.
@@ -59,6 +60,12 @@ pub trait Mailer: Send + Sync + 'static {
     /// password-reset flow but the redeemer gets a session JWT
     /// directly instead of bumping a hash.
     async fn send_magic_link(&self, to_addr: &str, to_name: &str, token: &str) -> Result<()>;
+
+    /// Send a diagnostic "is this thing on?" email. Used by the admin
+    /// SMTP config page after a config save — there's no token because
+    /// there's no flow to redeem; just a short body confirming the
+    /// transport works end-to-end. `NoopMailer` logs without sending.
+    async fn send_test_email(&self, to_addr: &str, to_name: &str) -> Result<()>;
 }
 
 // -- Lettre (real SMTP) ----------------------------------------------
@@ -88,6 +95,31 @@ impl LettreMailer {
             from_addr: cfg.from_addr.clone(),
             from_name: cfg.from_name.clone(),
             web_origin: cfg.web_origin.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// Build a `LettreMailer` from a DB-stored [`SmtpConfigRecord`].
+    /// Skips the URL parser entirely — record fields map straight onto
+    /// the Lettre builder. Returns an error if the host is blank
+    /// (defensive: the admin form should refuse to save such a record
+    /// but we surface a clean error here too).
+    pub fn from_record(rec: &SmtpConfigRecord) -> Result<Self> {
+        if rec.host.trim().is_empty() {
+            anyhow::bail!("smtp record has empty host");
+        }
+        let transport = build_transport_from_parts(
+            &rec.host,
+            rec.port,
+            &rec.username,
+            rec.password.as_deref(),
+            rec.secure,
+        )
+        .with_context(|| format!("build smtp transport for host `{}`", rec.host))?;
+        Ok(Self {
+            transport,
+            from_addr: rec.from_addr.clone(),
+            from_name: rec.from_name.clone(),
+            web_origin: rec.web_origin.trim_end_matches('/').to_string(),
         })
     }
 }
@@ -166,6 +198,32 @@ fn build_transport(url: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     Ok(builder.build())
 }
 
+/// Build a transport from split fields (the DB-stored shape). Same
+/// semantics as `build_transport` but bypasses URL parsing — passwords
+/// with `@`, `:` or `%` characters round-trip without any encoding
+/// dance because we never serialise them into a URL.
+fn build_transport_from_parts(
+    host: &str,
+    port: i32,
+    username: &str,
+    password: Option<&str>,
+    secure: bool,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    let port_u16: u16 =
+        u16::try_from(port).with_context(|| format!("smtp port {port} out of range for u16"))?;
+    let mut builder = if secure {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(host)?
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)?
+    };
+    builder = builder.port(port_u16);
+    if !username.is_empty() {
+        let pw = password.unwrap_or("").to_string();
+        builder = builder.credentials(Credentials::new(username.to_string(), pw));
+    }
+    Ok(builder.build())
+}
+
 #[async_trait]
 impl Mailer for LettreMailer {
     async fn send_verification(&self, to_addr: &str, to_name: &str, token: &str) -> Result<()> {
@@ -209,6 +267,16 @@ impl Mailer for LettreMailer {
             to_name,
             "Sign in to StarStats",
             render_magic_link_body(&self.web_origin, token),
+        )
+        .await
+    }
+
+    async fn send_test_email(&self, to_addr: &str, to_name: &str) -> Result<()> {
+        self.send(
+            to_addr,
+            to_name,
+            "StarStats — SMTP test",
+            render_test_body(&self.from_addr, &self.web_origin),
         )
         .await
     }
@@ -295,6 +363,19 @@ fn render_magic_link_body(web_origin: &str, token: &str) -> String {
     )
 }
 
+fn render_test_body(from_addr: &str, web_origin: &str) -> String {
+    format!(
+        "This is a diagnostic email from the StarStats admin SMTP\n\
+         config page. If you're reading this, the new SMTP settings\n\
+         can successfully deliver mail end-to-end.\n\
+         \n\
+         From: {from_addr}\n\
+         Origin: {web_origin}\n\
+         \n\
+         No action required.\n"
+    )
+}
+
 // -- Noop (no SMTP configured) ---------------------------------------
 
 /// Fallback mailer used when `SMTP_URL` is missing.
@@ -349,6 +430,117 @@ impl Mailer for NoopMailer {
             "noop mailer: would send magic-link"
         );
         Ok(())
+    }
+
+    async fn send_test_email(&self, to_addr: &str, to_name: &str) -> Result<()> {
+        tracing::info!(
+            to = to_addr,
+            name = to_name,
+            "noop mailer: would send test email"
+        );
+        Ok(())
+    }
+}
+
+/// Build an `Arc<dyn Mailer>` from a DB-stored record. Always
+/// succeeds — a malformed record (empty host, bad port) falls back to
+/// `NoopMailer` with a warning, matching the env-driven `build_mailer`
+/// posture. Caller is responsible for only calling this when the
+/// record's `enabled` flag is true.
+pub fn build_mailer_from_record(rec: &SmtpConfigRecord) -> Arc<dyn Mailer> {
+    match LettreMailer::from_record(rec) {
+        Ok(m) => {
+            tracing::info!(
+                from = %rec.from_addr,
+                host = %rec.host,
+                "SMTP mailer initialised from DB record"
+            );
+            Arc::new(m)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "DB SMTP record invalid; falling back to noop mailer"
+            );
+            Arc::new(NoopMailer)
+        }
+    }
+}
+
+// -- Swappable wrapper -----------------------------------------------
+
+/// `Mailer` impl that wraps an inner `Arc<dyn Mailer>` behind a
+/// `std::sync::RwLock`, allowing the admin save flow to replace the
+/// active transport at runtime without restarting the server.
+///
+/// The read-side critical section is microscopic — clone an `Arc` and
+/// drop the lock — so contention is irrelevant compared to the network
+/// IO of an actual SMTP send.
+///
+/// Callers continue to hold `Arc<dyn Mailer>` (because `SwappableMailer`
+/// implements `Mailer`); the admin route holds an `Arc<SwappableMailer>`
+/// in addition so it can call [`Self::swap`].
+pub struct SwappableMailer {
+    inner: std::sync::RwLock<Arc<dyn Mailer>>,
+}
+
+impl SwappableMailer {
+    pub fn new(initial: Arc<dyn Mailer>) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(initial),
+        }
+    }
+
+    /// Replace the active transport. Old `Arc`s held by in-flight
+    /// sends keep working until they drop — Lettre's transport is
+    /// itself an `Arc` internally, so the old transport stays alive
+    /// for any send already past the read-lock acquisition.
+    pub fn swap(&self, new: Arc<dyn Mailer>) {
+        let mut guard = self.inner.write().expect("swappable mailer poisoned");
+        *guard = new;
+    }
+
+    fn current(&self) -> Arc<dyn Mailer> {
+        self.inner
+            .read()
+            .expect("swappable mailer poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Mailer for SwappableMailer {
+    async fn send_verification(&self, to_addr: &str, to_name: &str, token: &str) -> Result<()> {
+        self.current()
+            .send_verification(to_addr, to_name, token)
+            .await
+    }
+
+    async fn send_password_reset(&self, to_addr: &str, to_name: &str, token: &str) -> Result<()> {
+        self.current()
+            .send_password_reset(to_addr, to_name, token)
+            .await
+    }
+
+    async fn send_email_change_verify(
+        &self,
+        to_addr: &str,
+        to_name: &str,
+        token: &str,
+    ) -> Result<()> {
+        self.current()
+            .send_email_change_verify(to_addr, to_name, token)
+            .await
+    }
+
+    async fn send_magic_link(&self, to_addr: &str, to_name: &str, token: &str) -> Result<()> {
+        self.current()
+            .send_magic_link(to_addr, to_name, token)
+            .await
+    }
+
+    async fn send_test_email(&self, to_addr: &str, to_name: &str) -> Result<()> {
+        self.current().send_test_email(to_addr, to_name).await
     }
 }
 

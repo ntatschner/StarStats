@@ -92,6 +92,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/smtp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_smtp_get"];
+        put: operations["admin_smtp_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/smtp/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_smtp_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/submissions/queue": {
         parameters: {
             query?: never;
@@ -2085,6 +2117,42 @@ export interface components {
             email: string;
             password: string;
         };
+        /**
+         * @description Request body for `PUT /v1/admin/smtp`. `password` semantics:
+         *
+         *      * `null` (field absent) — keep the existing encrypted password.
+         *      * `""` (empty string)    — clear authentication entirely.
+         *      * non-empty string       — encrypt and store as the new password.
+         */
+        SmtpConfigRequest: {
+            enabled: boolean;
+            from_addr: string;
+            from_name: string;
+            host: string;
+            password?: string | null;
+            /** Format: int32 */
+            port: number;
+            secure: boolean;
+            username: string;
+            web_origin: string;
+        };
+        /**
+         * @description Public-facing shape returned by `GET /v1/admin/smtp`. Password is
+         *     never serialised — the form indicates presence via `password_set`
+         *     and edits send the desired plaintext (or null = keep) on PUT.
+         */
+        SmtpConfigResponse: {
+            enabled: boolean;
+            from_addr: string;
+            from_name: string;
+            host: string;
+            password_set: boolean;
+            /** Format: int32 */
+            port: number;
+            secure: boolean;
+            username: string;
+            web_origin: string;
+        };
         StabilityStatsResponse: {
             by_channel: components["schemas"]["StatsBucket"][];
             /** Format: int64 */
@@ -2163,6 +2231,9 @@ export interface components {
             last_payment_at?: string | null;
             name_plate?: string | null;
             state: string;
+        };
+        TestSendResponse: {
+            sent_to: string;
         };
         TierDto: {
             /** Format: int64 */
@@ -2474,6 +2545,172 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReadyResponseSchema"];
+                };
+            };
+        };
+    };
+    admin_smtp_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current SMTP config (password redacted) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmtpConfigResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller is not an admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    admin_smtp_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmtpConfigRequest"];
+            };
+        };
+        responses: {
+            /** @description Config persisted and mailer reloaded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmtpConfigResponse"];
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller is not an admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    admin_smtp_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Test email sent to the caller */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendResponse"];
+                };
+            };
+            /** @description Caller's email is not verified */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller is not an admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Mailer send failed */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
                 };
             };
         };
@@ -3477,15 +3714,6 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
             /** @description RSI returned 404 for the claimed handle */
             404: {
                 headers: {
@@ -3557,15 +3785,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
             };
             /** @description RSI returned 404 for the claimed handle */
             404: {
@@ -4308,15 +4527,6 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
             /** @description No snapshot has been pushed yet */
             404: {
                 headers: {
@@ -4374,15 +4584,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
             };
             /** @description Server error */
             500: {
@@ -4757,15 +4958,6 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
-            };
             /** @description No snapshot has been captured yet */
             404: {
                 headers: {
@@ -4810,15 +5002,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Caller is a device token */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorBody"];
-                };
             };
             /** @description No snapshot has been captured yet */
             404: {
