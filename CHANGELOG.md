@@ -31,6 +31,80 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.3.12-alpha] — 2026-05-11
+
+### Added
+
+- **Server:** DB-backed SMTP config with KEK-encrypted password and
+  hot-reload. New migration `0020_smtp_config.sql` (singleton row
+  enforced by `CHECK (id = 1)`, password split into BYTEA
+  `ciphertext` + `nonce` columns with a paired-NULL check). New
+  `smtp_config_store` module + Postgres impl that encrypts on write /
+  decrypts on read via the existing TOTP KEK envelope. The `Mailer`
+  trait gains `send_test_email`, and a new `SwappableMailer` wraps
+  the active transport in `Arc<RwLock<Arc<dyn Mailer>>>` so the
+  admin save flow can replace it without restarting the server. Boot
+  precedence is DB(enabled=true) > env > `NoopMailer`.
+- **Server:** Three new admin endpoints — `GET/PUT /v1/admin/smtp`
+  (read/write the config with password redaction + `password_set`
+  bool) and `POST /v1/admin/smtp/test` (sends a diagnostic email to
+  the calling admin's verified address; 400 if unverified, 502 on
+  SMTP failure). All gated by `RequireAdmin`. `PUT` validates input,
+  persists, then swaps the live mailer.
+- **Web:** New `/admin/smtp` page with hot-reloading config form.
+  Server actions thread the bearer through the existing
+  `lib/api`-is-server-only invariant; client form holds controlled
+  state with a tri-state password (null = keep, "" = clear, value =
+  set) mirroring the server contract. Save / Send test / Reload
+  buttons gated by `useTransition` for clean pending UI. New tab in
+  `AdminNav` between Submissions and Audit log.
+- **Server:** `SpicedbClient::write_owner(handle)` issues TOUCH on
+  `stats_record:<handle>#owner@user:<handle>`. The signup handler
+  calls it best-effort after `users.create()` so the
+  `stats_record.view` permission is non-empty for every new account
+  — unblocks any future reinstatement of the SpiceDB self-view gate
+  in `query::summary`.
+
+### Changed
+
+- **Tray:** Sync worker now respawns on config save and on device
+  pairing. `AppState` holds the running `JoinHandle`; new
+  `sync::respawn` aborts the old worker, reloads the persisted
+  config, and spawns a fresh one. `save_config` and `redeem_pair`
+  call it after `config::save`, so toggling Settings or pairing a
+  new device picks up immediately — no more "save settings →
+  restart tray" contract. Idempotent: disabling sync swaps the
+  handle to `None`.
+- **Web:** `QuantumWarp` background re-aims per route. The
+  prototype's `warpAngle = angleFor(screen)` wiring was never
+  ported to the production Next.js code, so the canvas was stuck
+  at the default 180° regardless of which page was active. New
+  `QuantumWarpBackground` client wrapper reads `usePathname()` and
+  maps to an angle via a static `FIXED` table (mirrors the
+  prototype's intuition; deterministic hash fallback for unmapped
+  paths). Tween rate bumped 0.04 → 0.08 (~12 frames / ~200ms) so
+  the direction change is visually obvious within the brief's
+  500ms target.
+
+### Fixed
+
+- **Server:** Drop the `require_user_token` gate from hangar /
+  RSI-profile / RSI-org routes. Pairing only mints device JWTs, so
+  the gate was locking the tray out of exactly the endpoints it
+  was built to feed (e.g. `hangar push failed: 403 Forbidden`).
+  Identity is still enforced by `AuthenticatedUser`; the gate
+  added no security on top.
+- **Web:** Logout no longer sends the user to
+  `https://0.0.0.0:3000/`. `route.ts` used to build the redirect
+  URL from `req.url`, which inside the container is
+  `http://0.0.0.0:3000/auth/logout`; the reverse proxy upgraded
+  the scheme to https and the host was wrong. Replaced with a
+  relative `Location: /` so the browser resolves against the URL
+  it actually typed.
+- **Server:** `cargo fmt` drift in `starstats-client/{commands.rs,
+  storage.rs}` cleared so subsequent pushes pass CI's
+  `cargo fmt --check`.
+
 ## [0.3.11-alpha] — 2026-05-10
 
 ### Added
