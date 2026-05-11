@@ -532,7 +532,8 @@ impl Storage {
     /// stream rather than an interleaved multi-channel mix.
     pub fn distinct_log_sources(&self) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("storage mutex poisoned");
-        let mut stmt = conn.prepare("SELECT DISTINCT log_source FROM events ORDER BY log_source")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT log_source FROM events ORDER BY log_source")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }

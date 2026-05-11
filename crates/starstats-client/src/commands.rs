@@ -751,7 +751,9 @@ fn run_reparse(
             // summary we just wrote.
             for id in &member_db_ids {
                 match storage.delete_event_by_id(*id) {
-                    Ok(n) => stats.members_suppressed = stats.members_suppressed.saturating_add(n as u64),
+                    Ok(n) => {
+                        stats.members_suppressed = stats.members_suppressed.saturating_add(n as u64)
+                    }
                     Err(e) => tracing::warn!(error = %e, id = id, "phase 3: delete member"),
                 }
             }
@@ -1486,7 +1488,11 @@ mod tests {
 
         // Idempotency: running again finds nothing new.
         let stats2 = run_reparse(&storage, &[]).expect("reparse #2");
-        assert!(stats2.error.is_none(), "reparse #2 error: {:?}", stats2.error);
+        assert!(
+            stats2.error.is_none(),
+            "reparse #2 error: {:?}",
+            stats2.error
+        );
         assert_eq!(stats2.bursts_collapsed, 0, "second pass must be a no-op");
         assert_eq!(stats2.members_suppressed, 0);
         assert_eq!(storage.total_events().expect("count"), 2);
