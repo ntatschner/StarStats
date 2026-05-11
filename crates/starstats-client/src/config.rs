@@ -27,8 +27,10 @@ pub struct Config {
     /// Which release channel to track. Drives the updater endpoint —
     /// each channel has its own manifest at
     /// `release-manifests/<channel>.json` on the main branch.
-    /// Default is Alpha while we're pre-1.0; users can opt into RC or
-    /// Live via the Settings dropdown.
+    /// Default is derived from `CARGO_PKG_VERSION` at compile time
+    /// (alpha/beta/rc/live) so new installs land on the channel the
+    /// build itself ships on. Users can opt into a different channel
+    /// via the Settings dropdown.
     #[serde(default)]
     pub release_channel: ReleaseChannel,
     /// When true, the tray writes a daily-rolling `client.log` to
@@ -61,17 +63,19 @@ impl Default for Config {
 /// Switching channels changes which manifest the updater queries on
 /// next check — no reinstall required. The Tauri updater only offers
 /// a download when the manifest version is strictly greater than the
-/// installed version (semver), so switching from Alpha to Live while
+/// installed version (semver), so switching from Beta to Live while
 /// running a newer prerelease will not roll back; you'll simply
 /// receive nothing until Live catches up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseChannel {
-    /// Pre-release builds — anything tagged `vX.Y.Z-alpha[.N]`.
-    /// Default while the project is pre-1.0 because that's the only
-    /// channel currently producing builds.
-    #[default]
+    /// Pre-release alpha builds — `vX.Y.Z-alpha[.N]`. Retained as an
+    /// opt-in channel; no longer the default channel for fresh installs
+    /// (see `Default` impl).
     Alpha,
+    /// Beta builds — `vX.Y.Z-beta[.N]`. The active pre-release channel
+    /// post-history-scrub.
+    Beta,
     /// Release candidates — `vX.Y.Z-rc[.N]`. Intended for users who
     /// want stability ahead of GA but accept the occasional regression.
     Rc,
@@ -80,14 +84,42 @@ pub enum ReleaseChannel {
     Live,
 }
 
+impl Default for ReleaseChannel {
+    /// Derive the default channel from this build's package version so
+    /// the installer always lands on the channel it ships on. A user
+    /// who installs `v0.0.1-beta` defaults to Beta; the future first
+    /// `vX.Y.Z` release defaults to Live, etc. Persisted user overrides
+    /// (config.toml) still win over this default.
+    fn default() -> Self {
+        Self::from_version(env!("CARGO_PKG_VERSION"))
+    }
+}
+
 impl ReleaseChannel {
     /// Lowercase token used in the manifest filename and the Settings
     /// dropdown's serialised value.
     pub fn as_str(&self) -> &'static str {
         match self {
             ReleaseChannel::Alpha => "alpha",
+            ReleaseChannel::Beta => "beta",
             ReleaseChannel::Rc => "rc",
             ReleaseChannel::Live => "live",
+        }
+    }
+
+    /// Map a semver string to a channel by inspecting its prerelease
+    /// suffix. Anything without a recognised suffix is treated as Live
+    /// (the conservative choice for unrecognised inputs).
+    pub fn from_version(v: &str) -> Self {
+        let Some((_, suffix)) = v.split_once('-') else {
+            return Self::Live;
+        };
+        // suffix may be "alpha", "alpha.1", "beta.2", "rc", etc.
+        match suffix.split('.').next().unwrap_or("") {
+            "alpha" => Self::Alpha,
+            "beta" => Self::Beta,
+            "rc" => Self::Rc,
+            _ => Self::Live,
         }
     }
 
@@ -101,6 +133,77 @@ impl ReleaseChannel {
             "https://raw.githubusercontent.com/ntatschner/StarStats/main/release-manifests/{}.json",
             self.as_str()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_version_maps_known_prerelease_suffixes() {
+        assert_eq!(
+            ReleaseChannel::from_version("0.0.1-alpha"),
+            ReleaseChannel::Alpha
+        );
+        assert_eq!(
+            ReleaseChannel::from_version("0.3.12-alpha.1"),
+            ReleaseChannel::Alpha
+        );
+        assert_eq!(
+            ReleaseChannel::from_version("0.0.1-beta"),
+            ReleaseChannel::Beta
+        );
+        assert_eq!(
+            ReleaseChannel::from_version("1.0.0-beta.2"),
+            ReleaseChannel::Beta
+        );
+        assert_eq!(ReleaseChannel::from_version("1.0.0-rc"), ReleaseChannel::Rc);
+        assert_eq!(
+            ReleaseChannel::from_version("1.0.0-rc.4"),
+            ReleaseChannel::Rc
+        );
+    }
+
+    #[test]
+    fn from_version_treats_bare_version_as_live() {
+        assert_eq!(ReleaseChannel::from_version("1.0.0"), ReleaseChannel::Live);
+        assert_eq!(ReleaseChannel::from_version("0.0.1"), ReleaseChannel::Live);
+    }
+
+    #[test]
+    fn from_version_falls_back_to_live_for_unknown_suffix() {
+        // Unknown prerelease tokens are conservative: don't silently
+        // accept random text as a real channel.
+        assert_eq!(
+            ReleaseChannel::from_version("1.0.0-canary"),
+            ReleaseChannel::Live
+        );
+        assert_eq!(ReleaseChannel::from_version("1.0.0-"), ReleaseChannel::Live);
+    }
+
+    #[test]
+    fn default_tracks_cargo_pkg_version() {
+        // Smoke check: the compile-time default must agree with parsing
+        // the package version at runtime.
+        assert_eq!(
+            ReleaseChannel::default(),
+            ReleaseChannel::from_version(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn as_str_round_trips_through_serde() {
+        for c in [
+            ReleaseChannel::Alpha,
+            ReleaseChannel::Beta,
+            ReleaseChannel::Rc,
+            ReleaseChannel::Live,
+        ] {
+            let json = serde_json::to_string(&c).unwrap();
+            // serde renders enum variants quoted; strip quotes to compare.
+            assert_eq!(json.trim_matches('"'), c.as_str());
+        }
     }
 }
 

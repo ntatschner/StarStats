@@ -316,6 +316,7 @@ jobs:
     # `/releases/latest/` (which 404s for prereleases). The tag's
     # pre-release suffix selects the channel:
     #   - `vX.Y.Z-alpha[.N]` → alpha.json
+    #   - `vX.Y.Z-beta[.N]`  → beta.json
     #   - `vX.Y.Z-rc[.N]`    → rc.json
     #   - `vX.Y.Z`           → live.json
     # Anything else fails the step so unrecognised tags don't silently
@@ -328,6 +329,7 @@ jobs:
         TAG="${GITHUB_REF#refs/tags/}"
         case "$TAG" in
           v*.*.*-alpha|v*.*.*-alpha.*) CHANNEL=alpha ;;
+          v*.*.*-beta|v*.*.*-beta.*)   CHANNEL=beta ;;
           v*.*.*-rc|v*.*.*-rc.*)       CHANNEL=rc ;;
           v*.*.*)                      CHANNEL=live ;;
           *)

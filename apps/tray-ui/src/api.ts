@@ -90,12 +90,15 @@ export interface RemoteSyncConfig {
 /**
  * Release channel the updater tracks. Each value maps to a manifest
  * file at `release-manifests/<channel>.json` on the StarStats main
- * branch. Server-side default is `alpha` while we're pre-1.0.
+ * branch. Client-side default is derived from the build's package
+ * version (e.g. a `-beta` build defaults to `beta`); users can switch
+ * via the Settings dropdown.
  */
-export type ReleaseChannel = 'alpha' | 'rc' | 'live';
+export type ReleaseChannel = 'alpha' | 'beta' | 'rc' | 'live';
 
 export const RELEASE_CHANNEL_LABELS: Record<ReleaseChannel, string> = {
   alpha: 'Alpha',
+  beta: 'Beta',
   rc: 'Release Candidate',
   live: 'Live',
 };
@@ -109,8 +112,10 @@ export interface Config {
   /// exposes a toggle.
   auto_update_check: boolean;
   /// Which release channel the in-app updater queries. Defaults to
-  /// `alpha`; users can switch via the Updates card. Changing this
-  /// takes effect on the next "Check for updates" or app restart.
+  /// the channel this build was published on (parsed from the Cargo
+  /// package version's prerelease suffix); users can switch via the
+  /// Updates card. Changing this takes effect on the next "Check for
+  /// updates" or app restart.
   release_channel: ReleaseChannel;
   /// Whether to write a daily-rolling `client.log` to the user
   /// data dir. Defaults to false so end users have no log clutter;

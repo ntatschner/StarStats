@@ -10,6 +10,7 @@ event coverage are still evolving and may break on minor releases.
 Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - `vX.Y.Z-alpha[.N]` → `alpha.json`
+- `vX.Y.Z-beta[.N]`  → `beta.json`
 - `vX.Y.Z-rc[.N]`    → `rc.json`
 - `vX.Y.Z`           → `live.json`
 
@@ -30,6 +31,35 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 ### Security
 
 - (nothing yet)
+
+## [0.0.1-beta] — 2026-05-11
+
+Fresh start on the `beta` channel after the alpha history scrub.
+Versions reset from `0.3.12-alpha` to `0.0.1-beta`; the prior alpha
+tags and releases were removed from the public repository.
+
+### Added
+
+- **Client:** New `Beta` variant on `ReleaseChannel` (Cargo + tray-UI),
+  with a matching `beta.json` channel manifest produced by the release
+  workflow. The Settings → Updates dropdown now offers Beta alongside
+  Alpha / RC / Live.
+- **Release workflow:** Added the `v*.*.*-beta[.N]` case to the
+  channel-pattern matcher so beta tags publish to
+  `release-manifests/beta.json` on `main`.
+
+### Changed
+
+- **Client:** `ReleaseChannel::default()` is now derived from
+  `CARGO_PKG_VERSION` at compile time rather than being a hard-coded
+  `Alpha`. A build tagged `vX.Y.Z-beta` defaults fresh installs to the
+  Beta channel; the future first stable build will default to Live.
+  Persisted user overrides in `config.toml` still win over the default.
+- **Client:** Tauri bootstrap updater endpoint flipped from `alpha.json`
+  to `beta.json` for this build (only relevant on first launch before
+  the channel-aware override fires).
+- **Versions:** Workspace `0.3.12-alpha` → `0.0.1-beta`,
+  `tauri.conf.json` `0.3.12` → `0.0.1`.
 
 ## [0.3.12-alpha] — 2026-05-11
 
