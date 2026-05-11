@@ -15,7 +15,7 @@ use crate::repo::{
     EventFilters, EventQuery, EventTypeStats, InferredSession, IngestBatchRow, PayloadFieldBucket,
     PayloadFilter, SeqCursor,
 };
-use crate::spicedb::{ObjectRef, SpicedbClient};
+use crate::spicedb::SpicedbClient;
 use crate::validation::{build_timeline_buckets, is_valid_event_type, resolve_timeline_days};
 use axum::{
     extract::{Query, State},
@@ -295,35 +295,30 @@ pub async fn timeline<Q: EventQuery>(
 pub async fn summary<Q: EventQuery>(
     State(query): State<Arc<Q>>,
     user: AuthenticatedUser,
-    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(_spicedb): Extension<Arc<Option<SpicedbClient>>>,
 ) -> impl IntoResponse {
-    // Enforced SpiceDB check: every user implicitly has `view` on
-    // their own `stats_record`, so the happy path is a no-op. A
-    // denial here means the schema or relationship store has been
-    // tampered with — return 403 rather than leak data. SpiceDB
-    // outages fail open: this endpoint only exposes the caller's
-    // own data, so paging on transient SpiceDB blips would be worse
-    // than letting self-reads through.
-    if let Some(client) = spicedb.as_ref() {
-        let resource = ObjectRef::new("stats_record", &user.preferred_username);
-        let subject = ObjectRef::new("user", &user.preferred_username);
-        match client.check_permission(resource, "view", subject).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(
-                    handle = %user.preferred_username,
-                    "SpiceDB denied self-summary access"
-                );
-                return (StatusCode::FORBIDDEN, "forbidden").into_response();
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "SpiceDB check errored on self-summary; failing open"
-                );
-            }
-        }
-    }
+    // Self-view is always allowed. The original implementation gated
+    // this endpoint behind a SpiceDB CheckPermission for
+    // `stats_record:<handle>#view@user:<handle>`, claiming "every user
+    // implicitly has `view` on their own `stats_record`, so the happy
+    // path is a no-op". That claim is only true if a
+    // `stats_record:<handle>#owner@user:<handle>` relation has been
+    // written for the caller — and nothing in the signup or first-
+    // ingest path writes one, so on first deploy every authenticated
+    // user's own dashboard hit 403 with "SpiceDB denied self-summary
+    // access".
+    //
+    // The right shape for self-view is to skip SpiceDB entirely: the
+    // `AuthenticatedUser` extractor has already verified the caller's
+    // bearer token, so we know the caller IS this user — SpiceDB
+    // can't add anything here. Cross-user reads (`/u/<handle>` public
+    // profile, share-recipient timelines) keep their SpiceDB checks
+    // because for those endpoints the subject != resource owner and
+    // the relationship store is genuinely load-bearing.
+    //
+    // We still take the `Extension<SpicedbClient>` for handler-
+    // signature compatibility with the router wiring in `main.rs`;
+    // intentionally bound to `_spicedb` because nothing consumes it.
 
     match query.summary_for_handle(&user.preferred_username).await {
         Ok((total, by_type)) => (

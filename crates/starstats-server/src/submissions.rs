@@ -578,7 +578,7 @@ impl SubmissionStore for PostgresSubmissionStore {
         // SELECT shape from `list_internal` for consistency.
         let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT
-                s.id, s.submitter_id, u.preferred_username,
+                s.id, s.submitter_id, u.claimed_handle AS preferred_username,
                 s.pattern, s.proposed_label, s.description,
                 s.sample_line, s.log_source, s.status, s.rejection_reason,
                 s.created_at, s.updated_at,
@@ -728,7 +728,7 @@ async fn list_internal(
     // human-legible by composing the WHERE incrementally with QueryBuilder.
     let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
         "SELECT
-            s.id, s.submitter_id, u.preferred_username,
+            s.id, s.submitter_id, u.claimed_handle AS preferred_username,
             s.pattern, s.proposed_label, s.description,
             s.sample_line, s.log_source, s.status, s.rejection_reason,
             s.created_at, s.updated_at,
