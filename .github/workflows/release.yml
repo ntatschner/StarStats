@@ -348,16 +348,23 @@ jobs:
         mkdir -p release-manifests
         cp ./updater-manifest.json "release-manifests/${CHANNEL}.json"
 
-        # Skip the commit if the manifest is byte-identical to what's
-        # already on main — happens when re-running the workflow against
-        # an unchanged release.
-        if git diff --quiet "release-manifests/${CHANNEL}.json"; then
+        # Stage the candidate FIRST, then diff against the index. The
+        # previous `git diff --quiet <path>` check silently returned 0
+        # for untracked files (git diff doesn't consider untracked) so
+        # first-ever channel manifests (e.g. `beta.json`) were never
+        # committed — the auto-updater then 404'd on raw.githubusercontent.com
+        # until the manifest was published by hand.
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add "release-manifests/${CHANNEL}.json"
+
+        # Skip the commit only if there is genuinely nothing staged —
+        # happens when re-running the workflow against an unchanged
+        # release.
+        if git diff --cached --quiet -- "release-manifests/${CHANNEL}.json"; then
           echo "no change to release-manifests/${CHANNEL}.json — skipping commit"
           exit 0
         fi
 
-        git config user.name  "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add "release-manifests/${CHANNEL}.json"
         git commit -m "release-manifests: ${CHANNEL} → ${TAG}"
         git push origin main
