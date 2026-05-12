@@ -64,8 +64,12 @@ pub trait ReferenceStore: Send + Sync + 'static {
     // -- Legacy vehicle-shaped helpers ---------------------------------
     //
     // Default impls delegate to the generic methods + per-category
-    // conversion. Implementers don't need to override these.
+    // conversion. Implementers don't need to override these. The
+    // in-tree cron no longer calls `upsert_vehicles` after P3, but
+    // the method stays on the trait for backwards compatibility with
+    // external implementers and the existing tests.
 
+    #[allow(dead_code)]
     async fn upsert_vehicles(
         &self,
         vehicles: &[VehicleReference],
@@ -116,6 +120,7 @@ pub(crate) fn entry_to_vehicle(e: ReferenceEntry) -> VehicleReference {
 /// Typed `VehicleReference` → generic `ReferenceEntry`. Collapses the
 /// typed columns into a metadata JSON object, dropping `None` fields
 /// so they don't pollute the JSONB body with explicit `null`s.
+#[allow(dead_code)]
 pub(crate) fn vehicle_to_entry(v: &VehicleReference) -> ReferenceEntry {
     let mut meta = serde_json::Map::new();
     let mut put = |k: &str, val: &Option<String>| {

@@ -18,7 +18,9 @@ use crate::orgs::PostgresOrgStore;
 use crate::preferences_store::PostgresPreferencesStore;
 use crate::profile_store::PostgresProfileStore;
 use crate::recovery_codes::PostgresRecoveryCodeStore;
-use crate::reference_data::{ReferenceClient, ReferenceFetchOutcome};
+use crate::reference_data::{
+    ReferenceCategory, ReferenceClient, ReferenceFetchOutcomeCategory,
+};
 use crate::reference_store::ReferenceStore;
 use crate::repo::PostgresStore;
 use crate::rsi_org_store::PostgresRsiOrgStore;
@@ -453,40 +455,62 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(kek))
         .layer(Extension(updater_cfg));
 
-    // Daily refresh of community-API-sourced vehicle reference data.
+    // Daily refresh of community-API-sourced reference data across
+    // all four categories (vehicle / weapon / item / location).
     // Runs once at startup and every 24h thereafter (1h on failure so
     // a transient wiki outage at boot doesn't leave the cache empty
-    // for a full day). Best-effort: failures log and we keep serving
-    // whatever is already cached — stale data is more useful than no
-    // data. `sleep` (not `interval`) is deliberate: we don't want
-    // catch-up firing if the tokio task ever stalls on an upstream.
+    // for a full day). Best-effort: failures log per-category and we
+    // keep serving whatever is already cached — stale data is more
+    // useful than no data. `sleep` (not `interval`) is deliberate: we
+    // don't want catch-up firing if the tokio task ever stalls on an
+    // upstream. The sleep cadence drops to REFRESH_FAIL if ANY
+    // category failed; partial success still gets a retry quickly so
+    // we close the gap on the missing categories.
     const REFRESH_OK: Duration = Duration::from_secs(24 * 3600);
     const REFRESH_FAIL: Duration = Duration::from_secs(3600);
+    const CATEGORIES: [ReferenceCategory; 4] = [
+        ReferenceCategory::Vehicle,
+        ReferenceCategory::Weapon,
+        ReferenceCategory::Item,
+        ReferenceCategory::Location,
+    ];
     {
         let reference_store = reference_store.clone();
         let reference_client = reference_client.clone();
         tokio::spawn(async move {
             loop {
-                let next = match reference_client.fetch_vehicles().await {
-                    ReferenceFetchOutcome::Vehicles(v) => {
-                        match reference_store.upsert_vehicles(&v).await {
-                            Ok(n) => {
-                                tracing::info!(vehicles = n, "vehicle reference data refreshed");
-                                REFRESH_OK
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "vehicle reference upsert failed");
-                                REFRESH_FAIL
+                let mut any_failed = false;
+                for cat in CATEGORIES {
+                    match reference_client.fetch_category(cat).await {
+                        ReferenceFetchOutcomeCategory::Entries(entries) => {
+                            match reference_store.upsert_entries(&entries).await {
+                                Ok(n) => {
+                                    tracing::info!(
+                                        category = cat.as_str(),
+                                        rows = n,
+                                        "reference data refreshed"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        category = cat.as_str(),
+                                        "reference upsert failed"
+                                    );
+                                    any_failed = true;
+                                }
                             }
                         }
+                        ReferenceFetchOutcomeCategory::UpstreamUnavailable => {
+                            tracing::warn!(
+                                category = cat.as_str(),
+                                "reference upstream unavailable; retaining cached data"
+                            );
+                            any_failed = true;
+                        }
                     }
-                    ReferenceFetchOutcome::UpstreamUnavailable => {
-                        tracing::warn!(
-                            "vehicle reference upstream unavailable; retaining cached data"
-                        );
-                        REFRESH_FAIL
-                    }
-                };
+                }
+                let next = if any_failed { REFRESH_FAIL } else { REFRESH_OK };
                 tokio::time::sleep(next).await;
             }
         });

@@ -152,10 +152,41 @@ pub trait ReferenceClient: Send + Sync + 'static {
     /// expected to paginate internally and return the full list as a
     /// single Vec. Failure modes collapse to UpstreamUnavailable; the
     /// caller logs and falls back to whatever's already in the store.
+    ///
+    /// Kept for backwards compatibility — new callers should prefer
+    /// `fetch_category(ReferenceCategory::Vehicle)`. Unused by the
+    /// in-tree cron after P3; the allow-dead silences the warning
+    /// while the API stays available for external implementers.
+    #[allow(dead_code)]
     async fn fetch_vehicles(&self) -> ReferenceFetchOutcome;
+
+    /// Fetch the full catalogue for a single category. Returns
+    /// generic `ReferenceEntry` items so callers can dispatch to one
+    /// `upsert_entries` call regardless of category. Default impl
+    /// reports the upstream as unavailable; the production
+    /// `WikiReferenceClient` overrides it.
+    async fn fetch_category(
+        &self,
+        _category: ReferenceCategory,
+    ) -> ReferenceFetchOutcomeCategory {
+        ReferenceFetchOutcomeCategory::UpstreamUnavailable
+    }
+}
+
+/// Result of a generic category fetch. Mirrors `ReferenceFetchOutcome`
+/// but holds a `Vec<ReferenceEntry>` so the caller can write all four
+/// categories through a single store method. `serde_json::Value`
+/// doesn't implement `Eq`, so this enum is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReferenceFetchOutcomeCategory {
+    Entries(Vec<ReferenceEntry>),
+    UpstreamUnavailable,
 }
 
 const WIKI_VEHICLES_BASE: &str = "https://api.star-citizen.wiki/api/v3/vehicles";
+const WIKI_WEAPONS_BASE: &str = "https://api.star-citizen.wiki/api/v3/weapons-personal";
+const WIKI_ITEMS_BASE: &str = "https://api.star-citizen.wiki/api/v3/items";
+const WIKI_LOCATIONS_BASE: &str = "https://api.star-citizen.wiki/api/v3/star-systems";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Hard cap on how many pages we'll walk. The Wiki returns ~150
 /// vehicles in pages of ~30 → 5-6 pages on a healthy day. 50 is a
@@ -264,6 +295,86 @@ impl ReferenceClient for WikiReferenceClient {
 
         ReferenceFetchOutcome::Vehicles(all)
     }
+
+    async fn fetch_category(
+        &self,
+        category: ReferenceCategory,
+    ) -> ReferenceFetchOutcomeCategory {
+        let base = match category {
+            ReferenceCategory::Vehicle => WIKI_VEHICLES_BASE,
+            ReferenceCategory::Weapon => WIKI_WEAPONS_BASE,
+            ReferenceCategory::Item => WIKI_ITEMS_BASE,
+            ReferenceCategory::Location => WIKI_LOCATIONS_BASE,
+        };
+        let mut all: Vec<ReferenceEntry> = Vec::new();
+        let mut page: u32 = 1;
+        let mut total_bytes: usize = 0;
+
+        loop {
+            if page > MAX_PAGE_REQUESTS {
+                tracing::warn!(
+                    category = category.as_str(),
+                    page,
+                    cap = MAX_PAGE_REQUESTS,
+                    "wiki paginated past safety cap; aborting"
+                );
+                return ReferenceFetchOutcomeCategory::UpstreamUnavailable;
+            }
+
+            let url = format!("{base}?page={page}");
+            let resp = match self.inner.get(&url).send().await {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(error = %err, category = category.as_str(), page, "wiki fetch failed");
+                    return ReferenceFetchOutcomeCategory::UpstreamUnavailable;
+                }
+            };
+
+            let status = resp.status();
+            if !status.is_success() {
+                tracing::warn!(
+                    status = status.as_u16(),
+                    category = category.as_str(),
+                    page,
+                    "wiki non-2xx"
+                );
+                return ReferenceFetchOutcomeCategory::UpstreamUnavailable;
+            }
+
+            let body = match read_capped_body(resp, page, total_bytes).await {
+                Some(b) => b,
+                None => return ReferenceFetchOutcomeCategory::UpstreamUnavailable,
+            };
+            total_bytes = total_bytes.saturating_add(body.len());
+
+            let json: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(error = %err, category = category.as_str(), page, "wiki json parse failed");
+                    return ReferenceFetchOutcomeCategory::UpstreamUnavailable;
+                }
+            };
+
+            all.extend(parse_category_page(&json, category));
+
+            let meta = json.get("meta");
+            let current_page = meta
+                .and_then(|m| m.get("current_page"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(page as u64);
+            let last_page = meta
+                .and_then(|m| m.get("last_page"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(current_page);
+
+            if current_page >= last_page {
+                break;
+            }
+            page += 1;
+        }
+
+        ReferenceFetchOutcomeCategory::Entries(all)
+    }
 }
 
 /// Stream a response body into a `Vec<u8>`, bailing out the moment it
@@ -367,6 +478,66 @@ pub fn parse_vehicles_page(json: &serde_json::Value) -> Vec<VehicleReference> {
             role,
             hull_size,
             focus,
+        });
+    }
+    out
+}
+
+/// Generic per-page parser for any category. Pulls each item's class
+/// identifier (with fallbacks: class_name → code → slug → ref) and
+/// display name, then collects every remaining top-level field into
+/// the metadata JSONB blob. Internal Wiki bookkeeping fields (`id`,
+/// `created_at`, `updated_at`, `version`) are stripped so they don't
+/// pollute the catalogue with noise the dashboard can't use.
+///
+/// Defensive shape: an entry without a usable class identifier is
+/// dropped silently — without the join key it can't link back to an
+/// event payload, so storing it would be inert.
+pub fn parse_category_page(
+    json: &serde_json::Value,
+    category: ReferenceCategory,
+) -> Vec<ReferenceEntry> {
+    let Some(data) = json.get("data").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(data.len());
+    for entry in data {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+
+        let class_name = string_field(entry, "class_name")
+            .or_else(|| string_field(entry, "code"))
+            .or_else(|| string_field(entry, "slug"))
+            .or_else(|| string_field(entry, "ref"));
+        let Some(class_name) = class_name else {
+            continue;
+        };
+
+        let display_name =
+            string_field(entry, "name").unwrap_or_else(|| class_name.clone());
+
+        let mut metadata = serde_json::Map::new();
+        for (k, v) in obj.iter() {
+            if matches!(
+                k.as_str(),
+                "class_name"
+                    | "name"
+                    | "id"
+                    | "created_at"
+                    | "updated_at"
+                    | "version"
+            ) {
+                continue;
+            }
+            metadata.insert(k.clone(), v.clone());
+        }
+
+        out.push(ReferenceEntry {
+            category,
+            class_name,
+            display_name,
+            metadata: serde_json::Value::Object(metadata),
         });
     }
     out
@@ -577,5 +748,86 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].role.as_deref(), Some("Heavy Fighter"));
         assert_eq!(parsed[0].focus.as_deref(), Some("Combat"));
+    }
+
+    // -- parse_category_page (generic) --------------------------------
+
+    #[test]
+    fn parse_category_page_weapon_lifts_metadata() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "data": [
+                    {
+                        "id": 42,
+                        "class_name": "KLWE_LaserCannon_S2",
+                        "name": "Klaus & Werner Sledge II",
+                        "manufacturer": { "name": "Klaus & Werner" },
+                        "size": "S2",
+                        "damage_type": "Energy"
+                    }
+                ],
+                "meta": { "current_page": 1, "last_page": 1 }
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_category_page(&json, ReferenceCategory::Weapon);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].category, ReferenceCategory::Weapon);
+        assert_eq!(parsed[0].class_name, "KLWE_LaserCannon_S2");
+        assert_eq!(parsed[0].display_name, "Klaus & Werner Sledge II");
+        let meta = parsed[0].metadata.as_object().unwrap();
+        assert_eq!(meta.get("size").and_then(|v| v.as_str()), Some("S2"));
+        assert_eq!(
+            meta.get("damage_type").and_then(|v| v.as_str()),
+            Some("Energy")
+        );
+        // Bookkeeping field stripped.
+        assert!(meta.get("id").is_none());
+    }
+
+    #[test]
+    fn parse_category_page_falls_back_to_code() {
+        // Locations frequently use `code` rather than `class_name`.
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "data": [
+                    { "code": "OOC_Stanton_2_Crusader", "name": "Crusader" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_category_page(&json, ReferenceCategory::Location);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].class_name, "OOC_Stanton_2_Crusader");
+        assert_eq!(parsed[0].display_name, "Crusader");
+    }
+
+    #[test]
+    fn parse_category_page_drops_entries_without_class_identifier() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "data": [
+                    { "name": "Mystery item with no ID at all" },
+                    { "class_name": "FOO_Bar", "name": "Foo Bar" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_category_page(&json, ReferenceCategory::Item);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].class_name, "FOO_Bar");
+    }
+
+    #[test]
+    fn parse_category_page_falls_back_to_class_name_for_display() {
+        // No `name` field — display defaults to the class name so the
+        // dashboard never renders an empty cell.
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{ "data": [{ "class_name": "ANVL_Hornet_F7C" }] }"#,
+        )
+        .unwrap();
+        let parsed = parse_category_page(&json, ReferenceCategory::Vehicle);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].display_name, "ANVL_Hornet_F7C");
     }
 }
