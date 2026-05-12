@@ -340,11 +340,15 @@ pub async fn test_smtp<C: SmtpConfigStore, U: UserStore>(
         .send_test_email(&recipient, &user.claimed_handle)
         .await
     {
-        tracing::warn!(error = %e, "smtp test send failed");
+        // `{e:#}` flattens anyhow's full context chain into the message —
+        // without it the user only sees the outermost wrap ("SMTP send
+        // failed") and the actual cause (auth rejected, TLS handshake,
+        // connection refused, …) is invisible.
+        tracing::warn!(error = ?e, "smtp test send failed");
         return error(
             StatusCode::BAD_GATEWAY,
             "smtp_send_failed",
-            Some(format!("{e}")),
+            Some(format!("{e:#}")),
         );
     }
 
