@@ -10,7 +10,6 @@ import {
   getMyRsiOrgs,
   getSummary,
   getTimeline,
-  getVehicleReferences,
   listEvents,
   type EventDto,
   type HangarSnapshot,
@@ -20,8 +19,12 @@ import {
   type SummaryResponse,
   type TimelineResponse,
   type TraceResponse,
-  type VehicleListResponse,
 } from '@/lib/api';
+import {
+  EMPTY_REFERENCE_LOOKUP,
+  loadAllReferences,
+  type ReferenceLookup,
+} from '@/lib/reference';
 import { formatEventSummary } from '@/lib/event-summary';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
@@ -157,25 +160,19 @@ export default async function DashboardPage(props: {
     logger.warn({ err: e }, 'load rsi orgs snapshot failed');
   }
 
-  // Vehicle reference catalogue. Fetched separately from the primary
-  // dashboard data so that a reference-API outage (or rate-limit hit)
-  // degrades gracefully — the timeline simply renders raw class names
-  // instead of friendly display names. Map is keyed by lowercased
-  // class_name; `prettyVehicle` lowercases at lookup.
-  let vehicleRefs: VehicleListResponse | null = null;
+  // Reference catalogue — all four categories (vehicle / weapon /
+  // item / location) fetched in parallel. Each per-category fetch
+  // degrades to an empty Map independently, and the formatter falls
+  // through to a heuristic prettifier on misses, so a reference-API
+  // outage never breaks the dashboard render. Fetch wrapped in a
+  // try/catch so any unexpected error still surfaces an empty lookup
+  // rather than crashing the page.
+  let references: ReferenceLookup = EMPTY_REFERENCE_LOOKUP;
   try {
-    vehicleRefs = await getVehicleReferences();
+    references = await loadAllReferences();
   } catch (e) {
-    logger.warn({ err: e }, 'load vehicle references failed');
+    logger.warn({ err: e }, 'load reference catalogue failed');
   }
-  const vehicleNamesByClass: ReadonlyMap<string, string> | undefined = vehicleRefs
-    ? new Map(
-        vehicleRefs.vehicles.map((v) => [
-          v.class_name.toLowerCase(),
-          v.display_name,
-        ]),
-      )
-    : undefined;
 
   const recentDesc = [...recent].sort((a, b) => b.seq - a.seq);
   const topTypes = [...summary.by_type]
@@ -465,7 +462,7 @@ export default async function DashboardPage(props: {
                 ) : (
                   <Timeline
                     events={recentDesc}
-                    vehicleNamesByClass={vehicleNamesByClass}
+                    references={references}
                   />
                 )}
               </div>
@@ -712,10 +709,10 @@ function TypeBars({
  * encodes the event type (see `eventBorderColor`). */
 function Timeline({
   events,
-  vehicleNamesByClass,
+  references,
 }: {
   events: EventDto[];
-  vehicleNamesByClass: ReadonlyMap<string, string> | undefined;
+  references: ReferenceLookup;
 }) {
   return (
     <ol
@@ -769,7 +766,7 @@ function Timeline({
             {e.log_source}
           </span>
           <span style={{ color: 'var(--fg)', wordBreak: 'break-word' }}>
-            {formatEventSummary(e.payload, vehicleNamesByClass)}
+            {formatEventSummary(e.payload, references)}
           </span>
         </li>
       ))}

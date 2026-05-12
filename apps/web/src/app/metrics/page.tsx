@@ -33,6 +33,11 @@ import {
   type TimelineResponse,
 } from '@/lib/api';
 import { formatEventSummary } from '@/lib/event-summary';
+import {
+  EMPTY_REFERENCE_LOOKUP,
+  loadAllReferences,
+  type ReferenceLookup,
+} from '@/lib/reference';
 import { getSession } from '@/lib/session';
 import { YearHeatmap } from '@/components/metrics/YearHeatmap';
 import { TypeBreakdown } from '@/components/metrics/TypeBreakdown';
@@ -82,6 +87,7 @@ export default async function MetricsPage(props: {
   let recentSessions: SessionsResponse | null = null;
   let rawEvents: ListEventsResponse | null = null;
   let headerSessions: SessionsResponse | null = null;
+  let references: ReferenceLookup = EMPTY_REFERENCE_LOOKUP;
 
   try {
     if (view === 'overview') {
@@ -119,7 +125,7 @@ export default async function MetricsPage(props: {
       sessions = sess;
       headerSessions = hdr;
     } else {
-      const [s, raw, hdr] = await Promise.all([
+      const [s, raw, hdr, refs] = await Promise.all([
         getSummary(session.token),
         listEvents(session.token, {
           limit: RAW_PAGE_LIMIT,
@@ -128,10 +134,15 @@ export default async function MetricsPage(props: {
           after_seq: afterSeq,
         }),
         getMetricsSessions(session.token, { limit: HEADER_SESSION_PROBE_LIMIT }),
+        // Reference catalogue for the Raw tab's per-row event
+        // summaries. Cached server-side + at the fetch layer so
+        // multiple metrics page loads share the same data.
+        loadAllReferences().catch(() => EMPTY_REFERENCE_LOOKUP),
       ]);
       summary = s;
       rawEvents = raw;
       headerSessions = hdr;
+      references = refs;
     }
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
@@ -214,6 +225,7 @@ export default async function MetricsPage(props: {
           eventType={eventType}
           beforeSeq={beforeSeq}
           afterSeq={afterSeq}
+          references={references}
         />
       )}
     </div>
@@ -916,11 +928,13 @@ function RawTab({
   eventType,
   beforeSeq,
   afterSeq,
+  references,
 }: {
   events: ListEventsResponse | null;
   eventType: string | undefined;
   beforeSeq: number | undefined;
   afterSeq: number | undefined;
+  references: ReferenceLookup;
 }) {
   const rows = events?.events ?? [];
   // Sort newest-first to mirror dashboard's stream rendering — the
@@ -1003,7 +1017,12 @@ function RawTab({
             }}
           >
             {sorted.map((e, i) => (
-              <RawRow key={e.seq} e={e} last={i === sorted.length - 1} />
+              <RawRow
+                key={e.seq}
+                e={e}
+                last={i === sorted.length - 1}
+                references={references}
+              />
             ))}
           </ol>
         )}
@@ -1050,7 +1069,15 @@ function RawTab({
   );
 }
 
-function RawRow({ e, last }: { e: EventDto; last: boolean }) {
+function RawRow({
+  e,
+  last,
+  references,
+}: {
+  e: EventDto;
+  last: boolean;
+  references: ReferenceLookup;
+}) {
   return (
     <li
       style={{
@@ -1074,7 +1101,7 @@ function RawRow({ e, last }: { e: EventDto; last: boolean }) {
         {e.event_type}
       </Link>
       <span style={{ color: 'var(--fg-muted)' }}>
-        {formatEventSummary(e.payload)}
+        {formatEventSummary(e.payload, references)}
       </span>
     </li>
   );
