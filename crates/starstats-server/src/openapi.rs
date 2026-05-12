@@ -226,6 +226,7 @@ impl Modify for SecurityAddon {
         smtp_admin_routes::SmtpConfigResponse,
         smtp_admin_routes::SmtpConfigRequest,
         smtp_admin_routes::TestSendResponse,
+        smtp_admin_routes::TestSendRequest,
         // Supporter (donate) status
         supporter_routes::SupporterStatusDto,
         // Donate / Revolut

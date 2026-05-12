@@ -53,7 +53,12 @@ export type ActionResult =
 interface Props {
   initial: SmtpConfigView;
   saveAction: (payload: SmtpConfigPayload) => Promise<ActionResult>;
-  testAction: () => Promise<ActionResult>;
+  /**
+   * Send a test email. When `toAddress` is provided, the server sends
+   * the test there and skips the "admin email must be verified" gate
+   * — used to bootstrap from a state where SMTP has never worked.
+   */
+  testAction: (toAddress?: string) => Promise<ActionResult>;
   reloadAction: () => Promise<ActionResult>;
 }
 
@@ -79,6 +84,9 @@ export function SmtpForm({
   const [webOrigin, setWebOrigin] = useState(initial.web_origin);
   const [enabled, setEnabled] = useState(initial.enabled);
   const [passwordSet, setPasswordSet] = useState(initial.password_set);
+  // Optional "send test to" override — empty means "send to my own
+  // verified email" (the original behaviour).
+  const [testTo, setTestTo] = useState('');
   const [banner, setBanner] = useState<Banner>({ kind: 'idle' });
   const [pending, startTransition] = useTransition();
 
@@ -131,8 +139,9 @@ export function SmtpForm({
   }
 
   function handleTest() {
+    const override = testTo.trim();
     startTransition(async () => {
-      const result = await testAction();
+      const result = await testAction(override.length > 0 ? override : undefined);
       if (result.kind === 'sent') {
         setBanner({ kind: 'sent', to: result.to });
       } else if (result.kind === 'error') {
@@ -287,6 +296,26 @@ export function SmtpForm({
         >
           {pending ? 'Working…' : 'Save'}
         </button>
+        <input
+          type="email"
+          inputMode="email"
+          placeholder="Send test to… (optional)"
+          value={testTo}
+          onChange={(e) => setTestTo(e.target.value)}
+          disabled={!enabled || pending}
+          aria-label="Optional recipient for the test email"
+          title="Leave blank to send to your own verified email. Provide an external address (e.g. a personal mailbox) to bootstrap before your admin email is verified."
+          style={{
+            flex: '1 1 220px',
+            minWidth: 200,
+            padding: '6px 10px',
+            borderRadius: 'var(--r-sm)',
+            border: '1px solid var(--border)',
+            background: 'var(--surface)',
+            color: 'var(--fg)',
+            fontSize: 13,
+          }}
+        />
         <button
           type="button"
           className="ss-btn"
@@ -294,7 +323,9 @@ export function SmtpForm({
           disabled={!enabled || pending}
           title={
             enabled
-              ? 'Send a diagnostic email to your verified address'
+              ? testTo.trim().length > 0
+                ? `Send a diagnostic email to ${testTo.trim()}`
+                : 'Send a diagnostic email to your verified address'
               : 'Enable the config and save before sending a test'
           }
         >

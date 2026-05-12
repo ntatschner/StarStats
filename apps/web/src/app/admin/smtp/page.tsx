@@ -66,12 +66,12 @@ export default async function AdminSmtpPage() {
     }
   }
 
-  async function testAction(): Promise<ActionResult> {
+  async function testAction(toAddress?: string): Promise<ActionResult> {
     'use server';
     const s = await getSession();
     if (!s) return { kind: 'error', message: 'no session' };
     try {
-      const r = await testSmtp(s.token);
+      const r = await testSmtp(s.token, toAddress);
       return { kind: 'sent', to: r.sent_to };
     } catch (e) {
       if (e instanceof ApiCallError) {

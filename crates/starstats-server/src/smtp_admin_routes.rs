@@ -77,6 +77,21 @@ pub struct TestSendResponse {
     pub sent_to: String,
 }
 
+/// Body for `POST /v1/admin/smtp/test`.
+///
+/// `to_address` lets an admin bootstrap from a not-yet-configured
+/// state: when SMTP has never worked, the admin's own email is by
+/// definition unverified, and the original "must be verified" gate
+/// becomes a deadlock. Letting them direct the test to a known-
+/// working external address (a personal mailbox, etc.) breaks the
+/// cycle. When omitted, behaviour is unchanged: send to the admin's
+/// own verified email, refuse with `email_unverified` otherwise.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct TestSendRequest {
+    #[serde(default)]
+    pub to_address: Option<String>,
+}
+
 // -- Helpers ---------------------------------------------------------
 
 fn error(status: StatusCode, code: &'static str, detail: Option<String>) -> Response {
@@ -256,9 +271,10 @@ pub async fn put_smtp<C: SmtpConfigStore, U: UserStore>(
     path = "/v1/admin/smtp/test",
     tag = "admin-smtp",
     operation_id = "admin_smtp_test",
+    request_body = TestSendRequest,
     responses(
-        (status = 200, description = "Test email sent to the caller", body = TestSendResponse),
-        (status = 400, description = "Caller's email is not verified", body = ApiErrorBody),
+        (status = 200, description = "Test email sent (to caller's own email or to_address override)", body = TestSendResponse),
+        (status = 400, description = "Caller's email is not verified, or to_address is malformed", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid bearer token"),
         (status = 403, description = "Caller is not an admin", body = ApiErrorBody),
         (status = 502, description = "Mailer send failed", body = ApiErrorBody),
@@ -270,6 +286,7 @@ pub async fn test_smtp<C: SmtpConfigStore, U: UserStore>(
     State((_cfg_store, users)): State<(Arc<C>, Arc<U>)>,
     Extension(mailer): Extension<Arc<SwappableMailer>>,
     RequireAdmin(admin): RequireAdmin,
+    body: Option<Json<TestSendRequest>>,
 ) -> Response {
     let admin_id = match Uuid::parse_str(&admin.sub) {
         Ok(id) => id,
@@ -285,16 +302,42 @@ pub async fn test_smtp<C: SmtpConfigStore, U: UserStore>(
         }
     };
 
-    if user.email_verified_at.is_none() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "email_unverified",
-            Some("verify your email before sending an SMTP test".into()),
-        );
-    }
+    // Resolve recipient. Optional `to_address` lets an admin
+    // bootstrap from a state where their own email is unverified
+    // (the gate below would otherwise deadlock first-time setup).
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let override_to = req
+        .to_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let recipient: String = if let Some(to) = override_to {
+        if !to.contains('@') || to.len() > 320 {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_to_address",
+                Some("to_address must be a valid email address".into()),
+            );
+        }
+        to.to_string()
+    } else {
+        if user.email_verified_at.is_none() {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "email_unverified",
+                Some(
+                    "verify your email or pass `to_address` in the request body \
+                     to send the test to a known-working external mailbox"
+                        .into(),
+                ),
+            );
+        }
+        user.email.clone()
+    };
 
     if let Err(e) = mailer
-        .send_test_email(&user.email, &user.claimed_handle)
+        .send_test_email(&recipient, &user.claimed_handle)
         .await
     {
         tracing::warn!(error = %e, "smtp test send failed");
@@ -307,9 +350,7 @@ pub async fn test_smtp<C: SmtpConfigStore, U: UserStore>(
 
     (
         StatusCode::OK,
-        Json(TestSendResponse {
-            sent_to: user.email,
-        }),
+        Json(TestSendResponse { sent_to: recipient }),
     )
         .into_response()
 }

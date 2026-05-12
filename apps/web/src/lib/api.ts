@@ -1379,6 +1379,13 @@ export async function putSmtpConfig(
 
 /** Trigger a diagnostic email to the calling admin's verified
  *  address. 400 if email is unverified, 502 if the SMTP send fails. */
-export async function testSmtp(bearer: string): Promise<TestSendResponse> {
-  return postJson<TestSendResponse>('/v1/admin/smtp/test', {}, bearer);
+export async function testSmtp(
+  bearer: string,
+  toAddress?: string | null,
+): Promise<TestSendResponse> {
+  const body =
+    toAddress && toAddress.trim().length > 0
+      ? { to_address: toAddress.trim() }
+      : {};
+  return postJson<TestSendResponse>('/v1/admin/smtp/test', body, bearer);
 }
