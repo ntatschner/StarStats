@@ -9,7 +9,26 @@
  * The payload shape comes from `#[serde(tag = "type", rename_all =
  * "snake_case")]` on `GameEvent` in `starstats-core`, so each variant
  * is a flat object with a `type` discriminator.
+ *
+ * Class-name resolution (P6 of the reference-registry rollout):
+ *   - Each raw class identifier in the payload (weapon, item_class,
+ *     vehicle_class, planet, destination, location_id, etc.) is
+ *     resolved through the appropriate category Map in
+ *     `ReferenceLookup`.
+ *   - Catalog miss → falls through to `toFriendlyName()` so the UI
+ *     never renders a raw underscored identifier.
+ *   - Optional second arg accepts either the legacy `ReadonlyMap`
+ *     (lowercased class → display) for vehicles, OR the new
+ *     `ReferenceLookup` bundle covering all four categories. P7
+ *     migrates callers to the bundle.
  */
+
+import {
+  EMPTY_REFERENCE_LOOKUP,
+  type ReferenceLookup,
+  type ReferenceMap,
+} from './reference';
+import { toFriendlyName } from './heuristic-name';
 
 interface BaseEvent {
   type: string;
@@ -81,21 +100,23 @@ type GameEventPayload =
       anchor_body_sample?: string | null;
     });
 
+/** Either the legacy vehicles-only Map or the full ReferenceLookup. */
+export type ReferenceLookupArg =
+  | ReferenceLookup
+  | ReadonlyMap<string, string>
+  | undefined;
+
 /**
  * Format a payload into a one-liner summary. Falls back to a generic
  * "{type} event" if the payload doesn't match any known variant — that
  * way new server-side variants don't crash the dashboard, they just
  * render bare until the formatter learns them.
- *
- * The optional `vehicleNames` lookup map maps raw class names (e.g.
- * `CRUS_Starfighter_Ion`) to display names; when provided, vehicle
- * variants render the friendly name. When omitted, the raw class name
- * is preserved.
  */
 export function formatEventSummary(
   payload: unknown,
-  vehicleNames?: ReadonlyMap<string, string>,
+  references?: ReferenceLookupArg,
 ): string {
+  const lookup = asLookup(references);
   if (!isGameEventPayload(payload)) {
     if (
       typeof payload === 'object' &&
@@ -107,62 +128,88 @@ export function formatEventSummary(
     }
     return 'unknown event';
   }
-  return formatKnown(payload, vehicleNames);
+  return formatKnown(payload, lookup);
 }
 
-// The lookup map is keyed by lowercased class_name so log-source case
-// drift (`AEGS_Avenger` vs `aegs_avenger`) resolves the same way.
-function prettyVehicle(
-  cls: string,
-  vehicleNames: ReadonlyMap<string, string> | undefined,
-): string {
-  return vehicleNames?.get(cls.toLowerCase()) ?? cls;
+/** Normalise the optional second arg into a full ReferenceLookup. The
+ *  legacy `ReadonlyMap` shape (vehicles-only) is widened by placing
+ *  it on the `vehicles` slot; other categories degrade to empty maps
+ *  and therefore fall through to the heuristic fallback. */
+function asLookup(arg: ReferenceLookupArg): ReferenceLookup {
+  if (!arg) return EMPTY_REFERENCE_LOOKUP;
+  // `'vehicles' in arg` narrows correctly: ReferenceLookup has this
+  // property, a Map does not. Using `instanceof Map` doesn't work
+  // here because `ReadonlyMap<K, V>` is an interface, not a class,
+  // and TypeScript can't narrow against it via instanceof.
+  if ('vehicles' in arg) return arg;
+  return { ...EMPTY_REFERENCE_LOOKUP, vehicles: arg };
+}
+
+/** Resolve a raw class identifier through a category Map; on miss,
+ *  fall through to the heuristic prettifier so the dashboard never
+ *  renders a bare underscored identifier. */
+function pretty(cls: string | null | undefined, map: ReferenceMap): string {
+  if (!cls) return '';
+  return map.get(cls.toLowerCase()) ?? toFriendlyName(cls);
 }
 
 function formatKnown(
   event: GameEventPayload,
-  vehicleNames: ReadonlyMap<string, string> | undefined,
+  lookup: ReferenceLookup,
 ): string {
   switch (event.type) {
     case 'process_init':
       return 'Game process started';
     case 'legacy_login':
       return `Logged in as ${event.handle}`;
-    case 'join_pu':
-      return `Joined PU shard ${event.shard} (${event.address}:${event.port})`;
+    case 'join_pu': {
+      const where = pretty(event.location_id, lookup.locations);
+      return `Joined PU shard ${event.shard}${where ? ` · ${where}` : ''} (${event.address}:${event.port})`;
+    }
     case 'change_server':
       return `Server transition: ${event.phase === 'start' ? 'starting' : 'complete'}`;
     case 'seed_solar_system':
       return `Seeded ${event.solar_system} on shard ${event.shard}`;
     case 'resolve_spawn':
       return `Spawn resolved (player ${event.player_geid}, fallback=${event.fallback})`;
-    case 'actor_death':
-      return `${event.victim} killed by ${event.killer} (${event.weapon}, ${event.damage_type})`;
+    case 'actor_death': {
+      // `killer` may be a player handle (already pretty) or an NPC
+      // archetype like `NPC_AI_Pirate_Marine`. No catalog covers
+      // NPCs yet — the heuristic strips the NPC_/AI_ prefixes and
+      // title-cases the remainder.
+      const killer = toFriendlyName(event.killer);
+      const weapon = pretty(event.weapon, lookup.weapons);
+      return `${event.victim} killed by ${killer} (${weapon}, ${event.damage_type})`;
+    }
     case 'vehicle_destruction':
-      return `Vehicle destroyed: ${prettyVehicle(event.vehicle_class, vehicleNames)} (level ${event.destroy_level}, by ${event.caused_by})`;
+      return `Vehicle destroyed: ${pretty(event.vehicle_class, lookup.vehicles)} (level ${event.destroy_level}, by ${event.caused_by})`;
     case 'hud_notification':
       return `HUD: ${event.text.replace(/:\s*$/, '').replace(/:$/, '')}`;
     case 'location_inventory_requested':
       if (event.location === 'INVALID_LOCATION_ID') {
         return `${event.player} opened inventory (no location bound yet)`;
       }
-      return `${event.player} opened inventory at ${event.location}`;
+      return `${event.player} opened inventory at ${pretty(event.location, lookup.locations)}`;
     case 'planet_terrain_load': {
-      const label = event.planet.split('_').pop() ?? event.planet;
-      return `Near planet/moon: ${label}`;
+      // Prefer the catalog; fall back to the heuristic (which strips
+      // OOC_ prefixes etc.) rather than the original split-on-last-_
+      // shortcut, since the heuristic is more thorough.
+      const label = pretty(event.planet, lookup.locations);
+      return `Near planet/moon: ${label || event.planet}`;
     }
     case 'quantum_target_selected': {
-      const phase =
-        event.phase === 'fuel_requested' ? 'fuel calc' : 'selected';
-      return `Quantum target ${phase}: ${prettyVehicle(event.vehicle_class, vehicleNames)} → ${event.destination}`;
+      const phase = event.phase === 'fuel_requested' ? 'fuel calc' : 'selected';
+      return `Quantum target ${phase}: ${pretty(event.vehicle_class, lookup.vehicles)} → ${pretty(event.destination, lookup.locations)}`;
     }
     case 'attachment_received':
-      return `Attached ${event.item_class} to ${event.port}`;
+      return `Attached ${pretty(event.item_class, lookup.items)} to ${event.port}`;
     case 'vehicle_stowed': {
-      const area = event.landing_area
+      const cleaned = event.landing_area
         .replace(/^\[PROC\]/, '')
         .replace(/^LandingArea_/, '');
-      return `Ship ${event.vehicle_id} stowed at ${area}`;
+      const label =
+        lookup.locations.get(cleaned.toLowerCase()) ?? toFriendlyName(cleaned);
+      return `Ship ${event.vehicle_id} stowed at ${label}`;
     }
     case 'burst_summary': {
       // Friendly per-rule labels for the four built-in BurstRules in
