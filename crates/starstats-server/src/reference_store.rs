@@ -212,12 +212,14 @@ impl ReferenceStore for PostgresReferenceStore {
         .bind(class_name)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(class_name, display_name, metadata)| ReferenceEntry {
-            category,
-            class_name,
-            display_name,
-            metadata,
-        }))
+        Ok(
+            row.map(|(class_name, display_name, metadata)| ReferenceEntry {
+                category,
+                class_name,
+                display_name,
+                metadata,
+            }),
+        )
     }
 
     async fn list_category(
@@ -397,7 +399,11 @@ mod tests {
         let class_names: Vec<&str> = listed.iter().map(|v| v.class_name.as_str()).collect();
         assert_eq!(
             class_names,
-            vec!["AEGS_Avenger_Stalker", "ANVL_Hornet_F7C", "DRAK_Cutlass_Black"]
+            vec![
+                "AEGS_Avenger_Stalker",
+                "ANVL_Hornet_F7C",
+                "DRAK_Cutlass_Black"
+            ]
         );
     }
 

@@ -74,15 +74,7 @@ pub enum ReferenceFetchOutcome {
 /// constraint in migration 0022 — adding a category requires a
 /// follow-up migration to widen the allow-list.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    utoipa::ToSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceCategory {
@@ -165,10 +157,7 @@ pub trait ReferenceClient: Send + Sync + 'static {
     /// `upsert_entries` call regardless of category. Default impl
     /// reports the upstream as unavailable; the production
     /// `WikiReferenceClient` overrides it.
-    async fn fetch_category(
-        &self,
-        _category: ReferenceCategory,
-    ) -> ReferenceFetchOutcomeCategory {
+    async fn fetch_category(&self, _category: ReferenceCategory) -> ReferenceFetchOutcomeCategory {
         ReferenceFetchOutcomeCategory::UpstreamUnavailable
     }
 }
@@ -296,10 +285,7 @@ impl ReferenceClient for WikiReferenceClient {
         ReferenceFetchOutcome::Vehicles(all)
     }
 
-    async fn fetch_category(
-        &self,
-        category: ReferenceCategory,
-    ) -> ReferenceFetchOutcomeCategory {
+    async fn fetch_category(&self, category: ReferenceCategory) -> ReferenceFetchOutcomeCategory {
         let base = match category {
             ReferenceCategory::Vehicle => WIKI_VEHICLES_BASE,
             ReferenceCategory::Weapon => WIKI_WEAPONS_BASE,
@@ -514,19 +500,13 @@ pub fn parse_category_page(
             continue;
         };
 
-        let display_name =
-            string_field(entry, "name").unwrap_or_else(|| class_name.clone());
+        let display_name = string_field(entry, "name").unwrap_or_else(|| class_name.clone());
 
         let mut metadata = serde_json::Map::new();
         for (k, v) in obj.iter() {
             if matches!(
                 k.as_str(),
-                "class_name"
-                    | "name"
-                    | "id"
-                    | "created_at"
-                    | "updated_at"
-                    | "version"
+                "class_name" | "name" | "id" | "created_at" | "updated_at" | "version"
             ) {
                 continue;
             }
@@ -822,10 +802,8 @@ mod tests {
     fn parse_category_page_falls_back_to_class_name_for_display() {
         // No `name` field — display defaults to the class name so the
         // dashboard never renders an empty cell.
-        let json: serde_json::Value = serde_json::from_str(
-            r#"{ "data": [{ "class_name": "ANVL_Hornet_F7C" }] }"#,
-        )
-        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{ "data": [{ "class_name": "ANVL_Hornet_F7C" }] }"#).unwrap();
         let parsed = parse_category_page(&json, ReferenceCategory::Vehicle);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].display_name, "ANVL_Hornet_F7C");

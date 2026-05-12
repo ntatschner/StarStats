@@ -18,9 +18,7 @@ use crate::orgs::PostgresOrgStore;
 use crate::preferences_store::PostgresPreferencesStore;
 use crate::profile_store::PostgresProfileStore;
 use crate::recovery_codes::PostgresRecoveryCodeStore;
-use crate::reference_data::{
-    ReferenceCategory, ReferenceClient, ReferenceFetchOutcomeCategory,
-};
+use crate::reference_data::{ReferenceCategory, ReferenceClient, ReferenceFetchOutcomeCategory};
 use crate::reference_store::ReferenceStore;
 use crate::repo::PostgresStore;
 use crate::rsi_org_store::PostgresRsiOrgStore;
