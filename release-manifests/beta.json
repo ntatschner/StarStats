@@ -1,15 +1,15 @@
 {
-  "version": "0.0.2-beta",
-  "pub_date": "2026-05-12T11:31:37.688Z",
-  "notes": "See https://github.com/ntatschner/StarStats/releases/tag/v0.0.2-beta",
+  "version": "0.0.3-beta",
+  "pub_date": "2026-05-12T17:17:59.765Z",
+  "notes": "See https://github.com/ntatschner/StarStats/releases/tag/v0.0.3-beta",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRVhUT3V6MnZBd3VBUktXclZ4V2p0YTY4OW1STHplRVRLb1pNYmJ1T3Mzd3BaYkFxSjdlRGQvQzFGaU9IaExQMFErUmNCcmNuckxVUm84RC9ZbDNRN3FTdGprd2t3WmdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NTg1NDAyCWZpbGU6U3RhclN0YXRzXzAuMC4yX3g2NC1zZXR1cC5leGUKcFNNNkhHNkF4aldUUS9OZnI1UzZTdi90ajhtUkswcXVsVFNpTER5MERzd0tNeGI0ek5JOVhGeXdnWmJiWUd0eG52NVg1M1JITkxIajJRQWRQbkJsREE9PQo=",
-      "url": "https://github.com/ntatschner/StarStats/releases/download/v0.0.2-beta/StarStats_0.0.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRVhUT3V6MnZBd21iZVBDd2lXZkRkUFZnbE1RVThUb3hRdUhNVHlycFRGdGNoc2JKRjF6NFBzV0FuTmNyVk1RY3ZYUUczdkNVVm5iM2ZOZG5FcU16RUNPV1hOUXRTcHc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NjA2MTg5CWZpbGU6U3RhclN0YXRzXzAuMC4zX3g2NC1zZXR1cC5leGUKd1JNT0x6bUtaQzkyRDUrenlFd3RVVnVacHI1UFZ0TVoxZ2VDcmZBYUdLWE9FV3REM0FiWHMyYjNBZmg5TFRza3AwTmp1THlyNG1vcE5MNTROWTVaQlE9PQo=",
+      "url": "https://github.com/ntatschner/StarStats/releases/download/v0.0.3-beta/StarStats_0.0.3_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRVhUT3V6MnZBd3Y3NzlrczgwelpDLzBQbHZVZEYxTS9LaTlkZ25hbndvS29QSjhGQUlBMEdaV2VMTUgxUEgyZEI5TVZROXorK2pCWTI2bTk2RS9jYm1aNDNEeEM3VFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NTg1MjU1CWZpbGU6U3RhclN0YXRzXzAuMC4yX2FtZDY0LkFwcEltYWdlCncxV2Z2NkFXUTNIanVIVGxQU1FZY2NWVW80YjhVRXFSK085NmlVUDVtZ2NjTzdidmRTTC9FK0dWWmpvQVZnZkJaNlA5d3JaeVJYNmVVS254QVlsaENRPT0K",
-      "url": "https://github.com/ntatschner/StarStats/releases/download/v0.0.2-beta/StarStats_0.0.2_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRVhUT3V6MnZBd2lob1RoZHg1dkNKcEgyMm9qaWRwd0RFRmFiZC9qdlNFanpQdkEyT3hwZmY3L2xBU05nYWJJUDE4UkpIallQOEJSbzhrV3NvSDQ0c1g5cHhabW0reUFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4NjA2MDY2CWZpbGU6U3RhclN0YXRzXzAuMC4zX2FtZDY0LkFwcEltYWdlCitmSTBmU2UvZGdTNWE2RnN2UWxkQ3lvQVRnNU1WL2s3TzBTU1NKem9SSk1nSGZGa1hQbys5RC96TERra3VXTTNLaXhQVzh4VW94dC8wM0tFRVlVM0NnPT0K",
+      "url": "https://github.com/ntatschner/StarStats/releases/download/v0.0.3-beta/StarStats_0.0.3_amd64.AppImage"
     }
   }
 }
