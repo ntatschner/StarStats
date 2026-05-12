@@ -118,7 +118,7 @@ export class ApiCallError extends Error {
   }
 }
 
-function apiBase(): string {
+export function apiBase(): string {
   const raw = process.env.STARSTATS_API_URL;
   if (!raw) {
     throw new Error(
