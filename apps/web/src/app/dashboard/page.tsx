@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import {
   ApiCallError,
   getCurrentLocation,
+  getLocationTrace,
   getMyHangar,
   getMyProfile,
   getMyRsiOrgs,
@@ -18,12 +19,14 @@ import {
   type RsiOrgsSnapshot,
   type SummaryResponse,
   type TimelineResponse,
+  type TraceResponse,
   type VehicleListResponse,
 } from '@/lib/api';
 import { formatEventSummary } from '@/lib/event-summary';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { LocationPill } from '@/components/LocationPill';
+import { LocationChainStrip } from '@/components/journey/LocationChainStrip';
 import { DayHeatmap } from '@/components/DayHeatmap';
 import { HangarCard } from '@/components/HangarCard';
 import { OrgsCard } from '@/components/OrgsCard';
@@ -64,8 +67,9 @@ export default async function DashboardPage(props: {
   let recent: EventDto[];
   let timeline: TimelineResponse;
   let location: ResolvedLocation | null = null;
+  let trace: TraceResponse | null = null;
   try {
-    const [summaryResp, eventsResp, timelineResp, locationResp] =
+    const [summaryResp, eventsResp, timelineResp, locationResp, traceResp] =
       await Promise.all([
         getSummary(session.token),
         listEvents(session.token, {
@@ -90,11 +94,21 @@ export default async function DashboardPage(props: {
           }
           return null;
         }),
+        // Trace for the "Recent stops" chain strip directly below the
+        // LocationPill. 24h window is plenty to recover 5 distinct
+        // stops for a returning user; degrades silently to null.
+        getLocationTrace(session.token, 24).catch((e) => {
+          if (!(e instanceof ApiCallError) || e.status !== 401) {
+            logger.warn({ err: e }, 'getLocationTrace failed');
+          }
+          return null;
+        }),
       ]);
     summary = summaryResp;
     recent = eventsResp.events;
     timeline = timelineResp;
     location = locationResp;
+    trace = traceResp;
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/dashboard');
@@ -237,6 +251,13 @@ export default async function DashboardPage(props: {
       </header>
 
       <LocationPill location={location} />
+      {trace && trace.entries.length > 0 && (
+        <LocationChainStrip
+          entries={trace.entries}
+          maxStops={5}
+          eyebrow="Recent stops · last 24h"
+        />
+      )}
 
       <ProfileCard profile={profile} showSettingsLink />
 

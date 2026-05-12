@@ -38,6 +38,10 @@ import {
   type TravelStatsResponse,
 } from '@/lib/api';
 import { LocationPill } from '@/components/LocationPill';
+import { LocationChainStrip } from '@/components/journey/LocationChainStrip';
+import { LocationConstellation } from '@/components/journey/LocationConstellation';
+import { LocationFrequencyBars } from '@/components/journey/LocationFrequencyBars';
+import { LocationTimeline } from '@/components/journey/LocationTimeline';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 
@@ -190,68 +194,37 @@ async function LocationTab({ token }: { token: string }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <LocationPill location={current} />
 
+      {trace && trace.entries.length > 0 && (
+        <LocationChainStrip
+          entries={trace.entries}
+          maxStops={5}
+          eyebrow="Recent stops · last 24h"
+        />
+      )}
+
+      <section className="ss-card" style={{ padding: '18px 20px' }}>
+        <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
+          Constellation · last 24h
+        </div>
+        {trace && trace.entries.length > 0 ? (
+          <LocationConstellation entries={trace.entries} />
+        ) : (
+          <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
+            No stops to chart yet.
+          </p>
+        )}
+      </section>
+
       <section className="ss-card" style={{ padding: '18px 20px' }}>
         <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
           Recent journey · last 24h
         </div>
-        {!trace || trace.entries.length === 0 ? (
+        {trace && trace.entries.length > 0 ? (
+          <LocationTimeline entries={trace.entries} />
+        ) : (
           <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
             No location-bearing events in the last 24 hours.
           </p>
-        ) : (
-          <ol
-            style={{
-              listStyle: 'none',
-              margin: 0,
-              padding: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 6,
-            }}
-          >
-            {trace.entries.map((e, i) => (
-              <li
-                key={`${e.started_at}-${i}`}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '120px 1fr auto',
-                  gap: 10,
-                  alignItems: 'baseline',
-                  padding: '4px 0',
-                  borderTop: i === 0 ? 'none' : '1px solid var(--border)',
-                }}
-              >
-                <span
-                  className="mono"
-                  style={{ fontSize: 11, color: 'var(--fg-dim)' }}
-                  title={e.started_at}
-                >
-                  {formatTimeShort(e.started_at)}
-                </span>
-                <span style={{ fontSize: 13, color: 'var(--fg)' }}>
-                  <strong>{e.city ?? e.planet ?? 'In transit'}</strong>
-                  {e.planet && e.city && (
-                    <span style={{ color: 'var(--fg-muted)' }}>
-                      {' · '}
-                      {e.planet}
-                    </span>
-                  )}
-                  {e.system && (
-                    <span style={{ color: 'var(--fg-dim)', fontSize: 11 }}>
-                      {' · '}
-                      {e.system}
-                    </span>
-                  )}
-                </span>
-                <span
-                  style={{ fontSize: 11, color: 'var(--fg-dim)' }}
-                  className="mono"
-                >
-                  {e.event_count}×
-                </span>
-              </li>
-            ))}
-          </ol>
         )}
       </section>
 
@@ -259,86 +232,9 @@ async function LocationTab({ token }: { token: string }) {
         <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
           Where you spend time · last 7 days
         </div>
-        {!breakdown || breakdown.entries.length === 0 ? (
-          <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
-            Not enough data to chart yet.
-          </p>
-        ) : (
-          <DwellChart entries={breakdown.entries} />
-        )}
+        <LocationFrequencyBars entries={breakdown?.entries ?? []} />
       </section>
     </div>
-  );
-}
-
-function DwellChart({
-  entries,
-}: {
-  entries: BreakdownResponse['entries'];
-}) {
-  const max = Math.max(...entries.map((e) => e.dwell_seconds), 1);
-  return (
-    <ol
-      style={{
-        listStyle: 'none',
-        margin: 0,
-        padding: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 8,
-      }}
-    >
-      {entries.map((e, i) => {
-        const pct = (e.dwell_seconds / max) * 100;
-        const label = e.city ?? e.planet ?? 'Unknown';
-        return (
-          <li key={`${label}-${i}`}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'baseline',
-                fontSize: 12,
-                marginBottom: 4,
-              }}
-            >
-              <span style={{ color: 'var(--fg)' }}>
-                <strong>{label}</strong>
-                {e.planet && e.city && (
-                  <span style={{ color: 'var(--fg-muted)' }}>
-                    {' · '}
-                    {e.planet}
-                  </span>
-                )}
-              </span>
-              <span
-                className="mono"
-                style={{ fontSize: 11, color: 'var(--fg-dim)' }}
-              >
-                {formatDwell(e.dwell_seconds)} · {e.visit_count} visit
-                {e.visit_count === 1 ? '' : 's'}
-              </span>
-            </div>
-            <div
-              style={{
-                height: 6,
-                background: 'var(--bg-elev)',
-                borderRadius: 3,
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  width: `${pct}%`,
-                  height: '100%',
-                  background: 'var(--accent)',
-                }}
-              />
-            </div>
-          </li>
-        );
-      })}
-    </ol>
   );
 }
 
@@ -668,14 +564,6 @@ function formatTimeShort(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function formatDwell(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const mr = m % 60;
-  return mr === 0 ? `${h}h` : `${h}h ${mr}m`;
-}
 
 // -- Commerce tab --------------------------------------------------
 
