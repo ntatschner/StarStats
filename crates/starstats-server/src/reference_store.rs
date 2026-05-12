@@ -1,20 +1,26 @@
-//! Persistent store for Star Citizen vehicle reference data.
+//! Persistent store for the Star Citizen class-name reference catalogue.
 //!
-//! The cache is keyed on `class_name` — the internal Star Citizen
-//! identifier embedded in event payloads. The daily refresh job
-//! pulls the catalogue via [`crate::reference_data::ReferenceClient`]
-//! and upserts every row through this store; render paths read by
-//! `class_name` (case-insensitive) to translate raw events into
-//! player-friendly metadata.
+//! The store is keyed on `(category, class_name)` — the internal Star
+//! Citizen identifier embedded in event payloads, scoped to the kind
+//! of entity it refers to (vehicle, weapon, item, location). The daily
+//! refresh job pulls each category via the upstream wiki API and upserts
+//! every entry; render paths read by `(category, class_name)`
+//! case-insensitive to translate raw events into player-friendly metadata.
+//!
+//! Trait shape: implementers only need the three generic methods
+//! (`upsert_entries`, `get_entry`, `list_category`). The legacy
+//! vehicle-specific methods are default impls that delegate to the
+//! generic ones plus a small ReferenceEntry ↔ VehicleReference
+//! conversion — keeps existing callers and tests working through the
+//! transition without forcing every implementer to maintain two
+//! parallel code paths.
 //!
 //! Errors collapse into a single [`ReferenceStoreError::Backend`]
 //! variant. The route layer treats backend failure as a 503 either
-//! way, and there are no unique-constraint races worth carving out
-//! a richer taxonomy for (the only constraint here is the primary
-//! key on `class_name`, which the upsert resolves by definition).
-//! The shape mirrors [`crate::profile_store::ProfileStoreError`].
+//! way, and there are no unique-constraint races worth carving out a
+//! richer taxonomy for. Shape mirrors [`crate::profile_store::ProfileStoreError`].
 
-use crate::reference_data::VehicleReference;
+use crate::reference_data::{ReferenceCategory, ReferenceEntry, VehicleReference};
 use async_trait::async_trait;
 use sqlx::PgPool;
 
@@ -32,31 +38,109 @@ impl From<sqlx::Error> for ReferenceStoreError {
 
 #[async_trait]
 pub trait ReferenceStore: Send + Sync + 'static {
-    /// Upsert each vehicle by class_name. Returns the count of rows
-    /// affected (insert + update combined). The store is idempotent —
-    /// repeated calls with the same data are cheap and safe.
+    /// Upsert each entry by (category, class_name). Returns the count
+    /// of rows affected. Idempotent — repeated calls with the same
+    /// payload are cheap and safe.
+    async fn upsert_entries(
+        &self,
+        entries: &[ReferenceEntry],
+    ) -> Result<usize, ReferenceStoreError>;
+
+    /// Look up a single entry by (category, class_name). Case-insensitive
+    /// on `class_name` — game logs occasionally vary case on the same
+    /// class.
+    async fn get_entry(
+        &self,
+        category: ReferenceCategory,
+        class_name: &str,
+    ) -> Result<Option<ReferenceEntry>, ReferenceStoreError>;
+
+    /// Full list for a category, ordered by `class_name` ASC.
+    async fn list_category(
+        &self,
+        category: ReferenceCategory,
+    ) -> Result<Vec<ReferenceEntry>, ReferenceStoreError>;
+
+    // -- Legacy vehicle-shaped helpers ---------------------------------
+    //
+    // Default impls delegate to the generic methods + per-category
+    // conversion. Implementers don't need to override these.
+
     async fn upsert_vehicles(
         &self,
         vehicles: &[VehicleReference],
-    ) -> Result<usize, ReferenceStoreError>;
+    ) -> Result<usize, ReferenceStoreError> {
+        let entries: Vec<ReferenceEntry> = vehicles.iter().map(vehicle_to_entry).collect();
+        self.upsert_entries(&entries).await
+    }
 
-    /// Look up by class_name. Match is case-insensitive — game logs
-    /// occasionally vary case on the same class.
     async fn get_vehicle(
         &self,
         class_name: &str,
-    ) -> Result<Option<VehicleReference>, ReferenceStoreError>;
+    ) -> Result<Option<VehicleReference>, ReferenceStoreError> {
+        Ok(self
+            .get_entry(ReferenceCategory::Vehicle, class_name)
+            .await?
+            .map(entry_to_vehicle))
+    }
 
-    /// Full list, ordered by class_name ASC. ~150 entries, fits in a
-    /// single response — no pagination needed.
-    async fn list_vehicles(&self) -> Result<Vec<VehicleReference>, ReferenceStoreError>;
+    async fn list_vehicles(&self) -> Result<Vec<VehicleReference>, ReferenceStoreError> {
+        Ok(self
+            .list_category(ReferenceCategory::Vehicle)
+            .await?
+            .into_iter()
+            .map(entry_to_vehicle)
+            .collect())
+    }
+}
+
+/// `ReferenceEntry` (generic) → typed `VehicleReference` view. Used by
+/// the legacy `get_vehicle` / `list_vehicles` path.
+pub(crate) fn entry_to_vehicle(e: ReferenceEntry) -> VehicleReference {
+    let meta = e.metadata.as_object().cloned().unwrap_or_default();
+    let s = |k: &str| {
+        meta.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+    };
+    VehicleReference {
+        class_name: e.class_name,
+        display_name: e.display_name,
+        manufacturer: s("manufacturer"),
+        role: s("role"),
+        hull_size: s("hull_size"),
+        focus: s("focus"),
+    }
+}
+
+/// Typed `VehicleReference` → generic `ReferenceEntry`. Collapses the
+/// typed columns into a metadata JSON object, dropping `None` fields
+/// so they don't pollute the JSONB body with explicit `null`s.
+pub(crate) fn vehicle_to_entry(v: &VehicleReference) -> ReferenceEntry {
+    let mut meta = serde_json::Map::new();
+    let mut put = |k: &str, val: &Option<String>| {
+        if let Some(s) = val {
+            meta.insert(k.into(), serde_json::Value::String(s.clone()));
+        }
+    };
+    put("manufacturer", &v.manufacturer);
+    put("role", &v.role);
+    put("hull_size", &v.hull_size);
+    put("focus", &v.focus);
+    ReferenceEntry {
+        category: ReferenceCategory::Vehicle,
+        class_name: v.class_name.clone(),
+        display_name: v.display_name.clone(),
+        metadata: serde_json::Value::Object(meta),
+    }
 }
 
 // -- Postgres impl ---------------------------------------------------
 //
-// `updated_at` is intentionally omitted from the surfaced `SELECT`
-// columns: it drives ops alerting (stale-cache detection) but isn't
-// part of the public response shape.
+// `updated_at` and `source` are intentionally omitted from the
+// surfaced `SELECT` columns. `updated_at` drives ops alerting
+// (stale-cache detection); `source` is provenance for debugging the
+// refresh path. Neither is part of the public response shape.
 
 pub struct PostgresReferenceStore {
     pool: PgPool,
@@ -70,40 +154,36 @@ impl PostgresReferenceStore {
 
 #[async_trait]
 impl ReferenceStore for PostgresReferenceStore {
-    async fn upsert_vehicles(
+    async fn upsert_entries(
         &self,
-        vehicles: &[VehicleReference],
+        entries: &[ReferenceEntry],
     ) -> Result<usize, ReferenceStoreError> {
-        // Wrap the batch in a transaction so a partial failure (e.g.
-        // a constraint violation midway) rolls back cleanly. The
-        // caller treats "fresh refresh" as all-or-nothing — partial
-        // writes would leave the cache in an inconsistent state where
-        // some vehicles point at last-week's metadata and others at
-        // today's.
+        // Wrap the batch in a transaction so a partial failure (e.g. a
+        // constraint violation midway) rolls back cleanly. The caller
+        // treats "fresh refresh" as all-or-nothing — partial writes
+        // would leave the cache in an inconsistent state where some
+        // rows point at last-week's metadata and others at today's.
         let mut tx = self.pool.begin().await?;
         let mut affected: u64 = 0;
 
-        for v in vehicles {
+        for e in entries {
             let result = sqlx::query(
                 r#"
-                INSERT INTO vehicle_reference
-                    (class_name, display_name, manufacturer, role, hull_size, focus, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                ON CONFLICT (class_name) DO UPDATE
+                INSERT INTO reference_registry
+                    (category, class_name, display_name, metadata, source, updated_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (category, class_name) DO UPDATE
                     SET display_name = EXCLUDED.display_name,
-                        manufacturer = EXCLUDED.manufacturer,
-                        role         = EXCLUDED.role,
-                        hull_size    = EXCLUDED.hull_size,
-                        focus        = EXCLUDED.focus,
+                        metadata     = EXCLUDED.metadata,
+                        source       = EXCLUDED.source,
                         updated_at   = NOW()
                 "#,
             )
-            .bind(&v.class_name)
-            .bind(&v.display_name)
-            .bind(&v.manufacturer)
-            .bind(&v.role)
-            .bind(&v.hull_size)
-            .bind(&v.focus)
+            .bind(e.category.as_str())
+            .bind(&e.class_name)
+            .bind(&e.display_name)
+            .bind(&e.metadata)
+            .bind("wiki_api")
             .execute(&mut *tx)
             .await?;
             affected = affected.saturating_add(result.rows_affected());
@@ -113,66 +193,50 @@ impl ReferenceStore for PostgresReferenceStore {
         Ok(affected as usize)
     }
 
-    async fn get_vehicle(
+    async fn get_entry(
         &self,
+        category: ReferenceCategory,
         class_name: &str,
-    ) -> Result<Option<VehicleReference>, ReferenceStoreError> {
-        // Case-insensitive lookup — matches the
-        // `vehicle_reference_class_lower_idx` index in the migration.
-        let row: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT class_name, display_name, manufacturer, role, hull_size, focus \
-                 FROM vehicle_reference \
-                 WHERE lower(class_name) = lower($1)",
+    ) -> Result<Option<ReferenceEntry>, ReferenceStoreError> {
+        let row: Option<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT class_name, display_name, metadata \
+                 FROM reference_registry \
+                 WHERE category = $1 AND lower(class_name) = lower($2)",
         )
+        .bind(category.as_str())
         .bind(class_name)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(row_to_vehicle))
+        Ok(row.map(|(class_name, display_name, metadata)| ReferenceEntry {
+            category,
+            class_name,
+            display_name,
+            metadata,
+        }))
     }
 
-    async fn list_vehicles(&self) -> Result<Vec<VehicleReference>, ReferenceStoreError> {
-        let rows: Vec<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT class_name, display_name, manufacturer, role, hull_size, focus \
-                 FROM vehicle_reference \
+    async fn list_category(
+        &self,
+        category: ReferenceCategory,
+    ) -> Result<Vec<ReferenceEntry>, ReferenceStoreError> {
+        let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT class_name, display_name, metadata \
+                 FROM reference_registry \
+                 WHERE category = $1 \
                  ORDER BY class_name ASC",
         )
+        .bind(category.as_str())
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(row_to_vehicle).collect())
-    }
-}
-
-fn row_to_vehicle(
-    (class_name, display_name, manufacturer, role, hull_size, focus): (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
-) -> VehicleReference {
-    VehicleReference {
-        class_name,
-        display_name,
-        manufacturer,
-        role,
-        hull_size,
-        focus,
+        Ok(rows
+            .into_iter()
+            .map(|(class_name, display_name, metadata)| ReferenceEntry {
+                category,
+                class_name,
+                display_name,
+                metadata,
+            })
+            .collect())
     }
 }
 
@@ -185,14 +249,12 @@ pub mod test_support {
     use std::sync::Mutex;
 
     /// In-memory implementation used by handler-level tests. Mirrors
-    /// the Postgres semantics: idempotent upsert keyed on
-    /// `class_name`, case-insensitive lookup, ASCII-sorted list.
-    /// Internal map is keyed by lowercase `class_name` so the lookup
-    /// matches the Postgres `lower(class_name)` index without
-    /// scanning every row.
+    /// Postgres semantics: idempotent upsert keyed on
+    /// (category, lower(class_name)), case-insensitive lookup,
+    /// ASCII-sorted list per category.
     #[derive(Default)]
     pub struct MemoryReferenceStore {
-        rows: Mutex<HashMap<String, VehicleReference>>,
+        rows: Mutex<HashMap<(&'static str, String), ReferenceEntry>>,
     }
 
     impl MemoryReferenceStore {
@@ -203,34 +265,41 @@ pub mod test_support {
 
     #[async_trait]
     impl ReferenceStore for MemoryReferenceStore {
-        async fn upsert_vehicles(
+        async fn upsert_entries(
             &self,
-            vehicles: &[VehicleReference],
+            entries: &[ReferenceEntry],
         ) -> Result<usize, ReferenceStoreError> {
             let mut rows = self.rows.lock().unwrap();
             let mut affected = 0usize;
-            for v in vehicles {
-                rows.insert(v.class_name.to_lowercase(), v.clone());
+            for e in entries {
+                let key = (e.category.as_str(), e.class_name.to_lowercase());
+                rows.insert(key, e.clone());
                 affected = affected.saturating_add(1);
             }
             Ok(affected)
         }
 
-        async fn get_vehicle(
+        async fn get_entry(
             &self,
+            category: ReferenceCategory,
             class_name: &str,
-        ) -> Result<Option<VehicleReference>, ReferenceStoreError> {
+        ) -> Result<Option<ReferenceEntry>, ReferenceStoreError> {
             let rows = self.rows.lock().unwrap();
-            Ok(rows.get(&class_name.to_lowercase()).cloned())
+            Ok(rows
+                .get(&(category.as_str(), class_name.to_lowercase()))
+                .cloned())
         }
 
-        async fn list_vehicles(&self) -> Result<Vec<VehicleReference>, ReferenceStoreError> {
+        async fn list_category(
+            &self,
+            category: ReferenceCategory,
+        ) -> Result<Vec<ReferenceEntry>, ReferenceStoreError> {
             let rows = self.rows.lock().unwrap();
-            // Sort by `class_name` ASC to match the Postgres
-            // `ORDER BY class_name ASC` clause. Rust string ordering
-            // is lexicographic over bytes, which lines up with
-            // Postgres's default text collation for ASCII identifiers.
-            let mut out: Vec<VehicleReference> = rows.values().cloned().collect();
+            let mut out: Vec<ReferenceEntry> = rows
+                .iter()
+                .filter(|((cat, _), _)| *cat == category.as_str())
+                .map(|(_, v)| v.clone())
+                .collect();
             out.sort_by(|a, b| a.class_name.cmp(&b.class_name));
             Ok(out)
         }
@@ -267,10 +336,6 @@ mod tests {
             .unwrap();
         assert_eq!(got, v);
 
-        // Re-upserting the same row is idempotent — the latest values
-        // win and the affected count reflects the call (not "0 because
-        // nothing changed"), mirroring Postgres' `ON CONFLICT … DO
-        // UPDATE` which always reports a touched row.
         let updated = VehicleReference {
             display_name: "Aegis Avenger Stalker (Refreshed)".to_owned(),
             ..v.clone()
@@ -283,7 +348,6 @@ mod tests {
             .unwrap();
         assert_eq!(got.display_name, "Aegis Avenger Stalker (Refreshed)");
 
-        // Missing class_name resolves to None rather than erroring.
         assert!(store
             .get_vehicle("not-a-real-class")
             .await
@@ -293,9 +357,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_vehicle_is_case_insensitive() {
-        // Game logs occasionally vary case on the same class — store
-        // it Pascal-cased and look it up snake- or upper-cased to
-        // prove the lookup ignores case end to end.
         let store = MemoryReferenceStore::new();
         let v = make_vehicle("AEGS_Avenger_Stalker", "Aegis Avenger Stalker");
         store.upsert_vehicles(&[v.clone()]).await.unwrap();
@@ -318,7 +379,6 @@ mod tests {
     #[tokio::test]
     async fn list_vehicles_orders_by_class_name_ascending() {
         let store = MemoryReferenceStore::new();
-        // Insert out of order — list_vehicles must reorder.
         store
             .upsert_vehicles(&[
                 make_vehicle("DRAK_Cutlass_Black", "Drake Cutlass Black"),
@@ -332,11 +392,57 @@ mod tests {
         let class_names: Vec<&str> = listed.iter().map(|v| v.class_name.as_str()).collect();
         assert_eq!(
             class_names,
-            vec![
-                "AEGS_Avenger_Stalker",
-                "ANVL_Hornet_F7C",
-                "DRAK_Cutlass_Black",
-            ]
+            vec!["AEGS_Avenger_Stalker", "ANVL_Hornet_F7C", "DRAK_Cutlass_Black"]
         );
+    }
+
+    #[tokio::test]
+    async fn generic_entries_are_scoped_by_category() {
+        let store = MemoryReferenceStore::new();
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "damage_type".into(),
+            serde_json::Value::String("Energy".into()),
+        );
+        let weapon = ReferenceEntry {
+            category: ReferenceCategory::Weapon,
+            class_name: "KLWE_LaserCannon_S2".to_owned(),
+            display_name: "Klaus & Werner Sledge II".to_owned(),
+            metadata: serde_json::Value::Object(meta),
+        };
+        store.upsert_entries(&[weapon.clone()]).await.unwrap();
+
+        // Same class_name under a different category must not collide.
+        let vehicle_with_same_id = ReferenceEntry {
+            category: ReferenceCategory::Vehicle,
+            class_name: "KLWE_LaserCannon_S2".to_owned(),
+            display_name: "(theoretical) some other thing".to_owned(),
+            metadata: serde_json::Value::Object(Default::default()),
+        };
+        store
+            .upsert_entries(&[vehicle_with_same_id.clone()])
+            .await
+            .unwrap();
+
+        let got_weapon = store
+            .get_entry(ReferenceCategory::Weapon, "klwe_lasercannon_s2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_weapon.display_name, "Klaus & Werner Sledge II");
+
+        let got_vehicle = store
+            .get_entry(ReferenceCategory::Vehicle, "KLWE_LaserCannon_S2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_vehicle.display_name, "(theoretical) some other thing");
+
+        // Cross-category lookup returns None.
+        assert!(store
+            .get_entry(ReferenceCategory::Item, "KLWE_LaserCannon_S2")
+            .await
+            .unwrap()
+            .is_none());
     }
 }
