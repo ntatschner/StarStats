@@ -69,6 +69,83 @@ pub enum ReferenceFetchOutcome {
     UpstreamUnavailable,
 }
 
+/// Top-level category an entry in the generic `reference_registry`
+/// belongs to. Mirrors the `reference_registry_category_chk` CHECK
+/// constraint in migration 0022 — adding a category requires a
+/// follow-up migration to widen the allow-list.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceCategory {
+    Vehicle,
+    Weapon,
+    Item,
+    Location,
+}
+
+// `as_str` / `parse` are wired in by the store refactor (P2) and
+// route layer (P4) — silence dead-code during the transition.
+#[allow(dead_code)]
+impl ReferenceCategory {
+    /// Lowercase string form — the value stored in the `category`
+    /// column and used in the public route segment.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReferenceCategory::Vehicle => "vehicle",
+            ReferenceCategory::Weapon => "weapon",
+            ReferenceCategory::Item => "item",
+            ReferenceCategory::Location => "location",
+        }
+    }
+
+    /// Parse from the route segment. Returns `None` on any value
+    /// outside the CHECK-constraint allow-list so route handlers can
+    /// 404 unknown categories rather than letting them reach the DB.
+    pub fn parse(s: &str) -> Option<ReferenceCategory> {
+        match s {
+            "vehicle" => Some(ReferenceCategory::Vehicle),
+            "weapon" => Some(ReferenceCategory::Weapon),
+            "item" => Some(ReferenceCategory::Item),
+            "location" => Some(ReferenceCategory::Location),
+            _ => None,
+        }
+    }
+}
+
+/// A single entry in the generic reference registry. Per-category
+/// extras live in `metadata` as a JSON object — schema-on-read — so
+/// new categories can ship without DDL. `VehicleReference` (above)
+/// remains the typed view callers use for vehicle-specific rendering;
+/// once the store refactor lands it will be decoded from a
+/// `ReferenceEntry` with `category == Vehicle`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct ReferenceEntry {
+    pub category: ReferenceCategory,
+    pub class_name: String,
+    pub display_name: String,
+    /// JSON object holding per-category extras (manufacturer, role,
+    /// size, slot, parent system…). `Default::default()` returns the
+    /// empty object so unrenderable fields don't appear at all in
+    /// JSON output. `serde_json::Value` does not implement `Eq`
+    /// because of `f64`, so `ReferenceEntry` is `PartialEq` only.
+    #[schema(value_type = Object)]
+    #[serde(default, skip_serializing_if = "is_empty_object")]
+    pub metadata: serde_json::Value,
+}
+
+fn is_empty_object(v: &serde_json::Value) -> bool {
+    matches!(v, serde_json::Value::Object(m) if m.is_empty())
+}
+
 #[async_trait]
 pub trait ReferenceClient: Send + Sync + 'static {
     /// Fetch the full vehicle reference set. Implementations are
