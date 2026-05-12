@@ -149,6 +149,8 @@ impl Modify for SecurityAddon {
         update_routes::check_for_update,
         reference_routes::list_vehicles,
         reference_routes::get_vehicle,
+        reference_routes::list_entries,
+        reference_routes::get_entry,
         submission_routes::list,
         submission_routes::create,
         submission_routes::detail,
@@ -323,6 +325,9 @@ impl Modify for SecurityAddon {
         // Reference data
         reference_data::VehicleReference,
         reference_routes::VehicleListResponse,
+        reference_data::ReferenceCategory,
+        reference_data::ReferenceEntry,
+        reference_routes::ReferenceListResponse,
     )),
     modifiers(&SecurityAddon),
     tags(
