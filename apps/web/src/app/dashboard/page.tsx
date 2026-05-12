@@ -28,6 +28,7 @@ import { DayHeatmap } from '@/components/DayHeatmap';
 import { HangarCard } from '@/components/HangarCard';
 import { OrgsCard } from '@/components/OrgsCard';
 import { ProfileCard } from '@/components/ProfileCard';
+import { YearHeatmap } from '@/components/metrics/YearHeatmap';
 
 const PAGE_LIMIT = 50;
 
@@ -75,7 +76,10 @@ export default async function DashboardPage(props: {
           since,
           until,
         }),
-        getTimeline(session.token, { days: 30 }),
+        // Bumped from 30 to 365 days to feed the YearHeatmap card.
+        // DayHeatmap still renders cleanly with the wider window
+        // (it walks `buckets` directly).
+        getTimeline(session.token, { days: 365 }),
         // Location resolver — 204 means "no recent activity", which
         // we treat as null and the pill renders nothing.
         getCurrentLocation(session.token).catch((e) => {
@@ -341,6 +345,10 @@ export default async function DashboardPage(props: {
               <DayHeatmap timeline={timeline} />
             </div>
           </section>
+
+          {/* Year view — GitHub-style 53-week grid. Same timeline
+              data, wider window. Card-styled via MetricCard shell. */}
+          <YearHeatmap timeline={timeline} />
 
           <div
             data-rspgrid="2"

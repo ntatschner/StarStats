@@ -10,7 +10,9 @@
 use chrono::{Duration, NaiveDate, Utc};
 
 /// Hard cap for the trailing window on `/timeline` endpoints.
-pub const TIMELINE_DAYS_MAX: u32 = 90;
+/// Bumped to 366 in v0.0.2-beta so the new `YearHeatmap` card can
+/// consume `?days=365` without tripping the validator.
+pub const TIMELINE_DAYS_MAX: u32 = 366;
 /// Default window when the client omits `?days=`.
 pub const TIMELINE_DAYS_DEFAULT: u32 = 30;
 /// Max byte length of an `event_type` filter (matches the column).

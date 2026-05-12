@@ -34,6 +34,8 @@ import {
 } from '@/lib/api';
 import { formatEventSummary } from '@/lib/event-summary';
 import { getSession } from '@/lib/session';
+import { YearHeatmap } from '@/components/metrics/YearHeatmap';
+import { TypeBreakdown } from '@/components/metrics/TypeBreakdown';
 
 const TAB_IDS = ['overview', 'types', 'sessions', 'raw'] as const;
 type TabId = (typeof TAB_IDS)[number];
@@ -85,7 +87,7 @@ export default async function MetricsPage(props: {
     if (view === 'overview') {
       const [s, t, ts, recent, hdr] = await Promise.all([
         getSummary(session.token),
-        getTimeline(session.token, { days: 30 }),
+        getTimeline(session.token, { days: 365 }),
         getMetricsEventTypes(session.token, '30d'),
         getMetricsSessions(session.token, { limit: 5 }),
         getMetricsSessions(session.token, { limit: HEADER_SESSION_PROBE_LIMIT }),
@@ -435,6 +437,23 @@ function OverviewTab({
           mono
         />
       </div>
+
+      {/* Year-view activity heatmap — successor to the 30-day grid.
+          Reads the same `timeline` data (now 365-day window). */}
+      {timeline ? <YearHeatmap timeline={timeline} /> : null}
+
+      {/* Donut + ranked-bar combo replacing the manual bar divs that
+          previously occupied the Types tab. Lives on Overview too so
+          the breakdown is visible without a tab change. */}
+      {typesBreakdown ? (
+        <TypeBreakdown
+          types={typesBreakdown.types.map((t) => ({
+            event_type: t.event_type,
+            count: t.count,
+          }))}
+          caption={`${typesBreakdown.types.length} distinct types`}
+        />
+      ) : null}
 
       <div
         data-rspgrid="2"

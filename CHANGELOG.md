@@ -32,6 +32,63 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.0.2-beta] — 2026-05-12
+
+Metrics-display redesign, first wave. Replaces the hand-rolled 30-day
+heatmap on the dashboard with a GitHub-style 53-week heatmap, and
+rewires the metrics page's Overview tab with a donut+barlist Type
+breakdown alongside the heatmap. Foundational shell + lib helpers
+land so subsequent waves can layer in without rebuilding the chart
+contract.
+
+### Added
+
+- **Web:** `YearHeatmap` component — 53-week GitHub-style activity
+  heatmap, inline SVG, renders against the `--grid-*` token ladder
+  for theme reactivity. Shown on `/dashboard` and `/metrics` Overview.
+- **Web:** `TypeBreakdown` component — recharts donut + ranked-bar
+  combo replacing the manual `<div>` bars previously on the metrics
+  Overview tab.
+- **Web:** `SparklinePill` component — small stat tile with inline
+  sparkline. Foundation for upcoming dashboard pill upgrades.
+- **Web:** `MetricCard` + `ChartCard` shells. Required-props pattern
+  (`flagKey`, `telemetryKey`, `empty`, `error`, `srTable`) enforces
+  the cross-cutting checklist (feature-flag gate, telemetry hook,
+  empty/error states, screen-reader fallback) at the TypeScript
+  level — cards that skip any of these fail `tsc`.
+- **Web:** Typed feature-flag registry (`lib/feature-flags.ts`) for
+  the metrics surfaces. All flags default on for v0.0.2-beta; the
+  `metrics.now_strip` flag stays off (cut per the impl plan).
+- **Web:** Frontend telemetry helper (`lib/metrics-telemetry.ts`).
+  Opt-in (off by default via `localStorage["starstats.telemetry"]`).
+  Server endpoint to receive POSTs is a follow-up.
+- **Web:** Recharts theme bridge (`lib/recharts-theme.ts`) — reads
+  `ss-*` CSS-var hex values from `:root` and re-renders on
+  `data-theme` mutations so chart colours swap with the active theme.
+- **Server:** Migration `0021_share_scopes.sql` — adds a per-user
+  `share_scopes` JSONB column with conservative defaults (own data
+  only for everything except summary, which defaults to friend).
+  Future-proofs the planned cross-user aggregate endpoints; no code
+  consumes the column yet.
+- **Dep:** `recharts ^3.8.1` in `apps/web`.
+
+### Changed
+
+- **Server:** Bumped `TIMELINE_DAYS_MAX` from 90 to 366 in
+  `validation.rs` so `YearHeatmap` callers can request a 365-day
+  window without tripping the validator. Existing
+  `timeline_rejects_days_above_max` test updated accordingly.
+- **Web:** `/dashboard` and `/metrics` now request a 365-day timeline
+  (was 30). DayHeatmap still renders cleanly with the wider window.
+- **Versions:** Workspace `0.0.1-beta → 0.0.2-beta`,
+  `tauri.conf.json` `0.0.1 → 0.0.2`.
+
+### Documentation
+
+- Added `docs/DESIGN-METRICS-PLAN.md` (strategic plan) and
+  `docs/DESIGN-METRICS-IMPLEMENTATION-PLAN.md` (execution plan,
+  reflecting two rounds of independent review findings).
+
 ## [0.0.1-beta] — 2026-05-11
 
 Fresh start on the `beta` channel after the alpha history scrub.

@@ -1802,7 +1802,7 @@ mod tests {
 
         let req = Request::builder()
             .method("GET")
-            .uri("/v1/me/timeline?days=365")
+            .uri("/v1/me/timeline?days=400")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
