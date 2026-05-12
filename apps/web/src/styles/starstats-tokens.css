@@ -908,7 +908,7 @@ body {
     flex-direction: column !important; align-items: flex-start !important;
   }
 
-  /* Hangar pairing-code: smaller display */
+  /* Device pairing-code: smaller display */
   .ss-pair-code { font-size: 28px !important; padding: 18px !important; }
 
   /* KV list: collapse to single column */

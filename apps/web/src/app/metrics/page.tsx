@@ -398,7 +398,7 @@ function OverviewTab({
         >
           Pair a desktop client on your{' '}
           <Link href="/devices" style={{ color: 'var(--accent)' }}>
-            Hangar
+            Devices
           </Link>{' '}
           page, launch Star Citizen, and play for a few minutes — events
           will start landing here as the tray drains them upstream.

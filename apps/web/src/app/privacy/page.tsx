@@ -416,10 +416,10 @@ export default function PrivacyPage() {
             is marked used and cannot be replayed.
           </li>
           <li>
-            <strong>Hangar pairing codes</strong>: 5 minutes.
+            <strong>Device pairing codes</strong>: 5 minutes.
           </li>
           <li>
-            <strong>Active Hangar tokens</strong>: until you revoke
+            <strong>Active device tokens</strong>: until you revoke
             the device or delete your account.
           </li>
           <li>

@@ -31,7 +31,7 @@ const FEATURES: ReadonlyArray<{
     glyph: '✦',
     title: 'Tracks every PC you play on',
     body:
-      'Add as many machines to your Hangar as you like. Everything lands in one timeline, no double-counts, no gaps.',
+      'Add as many devices as you like. Everything lands in one timeline, no double-counts, no gaps.',
   },
   {
     glyph: '⤓',

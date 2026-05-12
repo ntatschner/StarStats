@@ -186,7 +186,7 @@ export default async function DevicesPage(props: {
     <main className="ss-screen-enter" style={mainStyle}>
       <header>
         <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
-          Hangar · paired clients
+          Devices · paired clients
         </div>
         <h1 style={headerTitleStyle}>Pair a desktop client</h1>
         <p style={headerSubtitleStyle}>
@@ -219,7 +219,7 @@ export default async function DevicesPage(props: {
                 autoComplete="off"
               />
               <small style={{ color: 'var(--fg-dim)', fontSize: 12 }}>
-                Optional — helps you tell devices apart in the Hangar list.
+                Optional — helps you tell devices apart in the list.
               </small>
             </label>
             <div style={formActionsStyle}>

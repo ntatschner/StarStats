@@ -1492,7 +1492,7 @@ export default async function SettingsPage(props: {
           <div style={cardBodyStyle}>
             <p style={mutedStyle}>
               Deleting your account is permanent. Your account record,
-              paired Hangar devices, and active shares are removed. Your
+              paired devices, and active shares are removed. Your
               ingested game events are pseudonymised — the row count is
               preserved so anyone you shared with keeps a coherent
               timeline, but the data is no longer linked to you or your
