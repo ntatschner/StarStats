@@ -178,7 +178,7 @@ export function SmtpForm({
       </Field>
 
       <div style={{ display: 'flex', gap: 14 }}>
-        <Field label="Port" hint="587 (STARTTLS) or 465 (TLS)">
+        <Field label="Port" hint="587 / 2525 = STARTTLS  ·  465 = implicit TLS">
           <input
             type="number"
             min={1}
@@ -188,7 +188,14 @@ export function SmtpForm({
             style={{ width: 100 }}
           />
         </Field>
-        <Field label="TLS">
+        <Field
+          label="TLS mode"
+          hint={
+            secure
+              ? 'Implicit TLS — handshake on connect (use with port 465)'
+              : 'STARTTLS — plain SMTP, then upgrade (use with port 587 / 2525)'
+          }
+        >
           <label
             style={{
               display: 'inline-flex',
@@ -201,7 +208,7 @@ export function SmtpForm({
               checked={secure}
               onChange={(e) => setSecure(e.target.checked)}
             />
-            <span>Use TLS / STARTTLS</span>
+            <span>Use implicit TLS (uncheck for STARTTLS)</span>
           </label>
         </Field>
       </div>
