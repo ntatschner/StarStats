@@ -26,6 +26,33 @@ jobs:
 
     - uses: docker/setup-buildx-action@v3
 
+    # Diagnostic: what does the runner actually see at the registry URL?
+    # Prints resolved IP, TLS cert subject/issuer, and the unauthenticated
+    # response headers. Strips the scheme defensively so a stray https://
+    # in the REGISTRY_URL secret can't break the probe. Secret values are
+    # masked by Actions, but the IP, cert, and response headers (Server,
+    # CF-Ray, etc.) are NOT — those are what reveal the 403's source.
+    - name: Diagnose registry reachability
+      run: |
+        host=$(echo "${{ secrets.REGISTRY_URL }}" | sed 's|^https\?://||;s|/.*||')
+        echo "=== DNS ==="
+        getent hosts "$host" || true
+        dig +short "$host" @1.1.1.1 || true
+        echo
+        echo "=== TLS cert (subject + issuer) ==="
+        echo | openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null \
+          | openssl x509 -noout -subject -issuer || true
+        echo
+        echo "=== curl HEAD / (full headers) ==="
+        curl -skI "https://$host/v2/" -o - || true
+        echo
+        echo "=== curl GET /v2/ with auth (just status + key headers) ==="
+        curl -sk -u "${{ secrets.REGISTRY_USERNAME }}:${{ secrets.REGISTRY_PASSWORD }}" \
+          -o /dev/null -D - \
+          -w "STATUS: %{http_code}\nREMOTE_IP: %{remote_ip}\n" \
+          "https://$host/v2/" \
+          | grep -iE "^(server|cf-ray|cf-cache|x-cache|via|alt-svc|location|www-authenticate|STATUS|REMOTE_IP):" || true
+
     - name: Login to private registry
       uses: docker/login-action@v3
       with:
