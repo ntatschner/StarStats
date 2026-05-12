@@ -32,6 +32,39 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.0.3-beta] — 2026-05-12
+
+Tray-UI half of the metrics-display redesign. v0.0.2-beta shipped the
+new charts on the web app only; this release brings a tray-native
+equivalent so the desktop window also benefits.
+
+### Added
+
+- **Tray:** `EventSparkline` component — 48-hour rolling sparkline
+  of events/hour, rendered inline-SVG against the `--accent` token
+  (no chart library — keeps the Tauri bundle slim). Lands in
+  `StatusPane.tsx` above the existing "Top event types" card under
+  the heading "Recent activity · 48h". Consumes the timeline the
+  tray already fetches; no new IPC.
+
+### CI
+
+- Workflow split: container/config images now live in a sibling
+  `release-images.yml` workflow so a registry-side outage no longer
+  marks the tray release as failed. Both workflows trigger on the
+  same `v*` tag and can be re-run independently via
+  `workflow_dispatch`.
+- `Release tray` now detects already-published GitHub Releases and
+  skips the asset-upload + draft-promotion steps, so re-runs on
+  already-shipped tags no longer fail at "Cannot delete asset from
+  an immutable release". The channel-manifest commit step stays
+  unguarded so it can still recover a missing manifest.
+- Channel-manifest commit step now uses `git add` + `git diff
+  --cached --quiet` instead of `git diff --quiet` against an
+  untracked path — fixes the bug that silently skipped the
+  first-ever `release-manifests/beta.json` publish in v0.0.1-beta
+  and v0.0.2-beta.
+
 ## [0.0.2-beta] — 2026-05-12
 
 Metrics-display redesign, first wave. Replaces the hand-rolled 30-day

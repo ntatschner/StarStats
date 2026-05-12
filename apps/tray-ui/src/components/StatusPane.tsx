@@ -24,6 +24,7 @@ import {
   TONE_VAR,
 } from './tray/format';
 import type { HangarStats } from '../api';
+import { EventSparkline } from './EventSparkline';
 
 /// Only http(s) origins get rendered as a clickable link in the
 /// email-verification banner. Defends against a hostile local config
@@ -355,6 +356,15 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
           )}
         </TrayCard>
       </div>
+
+      {/* 48-hour activity sparkline — buckets the in-memory timeline
+          into hourly counts. Same data as Top types below, just shaped
+          for "when did stuff happen" instead of "what kinds happened". */}
+      {timeline && timeline.length > 0 ? (
+        <TrayCard title="Recent activity" kicker="48h">
+          <EventSparkline entries={timeline} />
+        </TrayCard>
+      ) : null}
 
       {/* TOP TYPES */}
       {event_counts.length === 0 ? (
