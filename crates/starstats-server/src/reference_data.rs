@@ -172,23 +172,36 @@ pub enum ReferenceFetchOutcomeCategory {
     UpstreamUnavailable,
 }
 
-const WIKI_VEHICLES_BASE: &str = "https://api.star-citizen.wiki/api/v3/vehicles";
-const WIKI_WEAPONS_BASE: &str = "https://api.star-citizen.wiki/api/v3/weapons-personal";
-const WIKI_ITEMS_BASE: &str = "https://api.star-citizen.wiki/api/v3/items";
-const WIKI_LOCATIONS_BASE: &str = "https://api.star-citizen.wiki/api/v3/star-systems";
+// The wiki's documented API base is `/api/...`, not `/api/v3/...`. The
+// v3-prefixed vehicles route works as a legacy alias but the other
+// categories don't have one — P3's first attempt 404'd on weapons /
+// items / locations because of this. The OpenAPI spec at
+// `/api/openapi` lists every endpoint without the v3 prefix.
+const WIKI_VEHICLES_BASE: &str = "https://api.star-citizen.wiki/api/vehicles";
+const WIKI_WEAPONS_BASE: &str = "https://api.star-citizen.wiki/api/weapons";
+const WIKI_ITEMS_BASE: &str = "https://api.star-citizen.wiki/api/items";
+const WIKI_LOCATIONS_BASE: &str = "https://api.star-citizen.wiki/api/locations";
+
+/// Page size we request from the wiki. The server caps at 200 even if
+/// you ask for more, and the default is 30 — passing `?limit=200`
+/// keeps the request count tractable on items (20k+ entries) without
+/// the round-trip-per-30 fan-out the default produces.
+const WIKI_PAGE_LIMIT: u32 = 200;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Hard cap on how many pages we'll walk. The Wiki returns ~150
-/// vehicles in pages of ~30 → 5-6 pages on a healthy day. 50 is a
-/// generous "the API is misbehaving / paginating endlessly" cap.
-const MAX_PAGE_REQUESTS: u32 = 50;
-/// Per-page body cap. Observed bodies are <100 KB; 2 MB is the same
-/// per-document ceiling we use elsewhere for upstream HTML/JSON.
-const MAX_PAGE_BODY_BYTES: usize = 2 * 1024 * 1024;
-/// Body cap across all pages combined. 10 MB leaves headroom for
-/// upstream growth without letting a misbehaving response balloon a
-/// server-side allocation. Enforced per-byte during streaming, not
-/// after `text()` materialises the whole body.
-const MAX_TOTAL_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Hard cap on how many pages we'll walk. Sized for the biggest
+/// known catalogue (items, ~20k entries → ~101 pages at limit=200)
+/// with 2x headroom for upstream growth and the occasional "the API
+/// is misbehaving / paginating endlessly" abort case.
+const MAX_PAGE_REQUESTS: u32 = 250;
+/// Per-page body cap. Observed bodies at limit=200 are ~200 KB; 4 MB
+/// leaves ample headroom without letting a misbehaving response
+/// balloon a single allocation.
+const MAX_PAGE_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Body cap across all pages combined. Items at limit=200 is
+/// ~20 MB total; 200 MB leaves 10x headroom for upstream growth.
+/// Enforced per-byte during streaming, not after `text()`
+/// materialises the whole body.
+const MAX_TOTAL_BODY_BYTES: usize = 200 * 1024 * 1024;
 const USER_AGENT: &str = concat!(
     "StarStats/",
     env!("CARGO_PKG_VERSION"),
@@ -231,7 +244,8 @@ impl ReferenceClient for WikiReferenceClient {
                 return ReferenceFetchOutcome::UpstreamUnavailable;
             }
 
-            let url = format!("{WIKI_VEHICLES_BASE}?page={page}");
+            let url =
+                format!("{WIKI_VEHICLES_BASE}?page={page}&limit={WIKI_PAGE_LIMIT}");
             let resp = match self.inner.get(&url).send().await {
                 Ok(r) => r,
                 Err(err) => {
@@ -307,7 +321,7 @@ impl ReferenceClient for WikiReferenceClient {
                 return ReferenceFetchOutcomeCategory::UpstreamUnavailable;
             }
 
-            let url = format!("{base}?page={page}");
+            let url = format!("{base}?page={page}&limit={WIKI_PAGE_LIMIT}");
             let resp = match self.inner.get(&url).send().await {
                 Ok(r) => r,
                 Err(err) => {
