@@ -25,8 +25,8 @@
 
 import {
   EMPTY_REFERENCE_LOOKUP,
+  prettyClass,
   type ReferenceLookup,
-  type ReferenceMap,
 } from './reference';
 import { toFriendlyName } from './heuristic-name';
 
@@ -98,6 +98,76 @@ type GameEventPayload =
       size: number;
       end_timestamp: string;
       anchor_body_sample?: string | null;
+    })
+  | (BaseEvent & {
+      type: 'player_death';
+      body_class: string;
+      body_id: string;
+      zone?: string | null;
+    })
+  | (BaseEvent & {
+      type: 'player_incapacitated';
+      queue_id: number;
+      zone?: string | null;
+    })
+  | (BaseEvent & {
+      type: 'game_crash';
+      channel: string;
+      crash_dir_name: string;
+      primary_log_name?: string | null;
+      total_size_bytes: number;
+    })
+  | (BaseEvent & {
+      type: 'launcher_activity';
+      level: string;
+      message: string;
+      category: 'auth' | 'install' | 'patch' | 'update' | 'error' | 'info';
+    })
+  | (BaseEvent & {
+      type: 'mission_start';
+      mission_id: string;
+      marker_kind: 'phase' | 'objective';
+      mission_name?: string | null;
+    })
+  | (BaseEvent & {
+      type: 'mission_end';
+      mission_id?: string | null;
+      outcome?: string | null;
+    })
+  | (BaseEvent & {
+      type: 'shop_buy_request';
+      shop_id?: string | null;
+      item_class?: string | null;
+      quantity?: number | null;
+      raw: string;
+    })
+  | (BaseEvent & {
+      type: 'shop_flow_response';
+      shop_id?: string | null;
+      success?: boolean | null;
+      raw: string;
+    })
+  | (BaseEvent & {
+      type: 'commodity_buy_request';
+      commodity?: string | null;
+      quantity?: number | null;
+      raw: string;
+    })
+  | (BaseEvent & {
+      type: 'commodity_sell_request';
+      commodity?: string | null;
+      quantity?: number | null;
+      raw: string;
+    })
+  | (BaseEvent & {
+      type: 'session_end';
+      kind: 'system_quit' | 'fast_shutdown';
+    })
+  | (BaseEvent & {
+      type: 'remote_match';
+      rule_id: string;
+      event_name: string;
+      fields: Record<string, string>;
     });
 
 /** Either the legacy vehicles-only Map or the full ReferenceLookup. */
@@ -145,14 +215,6 @@ function asLookup(arg: ReferenceLookupArg): ReferenceLookup {
   return { ...EMPTY_REFERENCE_LOOKUP, vehicles: arg };
 }
 
-/** Resolve a raw class identifier through a category Map; on miss,
- *  fall through to the heuristic prettifier so the dashboard never
- *  renders a bare underscored identifier. */
-function pretty(cls: string | null | undefined, map: ReferenceMap): string {
-  if (!cls) return '';
-  return map.get(cls.toLowerCase()) ?? toFriendlyName(cls);
-}
-
 function formatKnown(
   event: GameEventPayload,
   lookup: ReferenceLookup,
@@ -163,7 +225,7 @@ function formatKnown(
     case 'legacy_login':
       return `Logged in as ${event.handle}`;
     case 'join_pu': {
-      const where = pretty(event.location_id, lookup.locations);
+      const where = prettyClass(event.location_id, lookup.locations);
       return `Joined PU shard ${event.shard}${where ? ` · ${where}` : ''} (${event.address}:${event.port})`;
     }
     case 'change_server':
@@ -178,37 +240,36 @@ function formatKnown(
       // NPCs yet — the heuristic strips the NPC_/AI_ prefixes and
       // title-cases the remainder.
       const killer = toFriendlyName(event.killer);
-      const weapon = pretty(event.weapon, lookup.weapons);
+      const weapon = prettyClass(event.weapon, lookup.weapons);
       return `${event.victim} killed by ${killer} (${weapon}, ${event.damage_type})`;
     }
     case 'vehicle_destruction':
-      return `Vehicle destroyed: ${pretty(event.vehicle_class, lookup.vehicles)} (level ${event.destroy_level}, by ${event.caused_by})`;
+      return `Vehicle destroyed: ${prettyClass(event.vehicle_class, lookup.vehicles)} (level ${event.destroy_level}, by ${event.caused_by})`;
     case 'hud_notification':
       return `HUD: ${event.text.replace(/:\s*$/, '').replace(/:$/, '')}`;
     case 'location_inventory_requested':
       if (event.location === 'INVALID_LOCATION_ID') {
         return `${event.player} opened inventory (no location bound yet)`;
       }
-      return `${event.player} opened inventory at ${pretty(event.location, lookup.locations)}`;
+      return `${event.player} opened inventory at ${prettyClass(event.location, lookup.locations)}`;
     case 'planet_terrain_load': {
       // Prefer the catalog; fall back to the heuristic (which strips
       // OOC_ prefixes etc.) rather than the original split-on-last-_
       // shortcut, since the heuristic is more thorough.
-      const label = pretty(event.planet, lookup.locations);
+      const label = prettyClass(event.planet, lookup.locations);
       return `Near planet/moon: ${label || event.planet}`;
     }
     case 'quantum_target_selected': {
       const phase = event.phase === 'fuel_requested' ? 'fuel calc' : 'selected';
-      return `Quantum target ${phase}: ${pretty(event.vehicle_class, lookup.vehicles)} → ${pretty(event.destination, lookup.locations)}`;
+      return `Quantum target ${phase}: ${prettyClass(event.vehicle_class, lookup.vehicles)} → ${prettyClass(event.destination, lookup.locations)}`;
     }
     case 'attachment_received':
-      return `Attached ${pretty(event.item_class, lookup.items)} to ${event.port}`;
+      return `Attached ${prettyClass(event.item_class, lookup.items)} to ${event.port}`;
     case 'vehicle_stowed': {
       const cleaned = event.landing_area
         .replace(/^\[PROC\]/, '')
         .replace(/^LandingArea_/, '');
-      const label =
-        lookup.locations.get(cleaned.toLowerCase()) ?? toFriendlyName(cleaned);
+      const label = prettyClass(cleaned, lookup.locations);
       return `Ship ${event.vehicle_id} stowed at ${label}`;
     }
     case 'burst_summary': {
@@ -228,7 +289,110 @@ function formatKnown(
                 : 'Burst';
       return `${label} (${event.size} events)`;
     }
+    case 'player_death': {
+      // `body_class` is the player's own avatar body (e.g.
+      // `body_01_noMagicPocket`), not a weapon — heuristic only,
+      // no catalog covers body archetypes.
+      const where = prettyClass(event.zone, lookup.locations);
+      return where
+        ? `Died at ${where}`
+        : `Died (${toFriendlyName(event.body_class)})`;
+    }
+    case 'player_incapacitated': {
+      const where = prettyClass(event.zone, lookup.locations);
+      return where
+        ? `Incapacitated at ${where}`
+        : 'Incapacitated';
+    }
+    case 'game_crash': {
+      const size = formatBytes(event.total_size_bytes);
+      return `Game crashed (${event.channel}, ${size})`;
+    }
+    case 'launcher_activity': {
+      // Lift category out of snake_case for display. Truncate long
+      // messages so the timeline row stays single-line.
+      const cat = event.category === 'info'
+        ? null
+        : event.category[0].toUpperCase() + event.category.slice(1);
+      const msg = event.message.length > 120
+        ? event.message.slice(0, 117) + '…'
+        : event.message;
+      return cat ? `Launcher · ${cat}: ${msg}` : `Launcher: ${msg}`;
+    }
+    case 'mission_start': {
+      const kind =
+        event.marker_kind === 'objective' ? 'Objective' : 'Mission';
+      const name = event.mission_name?.trim();
+      return name
+        ? `${kind} started: ${name}`
+        : `${kind} started (id ${event.mission_id.slice(0, 8)})`;
+    }
+    case 'mission_end': {
+      const outcome = event.outcome?.trim();
+      return outcome ? `Mission ended: ${outcome}` : 'Mission ended';
+    }
+    case 'shop_buy_request': {
+      const item = prettyClass(event.item_class, lookup.items);
+      const qty = event.quantity ?? null;
+      if (item && qty) return `Buying ${item} × ${qty}`;
+      if (item) return `Buying ${item}`;
+      return 'Shop purchase requested';
+    }
+    case 'shop_flow_response': {
+      if (event.success === true) return 'Shop purchase confirmed';
+      if (event.success === false) return 'Shop purchase rejected';
+      return 'Shop response received';
+    }
+    case 'commodity_buy_request': {
+      const commodity = event.commodity
+        ? toFriendlyName(event.commodity)
+        : null;
+      const qty = event.quantity ?? null;
+      if (commodity && qty != null) {
+        return `Buying ${formatQty(qty)} ${commodity}`;
+      }
+      if (commodity) return `Buying ${commodity}`;
+      return 'Commodity purchase requested';
+    }
+    case 'commodity_sell_request': {
+      const commodity = event.commodity
+        ? toFriendlyName(event.commodity)
+        : null;
+      const qty = event.quantity ?? null;
+      if (commodity && qty != null) {
+        return `Selling ${formatQty(qty)} ${commodity}`;
+      }
+      if (commodity) return `Selling ${commodity}`;
+      return 'Commodity sale requested';
+    }
+    case 'session_end': {
+      const reason =
+        event.kind === 'system_quit' ? 'clean quit' : 'fast shutdown';
+      return `Session ended (${reason})`;
+    }
+    case 'remote_match':
+      // Remote-served parser rules carry their own display name. If
+      // the rule didn't supply one, fall back to the rule id.
+      return event.event_name || `Remote rule: ${event.rule_id}`;
   }
+}
+
+/** Compact byte size for crash-dir totals. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/** Tabular-friendly quantity — integers stay int, floats round to
+ *  one decimal so commodity terminals like "12.3 SCU" stay readable. */
+function formatQty(qty: number): string {
+  if (Number.isInteger(qty)) return qty.toLocaleString();
+  return qty.toFixed(1);
 }
 
 function isGameEventPayload(p: unknown): p is GameEventPayload {

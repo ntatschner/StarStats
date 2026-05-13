@@ -19,6 +19,7 @@
  */
 
 import { apiBase } from './api';
+import { toFriendlyName } from './heuristic-name';
 
 export type ReferenceCategory = 'vehicle' | 'weapon' | 'item' | 'location';
 
@@ -88,6 +89,21 @@ export async function getReferences(
   } catch {
     return new Map();
   }
+}
+
+/**
+ * Resolve a raw class identifier through a category Map; on miss,
+ * fall through to the heuristic prettifier so the UI never renders a
+ * bare underscored identifier. Shared between per-event rendering
+ * (`event-summary.ts`) and aggregate-bucket rendering on the journey
+ * page — both paths need identical lookup semantics.
+ */
+export function prettyClass(
+  raw: string | null | undefined,
+  map: ReferenceMap,
+): string {
+  if (!raw) return '';
+  return map.get(raw.toLowerCase()) ?? toFriendlyName(raw);
 }
 
 /**

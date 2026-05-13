@@ -43,6 +43,11 @@ import { LocationConstellation } from '@/components/journey/LocationConstellatio
 import { LocationFrequencyBars } from '@/components/journey/LocationFrequencyBars';
 import { LocationTimeline } from '@/components/journey/LocationTimeline';
 import { logger } from '@/lib/logger';
+import {
+  loadAllReferences,
+  prettyClass,
+  type ReferenceMap,
+} from '@/lib/reference';
 import { getSession } from '@/lib/session';
 
 const TAB_IDS = [
@@ -84,6 +89,15 @@ export default async function JourneyPage(props: {
   const params = await props.searchParams;
   const view = parseTab(params.view);
 
+  // Stats tabs aggregate by raw `class_name` server-side, so we
+  // humanize the bucket labels client-side. Load the catalog only
+  // for tabs that need it; LocationTab / CommerceTab don't.
+  const needsReferences =
+    view === 'travel' ||
+    view === 'combat' ||
+    view === 'loadout';
+  const references = needsReferences ? await loadAllReferences() : null;
+
   return (
     <div
       className="ss-screen-enter"
@@ -114,9 +128,19 @@ export default async function JourneyPage(props: {
       {view === 'location' && (
         <LocationTab token={session.token} />
       )}
-      {view === 'travel' && <TravelTab token={session.token} />}
-      {view === 'combat' && <CombatTab token={session.token} />}
-      {view === 'loadout' && <LoadoutTab token={session.token} />}
+      {view === 'travel' && (
+        <TravelTab token={session.token} locations={references!.locations} />
+      )}
+      {view === 'combat' && (
+        <CombatTab
+          token={session.token}
+          weapons={references!.weapons}
+          locations={references!.locations}
+        />
+      )}
+      {view === 'loadout' && (
+        <LoadoutTab token={session.token} items={references!.items} />
+      )}
       {view === 'stability' && <StabilityTab token={session.token} />}
       {view === 'commerce' && <CommerceTab token={session.token} />}
     </div>
@@ -240,7 +264,13 @@ async function LocationTab({ token }: { token: string }) {
 
 // -- Travel tab ----------------------------------------------------
 
-async function TravelTab({ token }: { token: string }) {
+async function TravelTab({
+  token,
+  locations,
+}: {
+  token: string;
+  locations: ReferenceMap;
+}) {
   let stats: TravelStatsResponse;
   try {
     stats = await getTravelStats(token);
@@ -250,12 +280,21 @@ async function TravelTab({ token }: { token: string }) {
     }
     throw e;
   }
+  const formatLocation = (raw: string) => prettyClass(raw, locations);
   return (
     <StatsLayout
       headline={{ label: 'Quantum jumps', value: stats.quantum_jumps }}
       blocks={[
-        { title: 'Top destinations', buckets: stats.top_destinations },
-        { title: 'Planets visited', buckets: stats.planets_visited },
+        {
+          title: 'Top destinations',
+          buckets: stats.top_destinations,
+          format: formatLocation,
+        },
+        {
+          title: 'Planets visited',
+          buckets: stats.planets_visited,
+          format: formatLocation,
+        },
       ]}
       hours={stats.hours}
     />
@@ -264,7 +303,15 @@ async function TravelTab({ token }: { token: string }) {
 
 // -- Combat tab ----------------------------------------------------
 
-async function CombatTab({ token }: { token: string }) {
+async function CombatTab({
+  token,
+  weapons,
+  locations,
+}: {
+  token: string;
+  weapons: ReferenceMap;
+  locations: ReferenceMap;
+}) {
   let stats: CombatStatsResponse;
   try {
     stats = await getCombatStats(token);
@@ -312,7 +359,10 @@ async function CombatTab({ token }: { token: string }) {
             No kills recorded in this window.
           </p>
         ) : (
-          <BucketList buckets={stats.top_weapons} />
+          <BucketList
+            buckets={stats.top_weapons}
+            format={(raw) => prettyClass(raw, weapons)}
+          />
         )}
       </section>
       <section className="ss-card" style={{ padding: '18px 20px' }}>
@@ -324,7 +374,10 @@ async function CombatTab({ token }: { token: string }) {
             No deaths recorded in this window.
           </p>
         ) : (
-          <BucketList buckets={stats.deaths_by_zone} />
+          <BucketList
+            buckets={stats.deaths_by_zone}
+            format={(raw) => prettyClass(raw, locations)}
+          />
         )}
       </section>
     </div>
@@ -362,7 +415,13 @@ function KdTile({
 
 // -- Loadout tab ---------------------------------------------------
 
-async function LoadoutTab({ token }: { token: string }) {
+async function LoadoutTab({
+  token,
+  items,
+}: {
+  token: string;
+  items: ReferenceMap;
+}) {
   let stats: LoadoutStatsResponse;
   try {
     stats = await getLoadoutStats(token);
@@ -375,7 +434,13 @@ async function LoadoutTab({ token }: { token: string }) {
   return (
     <StatsLayout
       headline={{ label: 'Items attached', value: stats.attachments }}
-      blocks={[{ title: 'Most-attached items', buckets: stats.top_items }]}
+      blocks={[
+        {
+          title: 'Most-attached items',
+          buckets: stats.top_items,
+          format: (raw) => prettyClass(raw, items),
+        },
+      ]}
       hours={stats.hours}
     />
   );
@@ -407,6 +472,10 @@ async function StabilityTab({ token }: { token: string }) {
 interface StatsBlock {
   title: string;
   buckets: { value: string; count: number }[];
+  /** Optional per-block formatter to humanize raw class-name `value`s
+   *  via the appropriate reference category. Omit for log channels /
+   *  other already-readable strings (e.g. stability `by_channel`). */
+  format?: (raw: string) => string;
 }
 
 function StatsLayout({
@@ -465,7 +534,7 @@ function StatsLayout({
               No data yet.
             </p>
           ) : (
-            <BucketList buckets={block.buckets} />
+            <BucketList buckets={block.buckets} format={block.format} />
           )}
         </section>
       ))}
@@ -487,8 +556,10 @@ function StatsLayout({
 
 function BucketList({
   buckets,
+  format,
 }: {
   buckets: { value: string; count: number }[];
+  format?: (raw: string) => string;
 }) {
   const max = Math.max(...buckets.map((b) => b.count), 1);
   return (
@@ -504,6 +575,7 @@ function BucketList({
     >
       {buckets.map((b) => {
         const pct = (b.count / max) * 100;
+        const label = format ? format(b.value) : b.value;
         return (
           <li key={b.value}>
             <div
@@ -517,8 +589,9 @@ function BucketList({
               <span
                 className="mono"
                 style={{ color: 'var(--fg)', overflow: 'hidden' }}
+                title={b.value !== label ? b.value : undefined}
               >
-                {b.value}
+                {label}
               </span>
               <span
                 className="mono"

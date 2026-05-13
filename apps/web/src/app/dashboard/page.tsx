@@ -551,16 +551,26 @@ function eventBorderColor(eventType: string): string {
       return 'var(--accent)';
     case 'vehicle_stowed':
     case 'burst_summary':
+    case 'shop_buy_request':
+    case 'shop_flow_response':
+    case 'commodity_buy_request':
+    case 'commodity_sell_request':
       // Bursts collapse repetitive events into one summary row;
       // share the `--info` accent with `vehicle_stowed` since those
       // members are now folded into the summary in most cases.
+      // Shop / commodity transactions also share this neutral
+      // informational accent — they're activity, not incident.
       return 'var(--info)';
     case 'actor_death':
     case 'vehicle_destruction':
+    case 'player_death':
+    case 'player_incapacitated':
+    case 'game_crash':
       return 'var(--danger)';
     case 'legacy_login':
     case 'join_pu':
-    case 'mission_complete':
+    case 'mission_start':
+    case 'mission_end':
       return 'var(--ok)';
     default:
       return 'var(--border-strong)';
