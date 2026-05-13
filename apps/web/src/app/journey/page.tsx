@@ -38,6 +38,13 @@ import {
   type TravelStatsResponse,
 } from '@/lib/api';
 import { LocationPill } from '@/components/LocationPill';
+import {
+  HierarchicalBucketList,
+  rollUpItems,
+  rollUpLocations,
+  rollUpWeapons,
+  type RollupNode,
+} from '@/components/journey/HierarchicalBucketList';
 import { LocationChainStrip } from '@/components/journey/LocationChainStrip';
 import { LocationConstellation } from '@/components/journey/LocationConstellation';
 import { LocationFrequencyBars } from '@/components/journey/LocationFrequencyBars';
@@ -280,20 +287,17 @@ async function TravelTab({
     }
     throw e;
   }
-  const formatLocation = (raw: string) => prettyClass(raw, locations);
   return (
     <StatsLayout
       headline={{ label: 'Quantum jumps', value: stats.quantum_jumps }}
       blocks={[
         {
           title: 'Top destinations',
-          buckets: stats.top_destinations,
-          format: formatLocation,
+          tree: rollUpLocations(stats.top_destinations, locations),
         },
         {
           title: 'Planets visited',
-          buckets: stats.planets_visited,
-          format: formatLocation,
+          tree: rollUpLocations(stats.planets_visited, locations),
         },
       ]}
       hours={stats.hours}
@@ -359,9 +363,8 @@ async function CombatTab({
             No kills recorded in this window.
           </p>
         ) : (
-          <BucketList
-            buckets={stats.top_weapons}
-            format={(raw) => prettyClass(raw, weapons)}
+          <HierarchicalBucketList
+            nodes={rollUpWeapons(stats.top_weapons, weapons)}
           />
         )}
       </section>
@@ -374,9 +377,8 @@ async function CombatTab({
             No deaths recorded in this window.
           </p>
         ) : (
-          <BucketList
-            buckets={stats.deaths_by_zone}
-            format={(raw) => prettyClass(raw, locations)}
+          <HierarchicalBucketList
+            nodes={rollUpLocations(stats.deaths_by_zone, locations)}
           />
         )}
       </section>
@@ -437,8 +439,7 @@ async function LoadoutTab({
       blocks={[
         {
           title: 'Most-attached items',
-          buckets: stats.top_items,
-          format: (raw) => prettyClass(raw, items),
+          tree: rollUpItems(stats.top_items, items),
         },
       ]}
       hours={stats.hours}
@@ -469,14 +470,22 @@ async function StabilityTab({ token }: { token: string }) {
 
 // -- Shared layout for stats tabs ---------------------------------
 
-interface StatsBlock {
-  title: string;
-  buckets: { value: string; count: number }[];
-  /** Optional per-block formatter to humanize raw class-name `value`s
-   *  via the appropriate reference category. Omit for log channels /
-   *  other already-readable strings (e.g. stability `by_channel`). */
-  format?: (raw: string) => string;
-}
+/** Two block shapes feed `StatsLayout`:
+ *   - `tree` — pre-rolled-up hierarchical buckets (preferred for
+ *     class-name dimensions: weapons / items / locations).
+ *   - `buckets` (+ optional `format`) — flat rendering, used for
+ *     already-readable strings like the stability `by_channel`
+ *     log-channel names. */
+type StatsBlock =
+  | {
+      title: string;
+      tree: RollupNode[];
+    }
+  | {
+      title: string;
+      buckets: { value: string; count: number }[];
+      format?: (raw: string) => string;
+    };
 
 function StatsLayout({
   headline,
@@ -529,13 +538,21 @@ function StatsLayout({
           <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
             {block.title}
           </div>
-          {block.buckets.length === 0 ? (
-            <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
-              No data yet.
-            </p>
-          ) : (
-            <BucketList buckets={block.buckets} format={block.format} />
-          )}
+          {'tree' in block
+            ? block.tree.length === 0
+              ? (
+                <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
+                  No data yet.
+                </p>
+              )
+              : <HierarchicalBucketList nodes={block.tree} />
+            : block.buckets.length === 0
+              ? (
+                <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
+                  No data yet.
+                </p>
+              )
+              : <BucketList buckets={block.buckets} format={block.format} />}
         </section>
       ))}
       {caveat && (

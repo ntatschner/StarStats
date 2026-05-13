@@ -937,7 +937,13 @@ fn aggregate_dwell(stream: Vec<crate::repo::LatestLocationEvent>) -> Vec<Breakdo
 
 const STATS_DEFAULT_HOURS: i64 = 24 * 30;
 const STATS_MAX_HOURS: i64 = 24 * 365;
-const STATS_BUCKET_LIMIT: i64 = 10;
+/// Cap on raw rows returned per stats breakdown. The web app now
+/// performs client-side hierarchical roll-up (manufacturer → family →
+/// size for weapons / items; system → body → place for locations),
+/// so a small limit silently truncates the long tail before it can
+/// be aggregated. 100 covers the practical ceiling of Star Citizen's
+/// active class catalogue while keeping the JSON response tight.
+const STATS_BUCKET_LIMIT: i64 = 100;
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
