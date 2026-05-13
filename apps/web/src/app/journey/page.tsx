@@ -49,6 +49,12 @@ import { LocationChainStrip } from '@/components/journey/LocationChainStrip';
 import { LocationConstellation } from '@/components/journey/LocationConstellation';
 import { LocationFrequencyBars } from '@/components/journey/LocationFrequencyBars';
 import { LocationTimeline } from '@/components/journey/LocationTimeline';
+import {
+  parseRange,
+  rangeToHours,
+  RangeBar,
+  type RangeId,
+} from '@/components/journey/RangeBar';
 import { logger } from '@/lib/logger';
 import {
   loadAllReferences,
@@ -78,6 +84,7 @@ const TAB_LABELS: Record<TabId, string> = {
 
 interface SearchParams {
   view?: string;
+  range?: string;
 }
 
 function parseTab(raw?: string): TabId {
@@ -95,6 +102,8 @@ export default async function JourneyPage(props: {
 
   const params = await props.searchParams;
   const view = parseTab(params.view);
+  const range = parseRange(params.range);
+  const hours = rangeToHours(range);
 
   // Stats tabs aggregate by raw `class_name` server-side, so we
   // humanize the bucket labels client-side. Load the catalog only
@@ -104,6 +113,15 @@ export default async function JourneyPage(props: {
     view === 'combat' ||
     view === 'loadout';
   const references = needsReferences ? await loadAllReferences() : null;
+  // The range selector only shapes stats tabs (travel/combat/
+  // loadout/stability). Location windows are intentionally fixed
+  // (24h / 7d) per their UX titles, and commerce ships with a
+  // 30-day window today. Hide the chip row on those.
+  const showRangeBar =
+    view === 'travel' ||
+    view === 'combat' ||
+    view === 'loadout' ||
+    view === 'stability';
 
   return (
     <div
@@ -130,31 +148,49 @@ export default async function JourneyPage(props: {
         </p>
       </header>
 
-      <Tabs active={view} />
+      <Tabs active={view} range={range} />
+
+      {showRangeBar && <RangeBar active={range} view={view} />}
 
       {view === 'location' && (
         <LocationTab token={session.token} />
       )}
       {view === 'travel' && (
-        <TravelTab token={session.token} locations={references!.locations} />
+        <TravelTab
+          token={session.token}
+          locations={references!.locations}
+          hours={hours}
+        />
       )}
       {view === 'combat' && (
         <CombatTab
           token={session.token}
           weapons={references!.weapons}
           locations={references!.locations}
+          hours={hours}
         />
       )}
       {view === 'loadout' && (
-        <LoadoutTab token={session.token} items={references!.items} />
+        <LoadoutTab
+          token={session.token}
+          items={references!.items}
+          hours={hours}
+        />
       )}
-      {view === 'stability' && <StabilityTab token={session.token} />}
+      {view === 'stability' && (
+        <StabilityTab token={session.token} hours={hours} />
+      )}
       {view === 'commerce' && <CommerceTab token={session.token} />}
     </div>
   );
 }
 
-function Tabs({ active }: { active: TabId }) {
+function Tabs({ active, range }: { active: TabId; range: RangeId }) {
+  // Carry the current range across tab switches so users don't lose
+  // their selected timeframe when navigating between Combat/Travel/
+  // Loadout. Default range (30d) is omitted from the URL to keep
+  // shared links short.
+  const rangeQuery = range === '30d' ? '' : `range=${range}`;
   return (
     <nav
       style={{
@@ -166,9 +202,12 @@ function Tabs({ active }: { active: TabId }) {
     >
       {TAB_IDS.map((id) => {
         const isActive = id === active;
-        const href = (id === 'location'
-          ? '/journey'
-          : `/journey?view=${id}`) as Route;
+        const params: string[] = [];
+        if (id !== 'location') params.push(`view=${id}`);
+        if (rangeQuery) params.push(rangeQuery);
+        const href = (
+          params.length === 0 ? '/journey' : `/journey?${params.join('&')}`
+        ) as Route;
         return (
           <Link
             key={id}
@@ -274,13 +313,15 @@ async function LocationTab({ token }: { token: string }) {
 async function TravelTab({
   token,
   locations,
+  hours,
 }: {
   token: string;
   locations: ReferenceMap;
+  hours: number;
 }) {
   let stats: TravelStatsResponse;
   try {
-    stats = await getTravelStats(token);
+    stats = await getTravelStats(token, hours);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=travel');
@@ -311,14 +352,16 @@ async function CombatTab({
   token,
   weapons,
   locations,
+  hours,
 }: {
   token: string;
   weapons: ReferenceMap;
   locations: ReferenceMap;
+  hours: number;
 }) {
   let stats: CombatStatsResponse;
   try {
-    stats = await getCombatStats(token);
+    stats = await getCombatStats(token, hours);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=combat');
@@ -420,13 +463,15 @@ function KdTile({
 async function LoadoutTab({
   token,
   items,
+  hours,
 }: {
   token: string;
   items: ReferenceMap;
+  hours: number;
 }) {
   let stats: LoadoutStatsResponse;
   try {
-    stats = await getLoadoutStats(token);
+    stats = await getLoadoutStats(token, hours);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=loadout');
@@ -449,10 +494,16 @@ async function LoadoutTab({
 
 // -- Stability tab -------------------------------------------------
 
-async function StabilityTab({ token }: { token: string }) {
+async function StabilityTab({
+  token,
+  hours,
+}: {
+  token: string;
+  hours: number;
+}) {
   let stats: StabilityStatsResponse;
   try {
-    stats = await getStabilityStats(token);
+    stats = await getStabilityStats(token, hours);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=stability');

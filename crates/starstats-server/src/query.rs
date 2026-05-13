@@ -1046,14 +1046,26 @@ pub async fn stats_combat<Q: EventQuery>(
         .count_event_type(handle, "actor_death", Some(killer_filter), since)
         .await
         .unwrap_or(0);
-    // Deaths: actor_death rows where the caller is the victim.
-    let deaths = query
+    // Deaths come from two event sources:
+    //   - actor_death (legacy CIG format, kept for older captures)
+    //   - player_death (modern CIG format — what live builds emit)
+    // The modern parser comment on `PlayerDeath` is explicit: "Live
+    // deaths flow through PlayerDeath instead." Without this union
+    // a current-build user sees deaths=0 even after dying repeatedly.
+    let deaths_actor = query
         .count_event_type(handle, "actor_death", Some(victim_filter), since)
         .await
         .unwrap_or(0);
+    let deaths_player = query
+        .count_event_type(handle, "player_death", None, since)
+        .await
+        .unwrap_or(0);
+    let deaths = deaths_actor.saturating_add(deaths_player);
     // Top weapons used by the caller — scoped to kills, otherwise
     // we'd be showing weapons that killed the caller (a different,
     // less-flattering stat that lives under deaths_by_zone next door).
+    // player_death has no weapon field in modern logs, so kill-side
+    // weapons stay actor_death-only.
     let top_weapons = query
         .payload_field_breakdown(
             handle,
@@ -1065,10 +1077,11 @@ pub async fn stats_combat<Q: EventQuery>(
         )
         .await
         .unwrap_or_default();
-    // Deaths by zone: where the caller keeps getting jumped. Filtered
-    // to victim==caller so a kill in a zone the caller cleared doesn't
-    // inflate that zone's "danger" reading.
-    let deaths_by_zone = query
+    // Deaths by zone: merge actor_death.zone (victim=caller) and
+    // player_death.zone (no filter needed — player_death rows are
+    // intrinsically the caller's). Rows where zone is null are
+    // already dropped by the repo (filter_map on Option<String>).
+    let zone_actor = query
         .payload_field_breakdown(
             handle,
             "actor_death",
@@ -1079,6 +1092,18 @@ pub async fn stats_combat<Q: EventQuery>(
         )
         .await
         .unwrap_or_default();
+    let zone_player = query
+        .payload_field_breakdown(
+            handle,
+            "player_death",
+            "zone",
+            None,
+            since,
+            STATS_BUCKET_LIMIT,
+        )
+        .await
+        .unwrap_or_default();
+    let deaths_by_zone = merge_buckets(zone_actor, zone_player, STATS_BUCKET_LIMIT as usize);
     (
         StatusCode::OK,
         Json(CombatStatsResponse {
@@ -1090,6 +1115,29 @@ pub async fn stats_combat<Q: EventQuery>(
         }),
     )
         .into_response()
+}
+
+/// Sum bucket counts across two lists keyed by `value`, then re-sort
+/// by descending count (tie-broken by value asc) and cap at `limit`.
+/// Used to merge the same logical dimension from two event sources
+/// (e.g. zone from `actor_death` and `player_death`).
+fn merge_buckets(
+    a: Vec<PayloadFieldBucket>,
+    b: Vec<PayloadFieldBucket>,
+    limit: usize,
+) -> Vec<PayloadFieldBucket> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for bucket in a.into_iter().chain(b.into_iter()) {
+        *counts.entry(bucket.value).or_insert(0) += bucket.count;
+    }
+    let mut merged: Vec<PayloadFieldBucket> = counts
+        .into_iter()
+        .map(|(value, count)| PayloadFieldBucket { value, count })
+        .collect();
+    merged.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    merged.truncate(limit);
+    merged
 }
 
 #[utoipa::path(
