@@ -44,12 +44,13 @@ export function rangeToHours(id: RangeId): number {
 
 export function RangeBar({
   active,
-  view,
+  buildHref,
 }: {
   active: RangeId;
-  /** Current journey tab — preserved in the chip links so the
-   *  user stays where they are. */
-  view: string;
+  /** Callback that maps a range id to a Route. Callers control URL
+   *  shape so the same chip strip can drive `/journey` (preserves
+   *  view) and `/dashboard` (no view concept). */
+  buildHref: (id: RangeId) => Route;
 }) {
   return (
     <nav
@@ -69,15 +70,10 @@ export function RangeBar({
       </span>
       {RANGES.map((r) => {
         const isActive = r.id === active;
-        const href = (
-          view === 'location' || view === 'commerce'
-            ? `/journey?range=${r.id}`
-            : `/journey?view=${view}&range=${r.id}`
-        ) as Route;
         return (
           <Link
             key={r.id}
-            href={href}
+            href={buildHref(r.id)}
             aria-current={isActive ? 'page' : undefined}
             className="mono"
             style={{
@@ -97,4 +93,21 @@ export function RangeBar({
       })}
     </nav>
   );
+}
+
+/** Convenience: human-readable label for a range id. Useful for
+ *  page headers like "Activity · last 7 days". */
+export function rangeLabel(id: RangeId): string {
+  switch (id) {
+    case '24h':
+      return 'last 24 hours';
+    case '7d':
+      return 'last 7 days';
+    case '30d':
+      return 'last 30 days';
+    case '90d':
+      return 'last 90 days';
+    case 'all':
+      return 'last year';
+  }
 }

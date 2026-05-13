@@ -1313,8 +1313,16 @@ pub struct CommerceRecentParams {
     pub limit: u32,
     /// Window for the "if no response in N seconds, mark timed out"
     /// classification. Mirrors the tray client's default of 30s.
+    /// This is a *pairing* timeout, NOT a time-range filter — see
+    /// `hours` below for the range-filter knob.
     #[serde(default = "default_commerce_window_secs")]
     pub window_secs: i64,
+    /// Optional time-range filter in hours. When set, only events
+    /// newer than `now - hours` are considered when pairing. Bounds
+    /// match the stats endpoints (1..=STATS_MAX_HOURS). Absent =
+    /// no filter (legacy behavior — pull recent ~1000 events).
+    #[serde(default)]
+    pub hours: Option<i64>,
 }
 
 fn default_commerce_limit() -> u32 {
@@ -1353,6 +1361,16 @@ pub async fn commerce_recent<Q: EventQuery>(
     // Cap aggressively — this is a "recent" view, not a forensic dump.
     let limit = params.limit.clamp(1, 500);
 
+    // Optional time-window filter. Bounds match `parse_stats_window`
+    // so the same range chips drive every page.
+    let since = match params.hours {
+        Some(h) if h > 0 && h <= STATS_MAX_HOURS => {
+            Some(Utc::now() - chrono::Duration::hours(h))
+        }
+        Some(_) => return err(StatusCode::BAD_REQUEST, "invalid_hours"),
+        None => None,
+    };
+
     // Pull the user's recent events of any type. Commerce ones get
     // filtered in-process; others get dropped. We over-fetch by ~10x
     // because commerce events are rare per-user and we want a useful
@@ -1361,7 +1379,7 @@ pub async fn commerce_recent<Q: EventQuery>(
     let filters = EventFilters {
         cursor: None,
         event_type: None,
-        since: None,
+        since,
         until: None,
         limit: pull_limit,
     };

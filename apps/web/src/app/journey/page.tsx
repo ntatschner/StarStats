@@ -113,15 +113,11 @@ export default async function JourneyPage(props: {
     view === 'combat' ||
     view === 'loadout';
   const references = needsReferences ? await loadAllReferences() : null;
-  // The range selector only shapes stats tabs (travel/combat/
-  // loadout/stability). Location windows are intentionally fixed
-  // (24h / 7d) per their UX titles, and commerce ships with a
-  // 30-day window today. Hide the chip row on those.
-  const showRangeBar =
-    view === 'travel' ||
-    view === 'combat' ||
-    view === 'loadout' ||
-    view === 'stability';
+  // Location uses fixed sub-windows (24h / 7d) per its UX titles —
+  // the chip row would be misleading there. Every other tab honors
+  // the range. The server's commerce endpoint now accepts hours too
+  // (paired in the same commit), so the chip strip works there.
+  const showRangeBar = view !== 'location';
 
   return (
     <div
@@ -150,7 +146,16 @@ export default async function JourneyPage(props: {
 
       <Tabs active={view} range={range} />
 
-      {showRangeBar && <RangeBar active={range} view={view} />}
+      {showRangeBar && (
+        <RangeBar
+          active={range}
+          // `showRangeBar` already excludes the location tab, so
+          // `view` is always one of the stats/commerce tabs here.
+          buildHref={(id) =>
+            `/journey?view=${view}&range=${id}` as Route
+          }
+        />
+      )}
 
       {view === 'location' && (
         <LocationTab token={session.token} />
@@ -180,7 +185,9 @@ export default async function JourneyPage(props: {
       {view === 'stability' && (
         <StabilityTab token={session.token} hours={hours} />
       )}
-      {view === 'commerce' && <CommerceTab token={session.token} />}
+      {view === 'commerce' && (
+        <CommerceTab token={session.token} hours={hours} />
+      )}
     </div>
   );
 }
@@ -708,10 +715,16 @@ function formatTimeShort(iso: string): string {
 
 // -- Commerce tab --------------------------------------------------
 
-async function CommerceTab({ token }: { token: string }) {
+async function CommerceTab({
+  token,
+  hours,
+}: {
+  token: string;
+  hours: number;
+}) {
   let response: CommerceRecentResponse | null = null;
   try {
-    response = await getCommerceRecent(token, 100, 30);
+    response = await getCommerceRecent(token, 100, 30, hours);
   } catch (e) {
     if (e instanceof ApiCallError) {
       logger.warn(

@@ -30,6 +30,12 @@ import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { LocationPill } from '@/components/LocationPill';
 import { LocationChainStrip } from '@/components/journey/LocationChainStrip';
+import {
+  parseRange,
+  rangeLabel,
+  rangeToHours,
+  RangeBar,
+} from '@/components/journey/RangeBar';
 import { DayHeatmap } from '@/components/DayHeatmap';
 import { HangarCard } from '@/components/HangarCard';
 import { OrgsCard } from '@/components/OrgsCard';
@@ -44,6 +50,10 @@ interface SearchParams {
   after_seq?: string;
   since?: string;
   until?: string;
+  /** Global time-range chip selection ('24h' / '7d' / '30d' /
+   *  '90d' / 'all'). Drives the stat strip + DayHeatmap window.
+   *  Year overview always renders the full 365-day timeline. */
+  range?: string;
 }
 
 export default async function DashboardPage(props: {
@@ -58,6 +68,12 @@ export default async function DashboardPage(props: {
   const afterSeq = parseSeq(params.after_seq);
   const since = params.since;
   const until = params.until;
+  const range = parseRange(params.range);
+  // Days covered by the chip selection. The 365-day timeline fetch
+  // is unchanged — we just slice the tail to size when deriving the
+  // stat strip and "Manifest · …" label. Cap at 365 because that's
+  // the timeline's own ceiling.
+  const rangeDays = Math.min(Math.round(rangeToHours(range) / 24), 365);
 
   const hasFilter =
     eventType !== undefined ||
@@ -183,11 +199,17 @@ export default async function DashboardPage(props: {
   // we cherry-pick from the data already on the page so the strip is
   // an honest "here's what was just loaded" tile rather than a second
   // round-trip waiting to fail.
-  const last30Total = timeline.buckets.reduce((acc, b) => acc + b.count, 0);
-  const activeDays = timeline.buckets.reduce(
+  //
+  // `timeline.buckets` is server-rendered chronologically (oldest →
+  // newest), so the trailing `rangeDays` entries are the chosen
+  // window. Smaller windows just touch a shorter tail.
+  const windowedBuckets = timeline.buckets.slice(-rangeDays);
+  const windowedTotal = windowedBuckets.reduce((acc, b) => acc + b.count, 0);
+  const activeDays = windowedBuckets.reduce(
     (acc, b) => (b.count > 0 ? acc + 1 : acc),
     0,
   );
+  const rangeShort = range === 'all' ? '1y' : range;
   const topTypeLabel = topTypes[0]?.event_type ?? '—';
 
   // Pager cursors. The API returns DESC by default for unparametrised
@@ -217,7 +239,7 @@ export default async function DashboardPage(props: {
     >
       <header>
         <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
-          Manifest · last 30 days
+          Manifest · {rangeLabel(range)}
         </div>
         <h1
           style={{
@@ -246,6 +268,13 @@ export default async function DashboardPage(props: {
           events captured across your hangar.
         </p>
       </header>
+
+      <RangeBar
+        active={range}
+        buildHref={(id) =>
+          (id === '30d' ? '/dashboard' : `/dashboard?range=${id}`) as Route
+        }
+      />
 
       <LocationPill location={location} />
       {trace && trace.entries.length > 0 && (
@@ -307,7 +336,7 @@ export default async function DashboardPage(props: {
             <StatTile
               eyebrow="Total events"
               value={summary.total.toLocaleString()}
-              hint={`+${last30Total.toLocaleString()} last 30d`}
+              hint={`+${windowedTotal.toLocaleString()} last ${rangeShort}`}
               hintKind="ok"
             />
             <StatTile

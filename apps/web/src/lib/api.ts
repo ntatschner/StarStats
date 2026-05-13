@@ -1010,10 +1010,23 @@ export async function getCommerceRecent(
   bearer: string,
   limit: number = 100,
   windowSecs: number = 30,
+  /** Optional time-range filter in hours. When omitted the server
+   *  pulls the last ~1000 events of any type and filters to commerce
+   *  variants in-process (legacy behavior). When set, only events
+   *  newer than `now - hours` are considered. Matches the journey
+   *  range chip selector. */
+  hours?: number,
 ): Promise<CommerceRecentResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    window_secs: String(windowSecs),
+  });
+  if (hours !== undefined) {
+    params.set('hours', String(hours));
+  }
   return request<CommerceRecentResponse>(
     'GET',
-    `/v1/me/commerce/recent?limit=${limit}&window_secs=${windowSecs}`,
+    `/v1/me/commerce/recent?${params.toString()}`,
     undefined,
     bearer,
   );
