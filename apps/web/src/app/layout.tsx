@@ -1,6 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { getCurrentLocation, type ResolvedLocation } from '@/lib/api';
+import {
+  getCurrentLocation,
+  listSharedWithMe,
+  type ResolvedLocation,
+} from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { getTheme } from '@/lib/theme';
@@ -21,15 +25,29 @@ export default async function RootLayout({
   const [session, theme] = await Promise.all([getSession(), getTheme()]);
   const hasSession = session !== null;
 
-  // Current-location chip in TopBar. Fetched per-render so the header
-  // chip stays fresh; 204 → null is the common case, any error
-  // degrades silently to "no chip" rather than crashing the shell.
+  // Per-render shell data: current location for the TopBar chip and
+  // inbound-share count for the Sharing nav badge. Both fail-soft to
+  // a "neutral" value (null / 0) so the shell never crashes on a
+  // single API hiccup. Fetched in parallel to keep one round trip.
   let location: ResolvedLocation | null = null;
+  let inboundShareCount = 0;
   if (session) {
-    try {
-      location = await getCurrentLocation(session.token);
-    } catch (e) {
-      logger.warn({ err: e }, 'topbar location fetch failed');
+    const [locResult, sharedResult] = await Promise.allSettled([
+      getCurrentLocation(session.token),
+      listSharedWithMe(session.token),
+    ]);
+    if (locResult.status === 'fulfilled') {
+      location = locResult.value;
+    } else {
+      logger.warn({ err: locResult.reason }, 'topbar location fetch failed');
+    }
+    if (sharedResult.status === 'fulfilled') {
+      inboundShareCount = sharedResult.value.shared_with_me.length;
+    } else {
+      logger.warn(
+        { err: sharedResult.reason },
+        'inbound share count fetch failed',
+      );
     }
   }
 
@@ -46,6 +64,7 @@ export default async function RootLayout({
             <LeftRail
               handle={session.claimedHandle}
               staffRoles={session.staffRoles}
+              inboundShareCount={inboundShareCount}
             />
             <DrawerScrim />
             <div className="ss-main">

@@ -9,6 +9,14 @@ interface NavItem {
   label: string;
   href: Route;
   match?: (pathname: string) => boolean;
+  /**
+   * Optional count rendered as a small badge after the label. Used
+   * for surfacing inbound state (e.g. # of people sharing with you)
+   * so the user notices without having to visit the page. Hidden
+   * when undefined or 0 so the rail stays calm for users with no
+   * activity.
+   */
+  badge?: number;
 }
 
 interface NavSection {
@@ -26,11 +34,22 @@ interface Props {
    * server-side, so this is purely a UX gate.
    */
   staffRoles: string[];
+  /**
+   * Number of inbound shares (people who have shared their manifest
+   * with the current user). Rendered as a badge on the Sharing nav
+   * entry so users notice new shares without having to visit the
+   * page. Optional — undefined or 0 hides the badge.
+   */
+  inboundShareCount?: number;
 }
 
 const SETTINGS_2FA = '/settings/2fa';
 
-function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
+function buildNav(
+  handle: string | null,
+  staffRoles: string[],
+  inboundShareCount: number,
+): NavSection[] {
   const profileHref = (
     handle ? `/u/${encodeURIComponent(handle)}` : '/settings'
   ) as Route;
@@ -89,6 +108,7 @@ function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
           label: 'Sharing',
           href: '/sharing' as Route,
           match: (p) => p === '/sharing' || p.startsWith('/sharing/'),
+          badge: inboundShareCount > 0 ? inboundShareCount : undefined,
         },
         {
           label: 'Submissions',
@@ -157,9 +177,9 @@ function isActive(item: NavItem, pathname: string): boolean {
   return pathname === item.href;
 }
 
-export function LeftRail({ handle, staffRoles }: Props) {
+export function LeftRail({ handle, staffRoles, inboundShareCount = 0 }: Props) {
   const pathname = usePathname() ?? '';
-  const sections = buildNav(handle, staffRoles);
+  const sections = buildNav(handle, staffRoles, inboundShareCount);
 
   // Mobile drawer leaks across soft-navigations: clicking a nav link
   // closes the rail visually but leaves `body[data-drawer="open"]` set,
@@ -187,7 +207,15 @@ export function LeftRail({ handle, staffRoles }: Props) {
                 style={{ textDecoration: 'none' }}
               >
                 <span className="ss-rail-dot" aria-hidden="true" />
-                <span>{item.label}</span>
+                <span style={{ flex: 1 }}>{item.label}</span>
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span
+                    className="ss-rail-badge"
+                    aria-label={`${item.badge} new`}
+                  >
+                    {item.badge > 99 ? '99+' : item.badge}
+                  </span>
+                )}
               </Link>
             );
           })}
