@@ -109,6 +109,16 @@ const KNOWN_BODIES: Record<string, { system: string; display: string }> = {
   fairo: { system: 'Pyro', display: 'Fairo' },
   fuego: { system: 'Pyro', display: 'Fuego' },
   ignis: { system: 'Pyro', display: 'Ignis' },
+  // -- Hurston Dynamics short code (engine emits `HurDyn_*` for
+  //    several Hurston-surface installations). --
+  hurdyn: { system: 'Stanton', display: 'Hurston' },
+  // -- System stars themselves (when the engine references the
+  //    star, it does so via `<System>Star`). Treat as the system. --
+  stantonstar: { system: 'Stanton', display: 'Stanton' },
+  pyrostar: { system: 'Pyro', display: 'Pyro' },
+  nyxstar: { system: 'Nyx', display: 'Nyx' },
+  // -- Nyx bodies --
+  delamar: { system: 'Nyx', display: 'Delamar' },
 };
 
 /** Map from a place token to its hierarchy. Covers the user-visible
@@ -142,6 +152,13 @@ const KNOWN_PLACES: Record<
   checkmate: { system: 'Pyro', body: 'Pyro V', display: 'Checkmate' },
   rappel: { system: 'Pyro', body: 'Pyro V', display: 'Rappel' },
   starlight: { system: 'Pyro', body: 'Pyro V', display: 'Starlight Service Station' },
+  // -- Nyx --
+  levski: { system: 'Nyx', body: 'Delamar', display: 'Levski' },
+  // -- Rayari research outposts (scattered across microTech moons).
+  //    We can't tell which moon without seeing the suffix, so we
+  //    attribute them to microTech generally. Drop the body level
+  //    when a specific moon is known. --
+  rayari: { system: 'Stanton', body: 'microTech', display: 'Rayari Outpost' },
 };
 
 /** Match S2 / Mk3 / V1 etc. — uppercased on render. */
@@ -366,14 +383,65 @@ function findPlaceMatch(
 
 /** Drop runtime prefixes ([PROC], LandingArea_, OOC_, NPC_, AI_) and
  *  return the meaningful tokens. Exported so rollup helpers can
- *  re-tokenize unmapped raws to derive a grouping key. */
+ *  re-tokenize unmapped raws to derive a grouping key.
+ *
+ *  Splits joined `<System><index>` tokens like `Stanton2_X` or
+ *  `Pyro4a_Y` into `[System, index, ...]` so downstream tier
+ *  lookups see the system as its own segment. The engine emits
+ *  these joined forms inconsistently across destination payloads. */
 export function stripAndSplit(raw: string): string[] {
   const trimmed = raw.trim().replace(/^\[[A-Z_]+\]/, '');
-  return trimmed
+  const segments = trimmed
     .split('_')
     .map((p) => p.trim())
     .filter((p) => p.length > 0 && !SKIP_SEGMENTS.has(p));
+  // Rewrite any `<System><digit>...` segment into separate tokens.
+  // Keeps the order so later positional logic (system found at idx
+  // N → tail starts at N+1) still works.
+  const expanded: string[] = [];
+  for (const s of segments) {
+    const split = splitSystemIndex(s);
+    expanded.push(...split);
+  }
+  return expanded;
 }
+
+/** Split a token like `Stanton2`, `Stanton4a`, or `Pyro5` into
+ *  `[System, index]`. Returns the input unchanged when no match. */
+function splitSystemIndex(segment: string): string[] {
+  // Build the alternation once. KNOWN_SYSTEMS keys are lowercase so
+  // we match case-insensitively; the canonical display is recovered
+  // by the downstream system lookup.
+  const match = segment.match(SYSTEM_INDEX_REGEX);
+  if (!match) return [segment];
+  return [match[1], match[2]];
+}
+
+const SYSTEM_INDEX_REGEX = new RegExp(
+  `^(${Object.keys(KNOWN_SYSTEMS).join('|')})(\\d+[a-z]?)$`,
+  'i',
+);
+
+/** Filter for destination buckets — returns true when the raw value
+ *  is an engine-internal marker that shouldn't appear in a
+ *  destinations list at all (mission objectives, nav points, object
+ *  containers, party member markers). Callers drop these before
+ *  rolling up so they never leak into the bucket bars. */
+export function isNonDestination(raw: string): boolean {
+  const v = raw.trim();
+  return NON_DESTINATION_PATTERNS.some((re) => re.test(v));
+}
+
+const NON_DESTINATION_PATTERNS: RegExp[] = [
+  // Mission objective markers — `Mission_Marker_*`, `Mission_*`.
+  /^Mission(_|$)/i,
+  // Engine container references — `ObjectContainer*`.
+  /^ObjectContainer/i,
+  // HUD nav-point markers placed manually by the pilot.
+  /^NavPoint/i,
+  // Party member / friend markers.
+  /^PartyMember/i,
+];
 
 function lookupManufacturer(parts: string[]): {
   manufacturer: string | null;

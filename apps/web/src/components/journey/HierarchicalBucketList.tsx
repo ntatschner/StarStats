@@ -18,6 +18,7 @@
  */
 
 import {
+  isNonDestination,
   parseWeaponClass,
   parseItemClass,
   parseLocationClass,
@@ -433,11 +434,14 @@ export function rollUpItems(
 }
 
 /** Group flat buckets by system → body → place. Used by Travel and
- *  Combat (deaths_by_zone). */
+ *  Combat (deaths_by_zone). Filters out engine-internal markers
+ *  (mission objectives, nav points, object containers) up-front so
+ *  they never reach the rollup tree. */
 export function rollUpLocations(
   buckets: { value: string; count: number }[],
   catalog: ReferenceMap,
 ): RollupNode[] {
+  const cleaned = buckets.filter((b) => !isNonDestination(b.value));
   const tree = new Map<
     string,
     Map<string, Map<string, { count: number; raws: string[] }>>
@@ -446,7 +450,7 @@ export function rollUpLocations(
     string,
     { count: number; raws: string[] }
   >();
-  for (const b of buckets) {
+  for (const b of cleaned) {
     const loc = parseLocationClass(b.value);
     if (!loc.system) {
       const key =
