@@ -10,8 +10,22 @@ name: Release images
 
 on:
   push:
+    # Tag pushes — versioned releases. Image tags carry the version
+    # number (e.g. `:0.0.2-beta`) and `:latest` is also updated.
     tags: ['v*']
+    # Main-branch pushes — auto-deploy the homelab. Image tags carry
+    # `dev-<sha7>` plus `:latest`. Komodo pulls `:latest` on its sync
+    # tick so new commits land in the homelab automatically.
+    branches: [main]
   workflow_dispatch:
+
+# Cancel an in-flight build when a newer commit lands on the same
+# branch / tag — avoids burning CI on commits the next push will
+# supersede anyway. Tag builds get their own group per-tag so
+# concurrent tag pushes don't fight each other.
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
