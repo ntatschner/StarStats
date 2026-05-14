@@ -118,6 +118,17 @@ const KNOWN_BODIES: Record<string, { system: string; display: string }> = {
   //    body so the rollup still has a meaningful three-level
   //    hierarchy (Stanton -> Rest Stops -> S1 L3). --
   rr: { system: 'Stanton', display: 'Rest Stops' },
+  // -- HDMS = Hurston Defense Material Storage. Engine emits
+  //    `HDMS_<name>` for outposts spread across the four Hurston
+  //    moons (Aberdeen/Magda/Ita/Arial). Without per-entry moon
+  //    resolution we group them collectively under Stanton ->
+  //    HDMS Outposts. Tier 0 catalog wins when the wiki catalogues
+  //    individual HDMS outposts with parent metadata. --
+  hdms: { system: 'Stanton', display: 'HDMS Outposts' },
+  // -- Shubin Mining facilities (`Shubin_*`). Primarily on the
+  //    microTech moons (Calliope / Clio) but a few elsewhere. Same
+  //    "group collectively until catalogued" pattern as HDMS. --
+  shubin: { system: 'Stanton', display: 'Shubin Outposts' },
   // -- System stars themselves (when the engine references the
   //    star, it does so via `<System>Star`). Treat as the system. --
   stantonstar: { system: 'Stanton', display: 'Stanton' },
@@ -285,13 +296,16 @@ export function parseLocationClass(
     return { system: null, body: null, place: null, raw };
   }
 
-  // Special: `LOC_rs_ext_<a>-<b>_jp<N>` is the engine's name for an
-  // interstellar Jump Point object container. These don't fit the
-  // body/place model — they connect two systems. Group them under
-  // a synthetic `Jump Points` pseudo-system so the user sees jump
-  // transits as their own top-level slice on the rollup.
-  const jp = matchJumpPoint(parts, raw);
-  if (jp) return jp;
+  // Synthetic top-level matchers — engine patterns that don't fit
+  // the system/body/place hierarchy cleanly (cross-cutting objects
+  // like Jump Points, Comm Arrays). Each matcher returns a result
+  // with a *synthetic* top-level grouping ("Jump Points",
+  // "Communications") so the rollup keeps a meaningful tree shape.
+  // See docs/REFERENCE-CATALOG-HIERARCHY.md for the rationale.
+  for (const m of SYNTHETIC_MATCHERS) {
+    const hit = m(parts, raw);
+    if (hit) return hit;
+  }
 
   // Tier 0 — wiki catalog hit on any token. This is the authoritative
   // source; everything beneath is fallback for engine-only forms
@@ -487,6 +501,21 @@ const NON_DESTINATION_PATTERNS: RegExp[] = [
   /^PartyMember/i,
 ];
 
+/** Registry of synthetic-pseudo-system matchers. Each function takes
+ *  the tokenized segments and the original raw string and returns a
+ *  `LocationParts` when it recognises the engine pattern, or `null`
+ *  to defer to the next matcher / the standard tier chain.
+ *
+ *  Adding a new pattern is one entry here — no surgery in the parser
+ *  body needed. Document the rationale for each top-level pseudo-
+ *  system in `docs/REFERENCE-CATALOG-HIERARCHY.md`. */
+type SyntheticMatcher = (parts: string[], raw: string) => LocationParts | null;
+
+const SYNTHETIC_MATCHERS: SyntheticMatcher[] = [
+  matchJumpPoint,
+  matchCommArray,
+];
+
 /** Match an engine `rs_ext_<a>-<b>_jp<N>` jump-point identifier and
  *  build a LocationParts using the `Jump Points` pseudo-system. The
  *  shape from `stripAndSplit` is `['rs', 'ext', '<a>-<b>', 'jp<N>']`
@@ -528,6 +557,62 @@ function prettifyRouteToken(token: string): string {
     cru: 'Crusader',
   };
   return known[token.toLowerCase()] ?? titleCase(splitCamelCase(token));
+}
+
+/** Match engine Comm-Array identifiers and route them to a
+ *  synthetic `Communications` pseudo-system. The engine names these
+ *  in a couple of shapes:
+ *    `Comm_Array_Lagrange_Stanton_L1_HUR-L1`
+ *    `CommArray_<id>`
+ *    `<system>_Comm_Array_<id>`
+ *  We match whenever the joined segments contain the literal
+ *  `commarray` token (case-insensitive). When we can spot a known
+ *  system token in the segments we propagate it as the parent body
+ *  so the comm array is shown next to the system it serves. */
+function matchCommArray(parts: string[], raw: string): LocationParts | null {
+  const joined = parts.join('').toLowerCase();
+  const hasComm =
+    joined.includes('commarray') ||
+    parts.some((p, i) => {
+      const lower = p.toLowerCase();
+      return (
+        lower === 'comm' &&
+        parts[i + 1]?.toLowerCase() === 'array'
+      );
+    });
+  if (!hasComm) return null;
+  // Try to detect which system the comm array serves. Pick the
+  // first segment that resolves as a system or system short-code.
+  let serves: string | null = null;
+  for (const p of parts) {
+    const lower = p.toLowerCase();
+    if (KNOWN_SYSTEMS[lower]) {
+      serves = KNOWN_SYSTEMS[lower];
+      break;
+    }
+    if (KNOWN_BODIES[lower]) {
+      serves = KNOWN_BODIES[lower].system;
+      break;
+    }
+  }
+  // The trailing identifier (`HUR-L1`, station id, etc.) goes in
+  // the place slot. Take everything that isn't `comm`, `array`, or
+  // a known system/body token.
+  const tail = parts.filter((p) => {
+    const lower = p.toLowerCase();
+    if (lower === 'comm' || lower === 'array' || lower === 'commarray') return false;
+    if (KNOWN_SYSTEMS[lower]) return false;
+    if (KNOWN_BODIES[lower]) return false;
+    return true;
+  });
+  const placeLabel =
+    tail.length > 0 ? titleCase(splitCamelCase(tail.join(' '))) : null;
+  return {
+    system: 'Communications',
+    body: serves ?? 'Unknown system',
+    place: placeLabel,
+    raw,
+  };
 }
 
 /** Catalog Tier 0 lookup. Walks token candidates against the three

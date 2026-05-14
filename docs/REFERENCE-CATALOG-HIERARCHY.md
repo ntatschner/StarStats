@@ -117,6 +117,51 @@ Each tier is independent and additive:
 - Dictionaries shrink but don't disappear — engine-only short codes
   (`HUR_L1`, `CRU_L4`) aren't in the wiki and stay hardcoded.
 
+## Synthetic pseudo-systems
+
+The hierarchy `system → body → place` reads as "real astronomy", but
+the rollup tree doesn't care about astronomy — it just wants a
+three-level grouping. Several engine-internal patterns don't fit
+real astronomy at all (they're cross-cutting objects like jump points
+or comm arrays), but they slot perfectly into the same tree shape if
+we synthesize a top-level "category" that isn't a literal system.
+
+Live pseudo-systems (in `SYNTHETIC_MATCHERS`, applied before the
+catalog/dict tiers):
+
+| Pseudo-system | Engine pattern | Example |
+|---|---|---|
+| `Jump Points` | `rs_ext_<a>-<b>_jp<N>` | `LOC_rs_ext_stan-pyro_jp1` |
+| `Communications` | contains `comm_array` / `commarray` | `Comm_Array_Lagrange_Stanton_L1_HUR-L1` |
+
+Engine short-codes routed via `KNOWN_BODIES` (these still attribute
+to a real system, but use a *synthetic body* because the engine
+doesn't tell us the actual moon/planet):
+
+| Short code | System | Synthetic body | Notes |
+|---|---|---|---|
+| `RR_*` | Stanton | `Rest Stops` | Lagrange-point rest stations |
+| `HDMS_*` | Stanton | `HDMS Outposts` | Hurston Defense Material Storage (real homes: Aberdeen/Magda/Ita/Arial moons) |
+| `Shubin_*` | Stanton | `Shubin Outposts` | Shubin Mining facilities (real homes: Calliope/Clio moons) |
+| `HUR/CRU/ARC/MIC` | Stanton | Hurston/Crusader/ArcCorp/microTech | Lagrange-point prefixes |
+| `HurDyn_*` | Stanton | Hurston | Hurston Dynamics short code |
+| `StantonStar/PyroStar/NyxStar` | (their system) | (the system itself) | System-star references |
+
+### Adding a new pseudo-system
+
+Two paths, depending on the engine pattern's shape:
+
+1. **Single short-code prefix** (HDMS, Shubin, etc.) — one entry in
+   `KNOWN_BODIES`. The existing Tier 2 body-match handles routing.
+
+2. **Multi-token shape** (Jump Points, Comm Arrays, future patterns
+   like Asteroid Belts) — write a `SyntheticMatcher` function and
+   add it to `SYNTHETIC_MATCHERS`. Document the engine pattern and
+   rationale in this table.
+
+Either way: keep the pseudo-body name human-readable. The user sees
+it on the rollup tree.
+
 ## Out of scope
 
 - Combining wiki data with our own enrichment (player-supplied location
