@@ -1,11 +1,14 @@
 /**
- * My logs — recent ingest batches the desktop client posted, read off
+ * Uploads — recent ingest batches the desktop client posted, read off
  * the audit log. Per the project's "no raw retention" decision this is
  * metadata-only: there's no per-line drill-down or batch retry.
  *
  * Powered by GET /v1/me/ingest-history. Pagination is offset-based via
  * the `?offset=` search param; the page also exposes a small summary
  * strip (last 24h totals) derived from the same response.
+ *
+ * Sibling surface: /metrics?view=raw is the per-event stream — this
+ * page is the per-batch upload audit.
  */
 
 import Link from 'next/link';
@@ -25,11 +28,11 @@ interface SearchParams {
   offset?: string;
 }
 
-export default async function MyLogsPage(props: {
+export default async function UploadsPage(props: {
   searchParams: Promise<SearchParams>;
 }) {
   const session = await getSession();
-  if (!session) redirect('/auth/login?next=/my-logs');
+  if (!session) redirect('/auth/login?next=/uploads');
 
   const params = await props.searchParams;
   const offset = parseOffset(params.offset);
@@ -42,7 +45,7 @@ export default async function MyLogsPage(props: {
     });
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
-      redirect('/auth/login?next=/my-logs');
+      redirect('/auth/login?next=/uploads');
     }
     throw e;
   }
@@ -50,11 +53,11 @@ export default async function MyLogsPage(props: {
   const summary = computeWindowSummary(history.batches);
   const hasOlder = history.batches.length === PAGE_LIMIT;
   const hasNewer = offset > 0;
-  const olderHref = `/my-logs?offset=${offset + PAGE_LIMIT}` as Route;
+  const olderHref = `/uploads?offset=${offset + PAGE_LIMIT}` as Route;
   const newerHref =
     offset - PAGE_LIMIT <= 0
-      ? ('/my-logs' as Route)
-      : (`/my-logs?offset=${offset - PAGE_LIMIT}` as Route);
+      ? ('/uploads' as Route)
+      : (`/uploads?offset=${offset - PAGE_LIMIT}` as Route);
 
   return (
     <div
@@ -63,7 +66,7 @@ export default async function MyLogsPage(props: {
     >
       <header>
         <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
-          My logs · what your client has shipped
+          Uploads · what your client has shipped
         </div>
         <h1
           style={{

@@ -39,7 +39,7 @@ const FIXED: Readonly<Record<string, number>> = {
   '/devices': 120,
   '/orgs': 60,
   '/journey': 100,
-  '/my-logs': 200,
+  '/uploads': 200,
   '/settings': 195,
   '/settings/2fa': 155,
   '/donate': 245,
