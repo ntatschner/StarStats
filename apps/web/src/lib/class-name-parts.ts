@@ -246,16 +246,46 @@ export interface LocationParts {
   raw: string;
 }
 
+/** Subset of `LocationCatalog` the parser actually reads. Loose
+ *  shape so we don't drag the full `reference.ts` interface into a
+ *  pure parsing module — keeps this file free of network types. */
+export interface LocationCatalogLookup {
+  byName: ReadonlyMap<string, LocationLookupEntry>;
+  byTag: ReadonlyMap<string, LocationLookupEntry>;
+  bySlug: ReadonlyMap<string, LocationLookupEntry>;
+}
+
+/** Subset of `LocationEntry` the parser actually reads. */
+export interface LocationLookupEntry {
+  displayName: string;
+  system: string | null;
+  parent: string | null;
+  classification: string | null;
+}
+
 /** Parse a location / destination / planet identifier into
- *  system / body / place. Best-effort — three tiers, in order:
+ *  system / body / place. Best-effort — four tiers, in order:
+ *    0. Catalog hit on any token (when `catalog` is provided)
  *    1. Leading-system match (`OOC_Stanton_2_Crusader`)
  *    2. Body match (`Hurston_Lorville` → infer Stanton)
  *    3. Place match (`Orison_LOC` → infer Stanton/Crusader/Orison)
  *  Only falls through to "no system" for truly unrecognised tokens. */
-export function parseLocationClass(raw: string): LocationParts {
+export function parseLocationClass(
+  raw: string,
+  catalog?: LocationCatalogLookup,
+): LocationParts {
   const parts = stripAndSplit(raw);
   if (parts.length === 0) {
     return { system: null, body: null, place: null, raw };
+  }
+
+  // Tier 0 — wiki catalog hit on any token. This is the authoritative
+  // source; everything beneath is fallback for engine-only forms
+  // that don't appear in the wiki. Try the joined form first (catches
+  // `Stanton1b`-style tags), then each segment by name.
+  if (catalog) {
+    const tier0 = lookupCatalog(parts, raw, catalog);
+    if (tier0) return tier0;
   }
 
   // Tier 1 — system token in the segments.
@@ -442,6 +472,64 @@ const NON_DESTINATION_PATTERNS: RegExp[] = [
   // Party member / friend markers.
   /^PartyMember/i,
 ];
+
+/** Catalog Tier 0 lookup. Walks token candidates against the three
+ *  catalog indexes (tag, name, slug) in priority order. First hit
+ *  wins. Returns null when nothing matches so the parser can drop
+ *  through to the dictionary tiers. */
+function lookupCatalog(
+  parts: string[],
+  raw: string,
+  catalog: LocationCatalogLookup,
+): LocationParts | null {
+  // Try a few candidate keys in order of confidence:
+  //   1. joined-no-underscore form of all parts ("Stanton1b")
+  //   2. joined-no-underscore form of the first two parts
+  //   3. each individual part on its own
+  // Each candidate is matched against tag/name/slug indexes.
+  const candidates: string[] = [];
+  if (parts.length >= 2) {
+    candidates.push((parts[0] + parts[1]).toLowerCase());
+  }
+  candidates.push(parts.join('').toLowerCase());
+  for (const p of parts) candidates.push(p.toLowerCase());
+
+  for (const key of candidates) {
+    const hit =
+      catalog.byTag.get(key) ??
+      catalog.byName.get(key) ??
+      catalog.bySlug.get(key);
+    if (!hit) continue;
+    // A `Star`-classification hit is just the system itself —
+    // upgrade to (system, null, null) rather than putting the star
+    // as a "place".
+    if (hit.classification === 'Star') {
+      return {
+        system: hit.system ?? hit.displayName,
+        body: null,
+        place: null,
+        raw,
+      };
+    }
+    // Planets are the body level. parent is null (it's the system).
+    if (hit.classification === 'Planet') {
+      return {
+        system: hit.system,
+        body: hit.displayName,
+        place: null,
+        raw,
+      };
+    }
+    // Moon / city / station / outpost / etc — full hierarchy.
+    return {
+      system: hit.system,
+      body: hit.parent,
+      place: hit.displayName,
+      raw,
+    };
+  }
+  return null;
+}
 
 function lookupManufacturer(parts: string[]): {
   manufacturer: string | null;

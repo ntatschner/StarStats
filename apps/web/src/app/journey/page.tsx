@@ -57,6 +57,7 @@ import {
 } from '@/components/journey/RangeBar';
 import { logger } from '@/lib/logger';
 import {
+  getLocationCatalog,
   getReferences,
   prettyClass,
 } from '@/lib/reference';
@@ -316,10 +317,12 @@ async function TravelTab({
     // Run stats + locations catalog in parallel so the slower of
     // the two governs total wait, not the sum. Travel only needs
     // the locations category — vehicles/weapons/items would be
-    // wasted bytes on this tab.
+    // wasted bytes on this tab. The catalog carries wiki hierarchy
+    // metadata (system/parent) so the rollup can resolve every
+    // wiki-known location without hardcoded dictionaries.
     [stats, locations] = await Promise.all([
       getTravelStats(token, hours),
-      getReferences('location'),
+      getLocationCatalog(),
     ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
@@ -360,10 +363,13 @@ async function CombatTab({
   try {
     // Stats + weapons + locations in parallel. Combat doesn't need
     // vehicles or items, so we skip those two big maps entirely.
+    // Locations use the rich catalog (wiki metadata for hierarchy);
+    // weapons stay on the display-only map for now (Wave 2 will
+    // upgrade them).
     [stats, weapons, locations] = await Promise.all([
       getCombatStats(token, hours),
       getReferences('weapon'),
-      getReferences('location'),
+      getLocationCatalog(),
     ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {

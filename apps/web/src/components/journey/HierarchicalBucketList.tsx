@@ -25,7 +25,7 @@ import {
   stripAndSplit,
 } from '@/lib/class-name-parts';
 import { prettyClass } from '@/lib/reference';
-import type { ReferenceMap } from '@/lib/reference';
+import type { LocationCatalog, ReferenceMap } from '@/lib/reference';
 
 export interface RollupNode {
   /** Display label for this node (e.g. "Klaus & Werner"). */
@@ -436,10 +436,13 @@ export function rollUpItems(
 /** Group flat buckets by system → body → place. Used by Travel and
  *  Combat (deaths_by_zone). Filters out engine-internal markers
  *  (mission objectives, nav points, object containers) up-front so
- *  they never reach the rollup tree. */
+ *  they never reach the rollup tree. The `catalog` argument is the
+ *  wiki-driven location lookup (see `getLocationCatalog`) — when
+ *  non-empty, the parser uses it as Tier 0, gaining full hierarchy
+ *  for every wiki-known location without hardcoded dictionaries. */
 export function rollUpLocations(
   buckets: { value: string; count: number }[],
-  catalog: ReferenceMap,
+  catalog: LocationCatalog,
 ): RollupNode[] {
   const cleaned = buckets.filter((b) => !isNonDestination(b.value));
   const tree = new Map<
@@ -450,11 +453,14 @@ export function rollUpLocations(
     string,
     { count: number; raws: string[] }
   >();
+  // The display map embedded in the catalog still drives per-leaf
+  // labels via `prettyClass` (back-compat with the legacy path).
+  const display = catalog.display;
   for (const b of cleaned) {
-    const loc = parseLocationClass(b.value);
+    const loc = parseLocationClass(b.value, catalog);
     if (!loc.system) {
       const key =
-        loc.place ?? prettyClass(b.value, catalog) ?? b.value;
+        loc.place ?? prettyClass(b.value, display) ?? b.value;
       const e = unknownPlaces.get(key) ?? { count: 0, raws: [] };
       e.count += b.count;
       e.raws.push(b.value);
@@ -486,7 +492,7 @@ export function rollUpLocations(
       ([body, places]) => {
         const placeChildren: RollupNode[] = [...places.entries()]
           .map(([place, entry]) => ({
-            label: prettyClass(entry.raws[0], catalog) || place,
+            label: prettyClass(entry.raws[0], display) || place,
             count: entry.count,
             title: entry.raws.join(' · '),
           }))
