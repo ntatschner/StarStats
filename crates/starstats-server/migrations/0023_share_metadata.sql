@@ -8,10 +8,15 @@
 -- handlers, which 404 + lazily delete the SpiceDB row when
 -- `expires_at < now()`.
 --
--- The table is keyed on (lower(owner_handle), lower(recipient_handle))
--- so case mismatches collapse to the same row — RSI handles are
--- case-preserved on display but case-insensitive for lookup, and
--- SpiceDB ids inherit that.
+-- Case-insensitive uniqueness is enforced by a UNIQUE INDEX over
+-- `lower(...)` expressions rather than the table's PRIMARY KEY
+-- clause: Postgres does not accept expressions inside
+-- `PRIMARY KEY (...)` (parse error "syntax error at or near '('"
+-- caught on the homelab roll-out). ON CONFLICT inside the upsert
+-- handler already targets the expression form, which Postgres
+-- resolves against a matching unique index — so the upsert path is
+-- unchanged. RSI handles are case-preserved on display but
+-- case-insensitive for lookup; SpiceDB ids inherit that.
 --
 -- No FK to `users`: a metadata row can outlive a deleted account
 -- (the SpiceDB cleanup happens separately), and we don't want a
@@ -26,13 +31,18 @@ CREATE TABLE IF NOT EXISTS share_metadata (
     -- Free-text human note. Capped on write (validation in the
     -- handler) to keep the column bounded.
     note             TEXT        NULL,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (lower(owner_handle), lower(recipient_handle))
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Indexed lookup for expiry sweeps (a future background task can
--- batch-revoke expired rows; for now read-time enforcement covers
--- correctness, this index is forward-looking).
+-- Effective primary key — case-insensitive uniqueness over the
+-- handle pair. ON CONFLICT (lower(owner_handle), lower(recipient_handle))
+-- in the upserter targets this index.
+CREATE UNIQUE INDEX IF NOT EXISTS share_metadata_owner_recipient_lower_uniq
+    ON share_metadata (lower(owner_handle), lower(recipient_handle));
+
+-- Forward-looking: a future background sweep can batch-revoke
+-- expired rows via `WHERE expires_at < now()`. Partial index keeps
+-- the never-expires rows out of the index entirely.
 CREATE INDEX IF NOT EXISTS share_metadata_expires_at_idx
     ON share_metadata (expires_at)
     WHERE expires_at IS NOT NULL;
