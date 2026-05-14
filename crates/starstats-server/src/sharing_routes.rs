@@ -23,9 +23,11 @@ use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::AuthenticatedUser;
 use crate::orgs::{OrgStore, PostgresOrgStore};
 use crate::repo::{EventQuery, PostgresStore};
+use crate::share_metadata::{ShareMetadataStore, NOTE_MAX_LEN};
 use crate::spicedb::{ObjectRef, SpicedbClient};
 use crate::users::{PostgresUserStore, UserStore};
 use crate::validation::{build_timeline_buckets, resolve_timeline_days};
+use chrono::{DateTime, Utc};
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
@@ -116,6 +118,17 @@ pub struct VisibilityResponse {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ShareRequest {
     pub recipient_handle: String,
+    /// Optional auto-expiry. ISO-8601 timestamptz. Missing or null
+    /// means "share never expires" (the legacy behaviour from before
+    /// metadata existed). Past timestamps are rejected at the
+    /// handler with 400.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Optional free-text note. Capped at NOTE_MAX_LEN. Empty
+    /// strings collapse to `None` server-side so the column never
+    /// stores `""`.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -131,6 +144,13 @@ pub struct RevokeShareResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ShareEntry {
     pub recipient_handle: String,
+    /// Auto-expiry from `share_metadata`. Missing/null means
+    /// "no expiry recorded" — historically all shares look like this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Owner-supplied note from `share_metadata`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -154,6 +174,13 @@ pub struct ListSharesResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SharedWithMeEntry {
     pub owner_handle: String,
+    /// Auto-expiry as set by the owner. Surfaced so recipients know
+    /// when access will lapse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Owner-supplied note explaining the grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Response for `GET /v1/me/shared-with-me` — the inbound side of
@@ -407,6 +434,7 @@ pub async fn get_visibility(
 pub async fn add_share<U: UserStore>(
     State(users): State<Arc<U>>,
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
     Extension(audit): Extension<Arc<dyn AuditLog>>,
     auth: AuthenticatedUser,
     Json(req): Json<ShareRequest>,
@@ -422,6 +450,26 @@ pub async fn add_share<U: UserStore>(
 
     if recipient.eq_ignore_ascii_case(&auth.preferred_username) {
         return err(StatusCode::BAD_REQUEST, "cannot_share_with_self");
+    }
+
+    // Validate optional metadata up-front so we don't write a
+    // SpiceDB row and then bail on a 400. Past expiry rejected to
+    // catch obvious client mistakes; empty notes collapse to None.
+    let now = Utc::now();
+    if let Some(t) = req.expires_at {
+        if t <= now {
+            return err(StatusCode::BAD_REQUEST, "expires_at_in_past");
+        }
+    }
+    let note_owned: Option<String> = req
+        .note
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(n) = note_owned.as_ref() {
+        if n.chars().count() > NOTE_MAX_LEN {
+            return err(StatusCode::BAD_REQUEST, "note_too_long");
+        }
     }
 
     // Validate the recipient exists in our user table — sharing with a
@@ -457,6 +505,24 @@ pub async fn add_share<U: UserStore>(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
     }
 
+    // Metadata is best-effort — the SpiceDB grant is already
+    // committed, so a Postgres failure here is logged and surfaced
+    // as a partial success rather than rolling back. The next
+    // grant or list will repopulate the row (upsert).
+    if req.expires_at.is_some() || note_owned.is_some() {
+        if let Err(e) = meta
+            .upsert(
+                &auth.preferred_username,
+                &recipient_user.claimed_handle,
+                req.expires_at,
+                note_owned.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "share_metadata upsert failed");
+        }
+    }
+
     if let Err(e) = audit
         .append(AuditEntry {
             actor_sub: Some(auth.sub.clone()),
@@ -464,6 +530,8 @@ pub async fn add_share<U: UserStore>(
             action: "share.granted".to_string(),
             payload: serde_json::json!({
                 "recipient_handle": recipient_user.claimed_handle,
+                "expires_at": req.expires_at,
+                "has_note": note_owned.is_some(),
             }),
         })
         .await
@@ -497,6 +565,7 @@ pub async fn add_share<U: UserStore>(
 )]
 pub async fn delete_share(
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
     Extension(audit): Extension<Arc<dyn AuditLog>>,
     auth: AuthenticatedUser,
     Path(recipient_handle): Path<String>,
@@ -523,6 +592,17 @@ pub async fn delete_share(
     {
         tracing::error!(error = %e, "delete share failed");
         return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+    }
+
+    // Wipe metadata after the SpiceDB row goes away. Best-effort —
+    // a leftover row with no SpiceDB relation is invisible to all
+    // reads (find/list never join an orphan), so a transient
+    // failure here is benign.
+    if let Err(e) = meta
+        .delete(&auth.preferred_username, recipient)
+        .await
+    {
+        tracing::warn!(error = %e, "share_metadata delete failed");
     }
 
     if let Err(e) = audit
@@ -553,6 +633,7 @@ pub async fn delete_share(
 )]
 pub async fn list_shares(
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
     auth: AuthenticatedUser,
 ) -> Response {
     let Some(client) = spicedb.as_ref() else {
@@ -566,18 +647,43 @@ pub async fn list_shares(
             .into_response();
     };
 
-    let user_shares = match client.list_share_with_user(&auth.preferred_username).await {
-        Ok(handles) => handles
-            .into_iter()
-            .map(|h| ShareEntry {
-                recipient_handle: h,
-            })
-            .collect::<Vec<_>>(),
+    let handles = match client.list_share_with_user(&auth.preferred_username).await {
+        Ok(h) => h,
         Err(e) => {
             tracing::error!(error = %e, "list shares failed");
             return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
         }
     };
+
+    // Bulk-fetch metadata in one round-trip then index by lowercased
+    // recipient so the join is constant-time. Failure degrades to
+    // "no metadata recorded" rather than failing the whole call —
+    // the SpiceDB rows are the source of truth for which shares
+    // exist, metadata is decorative.
+    let meta_index: std::collections::HashMap<String, _> = match meta
+        .list_by_owner(&auth.preferred_username)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|m| (m.recipient_handle.to_ascii_lowercase(), m))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list_by_owner metadata fetch failed");
+            std::collections::HashMap::new()
+        }
+    };
+    let user_shares: Vec<ShareEntry> = handles
+        .into_iter()
+        .map(|h| {
+            let m = meta_index.get(&h.to_ascii_lowercase());
+            ShareEntry {
+                recipient_handle: h,
+                expires_at: m.and_then(|x| x.expires_at),
+                note: m.and_then(|x| x.note.clone()),
+            }
+        })
+        .collect();
     let org_shares = match client.list_share_with_org(&auth.preferred_username).await {
         Ok(slugs) => slugs
             .into_iter()
@@ -624,6 +730,7 @@ pub async fn list_shares(
 )]
 pub async fn list_shared_with_me(
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
     auth: AuthenticatedUser,
 ) -> Response {
     let Some(client) = spicedb.as_ref() else {
@@ -637,19 +744,41 @@ pub async fn list_shared_with_me(
             .into_response();
     };
 
-    let owners = match client
+    let handles = match client
         .list_shared_with_me(&auth.preferred_username)
         .await
     {
-        Ok(handles) => handles
-            .into_iter()
-            .map(|h| SharedWithMeEntry { owner_handle: h })
-            .collect::<Vec<_>>(),
+        Ok(h) => h,
         Err(e) => {
             tracing::error!(error = %e, "list_shared_with_me failed");
             return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
         }
     };
+
+    let meta_index: std::collections::HashMap<String, _> = match meta
+        .list_by_recipient(&auth.preferred_username)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|m| (m.owner_handle.to_ascii_lowercase(), m))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list_by_recipient metadata fetch failed");
+            std::collections::HashMap::new()
+        }
+    };
+    let owners: Vec<SharedWithMeEntry> = handles
+        .into_iter()
+        .map(|h| {
+            let m = meta_index.get(&h.to_ascii_lowercase());
+            SharedWithMeEntry {
+                owner_handle: h,
+                expires_at: m.and_then(|x| x.expires_at),
+                note: m.and_then(|x| x.note.clone()),
+            }
+        })
+        .collect();
 
     (
         StatusCode::OK,
@@ -844,6 +973,72 @@ async fn check_view(client: &SpicedbClient, owner: &str, viewer: &str) -> anyhow
         .inspect_err(|e| tracing::warn!(error = %e, "spicedb friend check failed"))
 }
 
+/// Wrap [`check_view`] with read-time expiry enforcement. After the
+/// SpiceDB permission check succeeds, look up `share_metadata` for
+/// the (owner, viewer) pair. If `expires_at` is set and in the
+/// past, lazy-revoke: delete the SpiceDB row + the metadata row +
+/// audit, and return `Ok(false)` so the caller renders a 404
+/// (matches the "share never existed" UX and avoids leaking the
+/// expiration state).
+///
+/// `audit` is best-effort — the share is already revoked logically
+/// once metadata says so, so an audit hiccup doesn't reverse the
+/// effective decision.
+async fn check_view_with_expiry(
+    client: &SpicedbClient,
+    meta: &dyn ShareMetadataStore,
+    audit: &dyn AuditLog,
+    owner: &str,
+    viewer: &str,
+) -> anyhow::Result<bool> {
+    let allowed = check_view(client, owner, viewer).await?;
+    if !allowed {
+        return Ok(false);
+    }
+    let row = match meta.find(owner, viewer).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Metadata fetch failed but SpiceDB said "allowed" — fail
+            // open. The share works without metadata; we'd rather not
+            // 404 a legitimate viewer because Postgres flapped.
+            tracing::warn!(error = %e, "share_metadata find failed; defaulting to allow");
+            return Ok(true);
+        }
+    };
+    let Some(meta_row) = row else {
+        return Ok(true);
+    };
+    let Some(expires_at) = meta_row.expires_at else {
+        return Ok(true);
+    };
+    if expires_at > Utc::now() {
+        return Ok(true);
+    }
+    // Expired — lazy-revoke. Errors here are warnings, not fatal:
+    // even if cleanup partially fails, the next read will retry.
+    if let Err(e) = client.delete_share_with_user(owner, viewer).await {
+        tracing::warn!(error = %e, "lazy spicedb revoke (expired share) failed");
+    }
+    if let Err(e) = meta.delete(owner, viewer).await {
+        tracing::warn!(error = %e, "lazy metadata delete (expired share) failed");
+    }
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: None,
+            actor_handle: Some(owner.to_string()),
+            action: "share.expired_revoked".to_string(),
+            payload: serde_json::json!({
+                "recipient_handle": viewer,
+                "expired_at": expires_at,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.expired_revoked)");
+    }
+    Ok(false)
+}
+
 /// Convert `check_public`/`check_view` results into a handler response.
 /// `Ok(true)` runs `then` (the 200 path); `Ok(false)` is 404 (don't
 /// leak existence); `Err(_)` is 503 with the standard
@@ -997,6 +1192,8 @@ pub async fn public_timeline<Q: EventQuery>(
 pub async fn friend_summary<Q: EventQuery>(
     State(query): State<Arc<Q>>,
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
     auth: AuthenticatedUser,
     Path(handle): Path<String>,
 ) -> Response {
@@ -1013,7 +1210,14 @@ pub async fn friend_summary<Q: EventQuery>(
         )
             .into_response();
     };
-    let check = check_view(client, &handle, &auth.preferred_username).await;
+    let check = check_view_with_expiry(
+        client,
+        meta.as_ref(),
+        audit.as_ref(),
+        &handle,
+        &auth.preferred_username,
+    )
+    .await;
     render_or_404(check, || async {
         render_summary(query.as_ref(), &handle).await
     })
@@ -1039,6 +1243,8 @@ pub async fn friend_summary<Q: EventQuery>(
 pub async fn friend_timeline<Q: EventQuery>(
     State(query): State<Arc<Q>>,
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
     auth: AuthenticatedUser,
     Path(handle): Path<String>,
     Query(params): Query<PublicTimelineParams>,
@@ -1059,7 +1265,14 @@ pub async fn friend_timeline<Q: EventQuery>(
         )
             .into_response();
     };
-    let check = check_view(client, &handle, &auth.preferred_username).await;
+    let check = check_view_with_expiry(
+        client,
+        meta.as_ref(),
+        audit.as_ref(),
+        &handle,
+        &auth.preferred_username,
+    )
+    .await;
     render_or_404(check, || async {
         render_timeline(query.as_ref(), &handle, days).await
     })
@@ -1081,6 +1294,7 @@ mod tests {
     use crate::audit::test_support::MemoryAuditLog;
     use crate::auth::test_support::fresh_pair;
     use crate::auth::AuthVerifier;
+    use crate::share_metadata::test_support::MemoryShareMetadataStore;
     use crate::users::test_support::MemoryUserStore;
     use crate::users::{hash_password, UserStore};
     use axum::body::to_bytes;
@@ -1096,6 +1310,8 @@ mod tests {
         spicedb: Arc<Option<SpicedbClient>>,
         audit: Arc<dyn AuditLog>,
     ) -> Router {
+        let meta: Arc<dyn ShareMetadataStore> =
+            Arc::new(MemoryShareMetadataStore::default());
         Router::new()
             .route("/v1/me/visibility", post(set_visibility::<MemoryUserStore>))
             .route("/v1/me/share", post(add_share::<MemoryUserStore>))
@@ -1104,6 +1320,7 @@ mod tests {
             .with_state(users)
             .layer(Extension(verifier))
             .layer(Extension(spicedb))
+            .layer(Extension(meta))
             .layer(Extension(audit))
     }
 

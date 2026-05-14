@@ -1149,12 +1149,18 @@ export async function listSharedWithMe(
 export async function addShare(
   bearer: string,
   recipientHandle: string,
+  options: { expiresAt?: string | null; note?: string | null } = {},
 ): Promise<ShareResponse> {
-  return postJson<ShareResponse>(
-    '/v1/me/share',
-    { recipient_handle: recipientHandle } satisfies ShareRequest,
-    bearer,
-  );
+  const body: ShareRequest = {
+    recipient_handle: recipientHandle,
+  };
+  // Only include the optional fields when set so the server doesn't
+  // see explicit nulls — the Rust handler treats absence and null
+  // the same way, but absence is the canonical "no expiry / no note"
+  // shape that round-trips cleanly with #[serde(default)].
+  if (options.expiresAt) body.expires_at = options.expiresAt;
+  if (options.note) body.note = options.note;
+  return postJson<ShareResponse>('/v1/me/share', body, bearer);
 }
 
 export async function removeShare(

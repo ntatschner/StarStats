@@ -113,10 +113,29 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_recipient_handle: 'Handle looks invalid — letters, digits, dashes only.',
   invalid_org_slug: 'Org slug looks invalid.',
   cannot_share_with_self: "You can't share your stats with yourself.",
+  expires_at_in_past: 'Expiry must be in the future.',
+  note_too_long: 'Note is too long (max 280 characters).',
   spicedb_unavailable:
     'The authorisation service is offline. Try again shortly.',
   unexpected: 'Something went wrong. Try again.',
 };
+
+/** Format an ISO timestamp as "in 3d" / "expired" / "in 2h" for the
+ *  share pills. Returns null when no expiry was set. */
+function formatExpiry(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const ts = new Date(iso);
+  if (Number.isNaN(ts.getTime())) return null;
+  const now = Date.now();
+  const diffMs = ts.getTime() - now;
+  if (diffMs <= 0) return 'expired';
+  const diffMin = Math.round(diffMs / 60_000);
+  if (diffMin < 60) return `in ${diffMin}m`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `in ${diffHr}h`;
+  const diffDay = Math.round(diffHr / 24);
+  return `in ${diffDay}d`;
+}
 
 export default async function SharingPage(props: {
   searchParams: Promise<SearchParams>;
@@ -186,8 +205,22 @@ export default async function SharingPage(props: {
     if (!s) redirect('/auth/login?next=/sharing');
     const recipient = String(formData.get('recipient_handle') ?? '').trim();
     if (recipient === '') redirect('/sharing?error=invalid_recipient_handle');
+    // Optional expiry comes from an <input type="datetime-local">,
+    // which returns a naive local string like "2026-06-01T10:00".
+    // Convert to ISO with the browser's timezone offset baked in
+    // so the server can compare against UTC. Empty = no expiry.
+    const expiresLocal = String(formData.get('expires_at_local') ?? '').trim();
+    let expiresAt: string | null = null;
+    if (expiresLocal !== '') {
+      const dt = new Date(expiresLocal);
+      if (!Number.isNaN(dt.getTime())) {
+        expiresAt = dt.toISOString();
+      }
+    }
+    const noteRaw = String(formData.get('note') ?? '').trim();
+    const note = noteRaw === '' ? null : noteRaw;
     try {
-      await addShare(s.token, recipient);
+      await addShare(s.token, recipient, { expiresAt, note });
     } catch (e) {
       if (e instanceof ApiCallError) {
         if (e.status === 401) redirect('/auth/login?next=/sharing');
@@ -414,52 +447,131 @@ export default async function SharingPage(props: {
                 <div
                   style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
                 >
-                  {shares.shares.map((entry) => (
-                    <div key={entry.recipient_handle} style={sharePillStyle}>
-                      <Link
-                        href={
-                          (`/u/${encodeURIComponent(entry.recipient_handle)}`) as Route
-                        }
-                        className="mono"
-                        style={{ color: 'var(--fg)' }}
+                  {shares.shares.map((entry) => {
+                    const expiryLabel = formatExpiry(entry.expires_at);
+                    return (
+                      <div
+                        key={entry.recipient_handle}
+                        style={{ ...sharePillStyle, flexWrap: 'wrap' }}
                       >
-                        {entry.recipient_handle}
-                      </Link>
-                      <form action={revokeShareAction} style={{ margin: 0 }}>
-                        <input
-                          type="hidden"
-                          name="recipient_handle"
-                          value={entry.recipient_handle}
-                        />
-                        <button
-                          type="submit"
-                          className="ss-btn ss-btn--link"
-                          style={{ color: 'var(--danger)' }}
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 2,
+                            flex: 1,
+                            minWidth: 0,
+                          }}
                         >
-                          Revoke
-                        </button>
-                      </form>
-                    </div>
-                  ))}
+                          <Link
+                            href={
+                              (`/u/${encodeURIComponent(entry.recipient_handle)}`) as Route
+                            }
+                            className="mono"
+                            style={{ color: 'var(--fg)' }}
+                          >
+                            {entry.recipient_handle}
+                          </Link>
+                          {entry.note && (
+                            <span
+                              style={{
+                                fontSize: 12,
+                                color: 'var(--fg-muted)',
+                              }}
+                            >
+                              {entry.note}
+                            </span>
+                          )}
+                        </div>
+                        {expiryLabel && (
+                          <span
+                            className="ss-badge"
+                            title={entry.expires_at ?? undefined}
+                            style={
+                              expiryLabel === 'expired'
+                                ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
+                                : { color: 'var(--fg-muted)' }
+                            }
+                          >
+                            {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
+                          </span>
+                        )}
+                        <form action={revokeShareAction} style={{ margin: 0 }}>
+                          <input
+                            type="hidden"
+                            name="recipient_handle"
+                            value={entry.recipient_handle}
+                          />
+                          <button
+                            type="submit"
+                            className="ss-btn ss-btn--link"
+                            style={{ color: 'var(--danger)' }}
+                          >
+                            Revoke
+                          </button>
+                        </form>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p style={mutedStyle}>
                   You haven&apos;t shared with any specific handles yet.
                 </p>
               )}
-              <form action={addShareAction} style={formRowStyle}>
+              <form
+                action={addShareAction}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={formRowStyle}>
+                  <input
+                    type="text"
+                    name="recipient_handle"
+                    placeholder="RSI handle"
+                    defaultValue={prefilledHandle}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="mono"
+                    required
+                    maxLength={64}
+                    style={{
+                      flex: '1 1 220px',
+                      padding: '8px 12px',
+                      background: 'var(--bg-elev)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--r-sm)',
+                      color: 'var(--fg)',
+                    }}
+                  />
+                  <input
+                    type="datetime-local"
+                    name="expires_at_local"
+                    aria-label="Auto-expiry (optional)"
+                    title="Leave blank for no expiry"
+                    style={{
+                      flex: '0 1 220px',
+                      padding: '8px 12px',
+                      background: 'var(--bg-elev)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--r-sm)',
+                      color: 'var(--fg)',
+                    }}
+                  />
+                  <button type="submit" className="ss-btn ss-btn--primary">
+                    Grant access
+                  </button>
+                </div>
                 <input
                   type="text"
-                  name="recipient_handle"
-                  placeholder="RSI handle"
-                  defaultValue={prefilledHandle}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="mono"
-                  required
-                  maxLength={64}
+                  name="note"
+                  placeholder="Note (optional, max 280 chars)"
+                  maxLength={280}
+                  aria-label="Note (optional)"
                   style={{
-                    flex: '1 1 220px',
                     padding: '8px 12px',
                     background: 'var(--bg-elev)',
                     border: '1px solid var(--border)',
@@ -467,9 +579,6 @@ export default async function SharingPage(props: {
                     color: 'var(--fg)',
                   }}
                 />
-                <button type="submit" className="ss-btn ss-btn--primary">
-                  Grant access
-                </button>
               </form>
             </div>
           </section>
@@ -576,27 +685,66 @@ export default async function SharingPage(props: {
                 <div
                   style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
                 >
-                  {inbound.shared_with_me.map((entry) => (
-                    <div key={entry.owner_handle} style={sharePillStyle}>
-                      <Link
-                        href={
-                          (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
-                        }
-                        className="mono"
-                        style={{ color: 'var(--fg)' }}
+                  {inbound.shared_with_me.map((entry) => {
+                    const expiryLabel = formatExpiry(entry.expires_at);
+                    return (
+                      <div
+                        key={entry.owner_handle}
+                        style={{ ...sharePillStyle, flexWrap: 'wrap' }}
                       >
-                        @{entry.owner_handle}
-                      </Link>
-                      <Link
-                        href={
-                          (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
-                        }
-                        className="ss-btn ss-btn--link"
-                      >
-                        View profile
-                      </Link>
-                    </div>
-                  ))}
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 2,
+                            flex: 1,
+                            minWidth: 0,
+                          }}
+                        >
+                          <Link
+                            href={
+                              (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
+                            }
+                            className="mono"
+                            style={{ color: 'var(--fg)' }}
+                          >
+                            @{entry.owner_handle}
+                          </Link>
+                          {entry.note && (
+                            <span
+                              style={{
+                                fontSize: 12,
+                                color: 'var(--fg-muted)',
+                              }}
+                            >
+                              {entry.note}
+                            </span>
+                          )}
+                        </div>
+                        {expiryLabel && (
+                          <span
+                            className="ss-badge"
+                            title={entry.expires_at ?? undefined}
+                            style={
+                              expiryLabel === 'expired'
+                                ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
+                                : { color: 'var(--fg-muted)' }
+                            }
+                          >
+                            {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
+                          </span>
+                        )}
+                        <Link
+                          href={
+                            (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
+                          }
+                          className="ss-btn ss-btn--link"
+                        >
+                          View profile
+                        </Link>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p style={mutedStyle}>

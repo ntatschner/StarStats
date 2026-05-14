@@ -2190,6 +2190,14 @@ export interface components {
             sessions: components["schemas"]["SessionDto"][];
         };
         ShareEntry: {
+            /**
+             * Format: date-time
+             * @description Auto-expiry from `share_metadata`. Missing/null means
+             *     "no expiry recorded" — historically all shares look like this.
+             */
+            expires_at?: string | null;
+            /** @description Owner-supplied note from `share_metadata`. */
+            note?: string | null;
             recipient_handle: string;
         };
         ShareOrgRequest: {
@@ -2199,6 +2207,20 @@ export interface components {
             shared_with_org: string;
         };
         ShareRequest: {
+            /**
+             * Format: date-time
+             * @description Optional auto-expiry. ISO-8601 timestamptz. Missing or null
+             *     means "share never expires" (the legacy behaviour from before
+             *     metadata existed). Past timestamps are rejected at the
+             *     handler with 400.
+             */
+            expires_at?: string | null;
+            /**
+             * @description Optional free-text note. Capped at NOTE_MAX_LEN. Empty
+             *     strings collapse to `None` server-side so the column never
+             *     stores `""`.
+             */
+            note?: string | null;
             recipient_handle: string;
         };
         ShareResponse: {
@@ -2209,6 +2231,14 @@ export interface components {
          *     access to their `stats_record`. The mirror of `ShareEntry`.
          */
         SharedWithMeEntry: {
+            /**
+             * Format: date-time
+             * @description Auto-expiry as set by the owner. Surfaced so recipients know
+             *     when access will lapse.
+             */
+            expires_at?: string | null;
+            /** @description Owner-supplied note explaining the grant. */
+            note?: string | null;
             owner_handle: string;
         };
         SignupRequest: {
