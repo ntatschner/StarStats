@@ -23,6 +23,8 @@ import {
   getPublicRsiOrgs,
   getPublicSummary,
   getPublicTimeline,
+  getSummary,
+  getTimeline,
   type ProfileResponse,
   type PublicSummaryResponse,
   type PublicTimelineResponse,
@@ -42,9 +44,36 @@ interface PageProps {
 type View =
   | { kind: 'public'; data: PublicSummaryResponse }
   | { kind: 'shared'; data: PublicSummaryResponse }
+  | { kind: 'self'; data: PublicSummaryResponse }
   | { kind: 'denied' };
 
 async function resolveProfile(handle: string): Promise<View> {
+  // 0. Self path — a signed-in user viewing their own /u/<handle>
+  // would otherwise hit "denied" when their public-visibility toggle
+  // is off. Short-circuit to their authenticated summary so the page
+  // always works as a permalink to themselves. `claimedHandle` is
+  // case-preserved from RSI so compare case-insensitively.
+  const session = await getSession();
+  if (
+    session &&
+    session.claimedHandle.toLowerCase() === handle.toLowerCase()
+  ) {
+    try {
+      const data = await getSummary(session.token);
+      // Structural cast — `SummaryResponse` and `PublicSummaryResponse`
+      // share `by_type` / `claimed_handle` / `total`. Keeping the View
+      // shape aligned avoids a second render path.
+      return { kind: 'self', data: data as PublicSummaryResponse };
+    } catch (e) {
+      // 401 means the cookie outlived the server-side token; fall
+      // through to the public/friend path so the user still sees
+      // something useful instead of a hard error.
+      if (!(e instanceof ApiCallError) || e.status !== 401) {
+        logger.error({ err: e }, 'self summary fetch failed');
+      }
+    }
+  }
+
   // 1. Public path — no auth.
   try {
     const data = await getPublicSummary(handle);
@@ -60,7 +89,6 @@ async function resolveProfile(handle: string): Promise<View> {
 
   // 2. Friend path — only if the visitor is logged in. Same 404 trap
   // applies: don't leak existence.
-  const session = await getSession();
   if (!session) {
     return { kind: 'denied' };
   }
@@ -141,14 +169,24 @@ export default async function PublicProfilePage(props: PageProps) {
     }
   }
 
-  // 30-day activity heatmap. Mirrors the dual-mode resolution above:
-  // the public path uses the no-auth endpoint, the shared path uses
-  // the friend endpoint (which the server gates via SpiceDB shares).
+  // 30-day activity heatmap. Mirrors the tri-mode resolution above:
+  // - self  -> authenticated `/me/timeline` (no visibility gate)
+  // - public -> unauthenticated public endpoint
+  // - shared -> friend endpoint (SpiceDB-gated)
   // 404/403 collapse to "no timeline" — same defensive posture as the
   // profile snapshot above.
   let timeline: PublicTimelineResponse | null = null;
   try {
-    if (view.kind === 'public') {
+    if (view.kind === 'self') {
+      const session = await getSession();
+      if (session) {
+        // `TimelineResponse` shape matches `PublicTimelineResponse`
+        // (same `buckets` + `days` fields) — cast keeps the heatmap
+        // render path single-mode.
+        const own = await getTimeline(session.token, { days: 30 });
+        timeline = own as PublicTimelineResponse;
+      }
+    } else if (view.kind === 'public') {
       timeline = await getPublicTimeline(handle, 30);
     } else {
       const session = await getSession();
@@ -158,7 +196,7 @@ export default async function PublicProfilePage(props: PageProps) {
     }
   } catch (e) {
     if (!(e instanceof ApiCallError) || (e.status !== 404 && e.status !== 403)) {
-      logger.warn({ err: e }, 'public/friend timeline fetch failed');
+      logger.warn({ err: e }, 'public/friend/self timeline fetch failed');
     }
   }
 
@@ -189,7 +227,11 @@ export default async function PublicProfilePage(props: PageProps) {
       >
         <div>
           <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
-            {view.kind === 'public' ? 'Public profile' : 'Shared with you'}
+            {view.kind === 'self'
+              ? 'Your profile'
+              : view.kind === 'public'
+                ? 'Public profile'
+                : 'Shared with you'}
           </div>
           <h1
             style={{
@@ -209,7 +251,12 @@ export default async function PublicProfilePage(props: PageProps) {
               marginTop: 10,
             }}
           >
-            {view.kind === 'public' ? (
+            {view.kind === 'self' ? (
+              <span className="ss-badge ss-badge--accent">
+                <span className="ss-badge-dot" />
+                You
+              </span>
+            ) : view.kind === 'public' ? (
               <span className="ss-badge ss-badge--accent">
                 <span className="ss-badge-dot" />
                 Public profile
@@ -310,21 +357,23 @@ export default async function PublicProfilePage(props: PageProps) {
         </div>
       </section>
 
-      <div
-        style={{
-          padding: '14px 18px',
-          background: 'var(--bg-elev)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--r-sm)',
-          color: 'var(--fg-dim)',
-          fontSize: 12,
-          lineHeight: 1.5,
-        }}
-      >
-        Public profiles show summary + top types only. The detailed
-        timeline is only visible to handles or orgs the owner has
-        explicitly shared with.
-      </div>
+      {view.kind !== 'self' && (
+        <div
+          style={{
+            padding: '14px 18px',
+            background: 'var(--bg-elev)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm)',
+            color: 'var(--fg-dim)',
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          Public profiles show summary + top types only. The detailed
+          timeline is only visible to handles or orgs the owner has
+          explicitly shared with.
+        </div>
+      )}
     </div>
   );
 }
