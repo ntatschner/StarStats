@@ -78,6 +78,13 @@ const KNOWN_BODIES: Record<string, { system: string; display: string }> = {
   crusader: { system: 'Stanton', display: 'Crusader' },
   arccorp: { system: 'Stanton', display: 'ArcCorp' },
   microtech: { system: 'Stanton', display: 'microTech' },
+  // -- Stanton Lagrange-point short codes (engine emits these as
+  //    prefixes in destinations like `HUR_L1_Faithful_Dream`). They
+  //    name the planet they orbit, so we map each to its full body. --
+  hur: { system: 'Stanton', display: 'Hurston' },
+  cru: { system: 'Stanton', display: 'Crusader' },
+  arc: { system: 'Stanton', display: 'ArcCorp' },
+  mic: { system: 'Stanton', display: 'microTech' },
   // -- Stanton moons (Hurston / Crusader / ArcCorp / microTech) --
   aberdeen: { system: 'Stanton', display: 'Aberdeen' },
   arial: { system: 'Stanton', display: 'Arial' },
@@ -358,8 +365,9 @@ function findPlaceMatch(
 // ----- helpers ----------------------------------------------------
 
 /** Drop runtime prefixes ([PROC], LandingArea_, OOC_, NPC_, AI_) and
- *  return the meaningful tokens. */
-function stripAndSplit(raw: string): string[] {
+ *  return the meaningful tokens. Exported so rollup helpers can
+ *  re-tokenize unmapped raws to derive a grouping key. */
+export function stripAndSplit(raw: string): string[] {
   const trimmed = raw.trim().replace(/^\[[A-Z_]+\]/, '');
   return trimmed
     .split('_')

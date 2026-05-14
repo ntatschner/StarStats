@@ -21,6 +21,7 @@ import {
   parseWeaponClass,
   parseItemClass,
   parseLocationClass,
+  stripAndSplit,
 } from '@/lib/class-name-parts';
 import { prettyClass } from '@/lib/reference';
 import type { ReferenceMap } from '@/lib/reference';
@@ -43,6 +44,10 @@ export interface RollupNode {
    *  identifier on the page so we can see exactly what isn't being
    *  recognised by the parser. */
   subtitle?: string;
+  /** When true, the `<details>` for this node renders open on first
+   *  load. Used to surface diagnostic groupings (`Other / unmapped`)
+   *  so users don't need to click to see what's inside. */
+  defaultOpen?: boolean;
 }
 
 export function HierarchicalBucketList({
@@ -88,7 +93,7 @@ function TopRow({ node, max }: { node: RollupNode; max: number }) {
   }
   const childMax = Math.max(...node.children!.map((c) => c.count), 1);
   return (
-    <details>
+    <details open={node.defaultOpen ?? undefined}>
       <summary style={{ cursor: 'pointer', listStyle: 'none' }}>
         <BarRow
           label={node.label}
@@ -146,7 +151,7 @@ function ChildRow({
   }
   const grandMax = Math.max(...node.children!.map((c) => c.count), 1);
   return (
-    <details>
+    <details open={node.defaultOpen ?? undefined}>
       <summary style={{ cursor: 'pointer', listStyle: 'none' }}>
         <BarRow
           label={node.label}
@@ -504,29 +509,69 @@ export function rollUpLocations(
     };
   });
   if (unknownPlaces.size > 0) {
-    const orphanChildren: RollupNode[] = [...unknownPlaces.entries()]
-      .map(([place, entry]) => ({
+    // Group orphans by their leading token so `Other / unmapped`
+    // gets the same expandable tree shape Stanton / Pyro have,
+    // instead of being a single flat list. The leading token is
+    // usually a system/body short-code we don't yet recognise
+    // (e.g. `Pyro` jump variants, custom outpost prefixes), so
+    // grouping on it surfaces the patterns that need adding to
+    // the parser dictionaries.
+    const groupMap = new Map<string, RollupNode[]>();
+    for (const [place, entry] of unknownPlaces) {
+      // Tokenize the *first* raw — entries that share a display
+      // place but came from different leading tokens are rare,
+      // and picking the first keeps the math simple. The full
+      // raws list is still shown in the subtitle.
+      const tokens = stripAndSplit(entry.raws[0]);
+      const groupKey = tokens[0] ?? '(no leading token)';
+      const leaf: RollupNode = {
         label: place,
         count: entry.count,
         title: entry.raws.join(' · '),
-        // Surface the raw class identifier(s) as a visible subtitle
-        // so we can see exactly which strings aren't being matched
-        // by the parser. When several raw values collapse into the
-        // same display label (`Lorville Tower` and `LORVILLE_TOWER`
-        // both title-case the same way), they all get listed so we
-        // can spot duplicates that need a single canonical mapping.
-        subtitle: entry.raws.slice(0, 3).join(', ') +
-          (entry.raws.length > 3 ? ` (+${entry.raws.length - 3} more)` : ''),
-      }))
+        // Surface every raw identifier so we can pattern-spot what
+        // needs adding to KNOWN_BODIES / KNOWN_PLACES.
+        subtitle:
+          entry.raws.slice(0, 3).join(', ') +
+          (entry.raws.length > 3
+            ? ` (+${entry.raws.length - 3} more)`
+            : ''),
+      };
+      const list = groupMap.get(groupKey) ?? [];
+      list.push(leaf);
+      groupMap.set(groupKey, list);
+    }
+    const orphanGroups: RollupNode[] = [...groupMap.entries()]
+      .map(([token, places]) => {
+        const total = places.reduce((a, p) => a + p.count, 0);
+        return {
+          label: titleCaseSnake(token),
+          count: total,
+          children: places.sort((a, b) => b.count - a.count),
+        };
+      })
       .sort((a, b) => b.count - a.count);
-    const orphanTotal = orphanChildren.reduce((a, c) => a + c.count, 0);
+    const orphanTotal = orphanGroups.reduce((a, c) => a + c.count, 0);
     nodes.push({
       label: 'Other / unmapped',
       count: orphanTotal,
-      children: orphanChildren,
+      children: orphanGroups,
+      // Open by default — the whole point of this bucket is to
+      // expose what isn't being matched. Hiding it behind a click
+      // would defeat the purpose.
+      defaultOpen: true,
     });
   }
   return nodes.sort((a, b) => b.count - a.count);
+}
+
+/** Title-case a snake_case or single-word token for display. */
+function titleCaseSnake(s: string): string {
+  if (!s) return '(no name)';
+  return s
+    .split('_')
+    .filter((p) => p.length > 0)
+    .map((p) => p[0].toUpperCase() + p.slice(1).toLowerCase())
+    .join(' ');
 }
 
 function stripDuplicateMfr(label: string, mfr: string): string {
