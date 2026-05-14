@@ -28,6 +28,7 @@ import {
   type PublicTimelineResponse,
   type RsiOrgsSnapshot,
 } from '@/lib/api';
+import { formatEventType } from '@/lib/event-types';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { DayHeatmap } from '@/components/DayHeatmap';
@@ -241,7 +242,9 @@ export default async function PublicProfilePage(props: PageProps) {
         />
         <PublicStatTile
           eyebrow="Top signal"
-          value={topTypes[0]?.event_type ?? '—'}
+          value={
+            topTypes[0] ? formatEventType(topTypes[0].event_type).label : '—'
+          }
         />
         <PublicStatTile
           eyebrow="Top count"
@@ -393,7 +396,7 @@ function PublicTypeBars({
             }}
           >
             <span
-              className="mono"
+              title={t.event_type}
               style={{
                 color: 'var(--accent)',
                 textAlign: 'left',
@@ -401,9 +404,15 @@ function PublicTypeBars({
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
+                display: 'inline-flex',
+                gap: 6,
+                alignItems: 'baseline',
               }}
             >
-              {t.event_type}
+              <span aria-hidden="true">
+                {formatEventType(t.event_type).glyph}
+              </span>
+              <span>{formatEventType(t.event_type).label}</span>
             </span>
             <span
               style={{

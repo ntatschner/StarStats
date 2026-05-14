@@ -26,6 +26,7 @@ import {
   type ReferenceLookup,
 } from '@/lib/reference';
 import { formatEventSummary } from '@/lib/event-summary';
+import { formatEventType } from '@/lib/event-types';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { LocationPill } from '@/components/LocationPill';
@@ -210,7 +211,9 @@ export default async function DashboardPage(props: {
     0,
   );
   const rangeShort = range === 'all' ? '1y' : range;
-  const topTypeLabel = topTypes[0]?.event_type ?? '—';
+  const topTypeLabel = topTypes[0]
+    ? formatEventType(topTypes[0].event_type).label
+    : '—';
 
   // Pager cursors. The API returns DESC by default for unparametrised
   // calls, so the largest seq is "newest" and the smallest is "oldest".
@@ -459,10 +462,11 @@ export default async function DashboardPage(props: {
               <div style={{ padding: '16px 24px 22px' }}>
                 {eventType && (
                   <div style={{ marginBottom: 12 }}>
-                    <span className="ss-badge ss-badge--accent">
+                    <span className="ss-badge ss-badge--accent" title={eventType}>
                       Filter:{' '}
-                      <span className="mono" style={{ marginLeft: 6 }}>
-                        type={eventType}
+                      <span style={{ marginLeft: 6 }}>
+                        {formatEventType(eventType).glyph}{' '}
+                        {formatEventType(eventType).label}
                       </span>
                     </span>{' '}
                     <Link
@@ -571,41 +575,6 @@ function formatTime(iso: string | null): string {
   return parsed.toLocaleTimeString();
 }
 
-/** Per-type accent colour mapping for the timeline border-left rail.
- * Mirrors the legacy `.timeline__item--*` rules but routed through
- * design tokens so themes still recolour cleanly. */
-function eventBorderColor(eventType: string): string {
-  switch (eventType) {
-    case 'quantum_target_selected':
-      return 'var(--accent)';
-    case 'vehicle_stowed':
-    case 'burst_summary':
-    case 'shop_buy_request':
-    case 'shop_flow_response':
-    case 'commodity_buy_request':
-    case 'commodity_sell_request':
-      // Bursts collapse repetitive events into one summary row;
-      // share the `--info` accent with `vehicle_stowed` since those
-      // members are now folded into the summary in most cases.
-      // Shop / commodity transactions also share this neutral
-      // informational accent — they're activity, not incident.
-      return 'var(--info)';
-    case 'actor_death':
-    case 'vehicle_destruction':
-    case 'player_death':
-    case 'player_incapacitated':
-    case 'game_crash':
-      return 'var(--danger)';
-    case 'legacy_login':
-    case 'join_pu':
-    case 'mission_start':
-    case 'mission_end':
-      return 'var(--ok)';
-    default:
-      return 'var(--border-strong)';
-  }
-}
-
 /** Stat-strip tile. Mirrors design/prototype/app-screens.jsx Dashboard. */
 function StatTile({
   eyebrow,
@@ -691,7 +660,7 @@ function TypeBars({
           >
             <Link
               href={buildHref({ type: t.event_type })}
-              className="mono"
+              title={t.event_type}
               style={{
                 color: 'var(--accent)',
                 textAlign: 'left',
@@ -700,9 +669,15 @@ function TypeBars({
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
                 textDecoration: 'none',
+                display: 'inline-flex',
+                gap: 6,
+                alignItems: 'baseline',
               }}
             >
-              {t.event_type}
+              <span aria-hidden="true">
+                {formatEventType(t.event_type).glyph}
+              </span>
+              <span>{formatEventType(t.event_type).label}</span>
             </Link>
             <span
               style={{
@@ -775,7 +750,7 @@ function Timeline({
             gap: 14,
             alignItems: 'baseline',
             padding: '10px 12px',
-            borderLeft: `2px solid ${eventBorderColor(e.event_type)}`,
+            borderLeft: `2px solid ${formatEventType(e.event_type).accent}`,
             marginLeft: 4,
             fontSize: 13,
           }}

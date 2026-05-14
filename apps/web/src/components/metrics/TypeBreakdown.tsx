@@ -12,6 +12,7 @@
 'use client';
 
 import { useChartTheme, type ChartTheme } from '@/lib/recharts-theme';
+import { formatEventType } from '@/lib/event-types';
 import { ChartCard } from './ChartCard';
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 
@@ -40,7 +41,25 @@ export function TypeBreakdown(props: TypeBreakdownProps) {
   const top = sorted.slice(0, topN);
   const rest = sorted.slice(topN);
   const restCount = rest.reduce((s, t) => s + t.count, 0);
-  const slices = restCount > 0 ? [...top, { event_type: 'Other', count: restCount }] : top;
+  // Decorate each slice with the humanized label + glyph once so
+  // both the chart nameKey and the visible list draw from one
+  // source. "Other" is a synthetic aggregator (not a real
+  // event_type), so it gets a static presentation rather than a
+  // mapper lookup that would title-case it.
+  const decorate = (row: TypeBreakdownRow, isOther = false) => {
+    if (isOther) {
+      return { ...row, label: 'Other', glyph: '⋯' };
+    }
+    const meta = formatEventType(row.event_type);
+    return { ...row, label: meta.label, glyph: meta.glyph };
+  };
+  const slices =
+    restCount > 0
+      ? [
+          ...top.map((t) => decorate(t)),
+          decorate({ event_type: 'Other', count: restCount }, true),
+        ]
+      : top.map((t) => decorate(t));
   const ramp = buildRamp(theme);
 
   return (
@@ -66,7 +85,7 @@ export function TypeBreakdown(props: TypeBreakdownProps) {
           <tbody>
             {sorted.map((t) => (
               <tr key={t.event_type}>
-                <td>{t.event_type}</td>
+                <td>{formatEventType(t.event_type).label}</td>
                 <td>{t.count}</td>
                 <td>{total > 0 ? `${((t.count / total) * 100).toFixed(1)}%` : '—'}</td>
               </tr>
@@ -82,7 +101,7 @@ export function TypeBreakdown(props: TypeBreakdownProps) {
               <Pie
                 data={slices}
                 dataKey="count"
-                nameKey="event_type"
+                nameKey="label"
                 innerRadius="55%"
                 outerRadius="92%"
                 stroke="none"
@@ -146,8 +165,18 @@ export function TypeBreakdown(props: TypeBreakdownProps) {
                         flex: '0 0 8px',
                       }}
                     />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {s.event_type}
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        display: 'inline-flex',
+                        gap: 6,
+                        alignItems: 'baseline',
+                      }}
+                      title={s.event_type}
+                    >
+                      <span aria-hidden="true">{s.glyph}</span>
+                      <span>{s.label}</span>
                     </span>
                   </div>
                   <div

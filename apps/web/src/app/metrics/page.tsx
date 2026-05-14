@@ -33,6 +33,7 @@ import {
   type TimelineResponse,
 } from '@/lib/api';
 import { formatEventSummary } from '@/lib/event-summary';
+import { formatEventType } from '@/lib/event-types';
 import {
   EMPTY_REFERENCE_LOOKUP,
   loadAllReferences,
@@ -444,9 +445,8 @@ function OverviewTab({
         />
         <StatTile
           eyebrow="Top type"
-          value={topType?.event_type ?? '—'}
+          value={topType ? formatEventType(topType.event_type).label : '—'}
           hint={topType ? `${topType.count.toLocaleString()} captures` : ''}
-          mono
         />
       </div>
 
@@ -526,8 +526,11 @@ function OverviewTab({
                           gridColumn: '1 / -1',
                         }}
                       >
-                        <span className="mono" style={{ fontSize: 13 }}>
-                          {t.event_type}
+                        <span style={{ fontSize: 13 }} title={t.event_type}>
+                          <span aria-hidden="true" style={{ marginRight: 6 }}>
+                            {formatEventType(t.event_type).glyph}
+                          </span>
+                          {formatEventType(t.event_type).label}
                         </span>
                         <span
                           className="mono"
@@ -720,10 +723,19 @@ function TypeRow({ t, total }: { t: EventTypeStatsDto; total: number }) {
       <td>
         <Link
           href={rawHref({ type: t.event_type })}
-          className="mono"
-          style={{ color: 'var(--accent)', textDecoration: 'none' }}
+          title={t.event_type}
+          style={{
+            color: 'var(--accent)',
+            textDecoration: 'none',
+            display: 'inline-flex',
+            gap: 6,
+            alignItems: 'baseline',
+          }}
         >
-          {t.event_type}
+          <span aria-hidden="true">
+            {formatEventType(t.event_type).glyph}
+          </span>
+          <span>{formatEventType(t.event_type).label}</span>
         </Link>
       </td>
       <td style={{ textAlign: 'right' }} className="mono">
@@ -979,10 +991,11 @@ function RawTab({
       <div style={{ padding: '16px 24px 22px' }}>
         {eventType && (
           <div style={{ marginBottom: 12 }}>
-            <span className="ss-badge ss-badge--accent">
+            <span className="ss-badge ss-badge--accent" title={eventType}>
               Filter:{' '}
-              <span className="mono" style={{ marginLeft: 6 }}>
-                type={eventType}
+              <span style={{ marginLeft: 6 }}>
+                {formatEventType(eventType).glyph}{' '}
+                {formatEventType(eventType).label}
               </span>
             </span>{' '}
             <Link
@@ -1096,9 +1109,19 @@ function RawRow({
       </span>
       <Link
         href={rawHref({ type: e.event_type })}
-        style={{ color: 'var(--accent)', textDecoration: 'none' }}
+        title={e.event_type}
+        style={{
+          color: 'var(--accent)',
+          textDecoration: 'none',
+          display: 'inline-flex',
+          gap: 6,
+          alignItems: 'baseline',
+        }}
       >
-        {e.event_type}
+        <span aria-hidden="true">
+          {formatEventType(e.event_type).glyph}
+        </span>
+        <span>{formatEventType(e.event_type).label}</span>
       </Link>
       <span style={{ color: 'var(--fg-muted)' }}>
         {formatEventSummary(e.payload, references)}
