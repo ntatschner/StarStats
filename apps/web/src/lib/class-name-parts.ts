@@ -56,15 +56,86 @@ const MANUFACTURER_NAMES: Record<string, string> = {
 
 /** Solar-system head tokens we recognise. The list stays short so a
  *  miss falls through to "Unknown" rather than mis-attributing a
- *  random first segment as a system name. */
-const KNOWN_SYSTEMS = new Set([
-  'Stanton',
-  'Pyro',
-  'Nyx',
-  'Castra',
-  'Terra',
-  'Sol',
-]);
+ *  random first segment as a system name. Matched case-insensitively
+ *  via `findSystem()` so `STANTON` / `stanton` / `Stanton` all
+ *  resolve. The value is the canonical display form. */
+const KNOWN_SYSTEMS: Record<string, string> = {
+  stanton: 'Stanton',
+  pyro: 'Pyro',
+  nyx: 'Nyx',
+  castra: 'Castra',
+  terra: 'Terra',
+  sol: 'Sol',
+};
+
+/** Map from a body token (case-insensitive lookup key) to its parent
+ *  system. Used when the raw destination omits the system prefix —
+ *  e.g. `Hurston_Lorville` should still land under Stanton. Value is
+ *  the canonical body display form. */
+const KNOWN_BODIES: Record<string, { system: string; display: string }> = {
+  // -- Stanton planets --
+  hurston: { system: 'Stanton', display: 'Hurston' },
+  crusader: { system: 'Stanton', display: 'Crusader' },
+  arccorp: { system: 'Stanton', display: 'ArcCorp' },
+  microtech: { system: 'Stanton', display: 'microTech' },
+  // -- Stanton moons (Hurston / Crusader / ArcCorp / microTech) --
+  aberdeen: { system: 'Stanton', display: 'Aberdeen' },
+  arial: { system: 'Stanton', display: 'Arial' },
+  magda: { system: 'Stanton', display: 'Magda' },
+  ita: { system: 'Stanton', display: 'Ita' },
+  cellin: { system: 'Stanton', display: 'Cellin' },
+  daymar: { system: 'Stanton', display: 'Daymar' },
+  yela: { system: 'Stanton', display: 'Yela' },
+  wala: { system: 'Stanton', display: 'Wala' },
+  lyria: { system: 'Stanton', display: 'Lyria' },
+  calliope: { system: 'Stanton', display: 'Calliope' },
+  clio: { system: 'Stanton', display: 'Clio' },
+  euterpe: { system: 'Stanton', display: 'Euterpe' },
+  // -- Pyro planets / dwarfs --
+  bloom: { system: 'Pyro', display: 'Bloom' },
+  monox: { system: 'Pyro', display: 'Monox' },
+  terminus: { system: 'Pyro', display: 'Terminus' },
+  // -- Pyro V moons --
+  adir: { system: 'Pyro', display: 'Adir' },
+  vatra: { system: 'Pyro', display: 'Vatra' },
+  vuur: { system: 'Pyro', display: 'Vuur' },
+  fairo: { system: 'Pyro', display: 'Fairo' },
+  fuego: { system: 'Pyro', display: 'Fuego' },
+  ignis: { system: 'Pyro', display: 'Ignis' },
+};
+
+/** Map from a place token to its hierarchy. Covers the user-visible
+ *  cities, stations, and outposts that show up in event payloads
+ *  without a system/body prefix (e.g. `Orison_LOC`, `GrimHEX`). When
+ *  the raw place spans multiple segments (`Port_Olisar`,
+ *  `New_Babbage`), the joined form is also keyed so the lookup hits
+ *  either way. */
+const KNOWN_PLACES: Record<
+  string,
+  { system: string; body: string; display: string }
+> = {
+  // -- Stanton cities --
+  lorville: { system: 'Stanton', body: 'Hurston', display: 'Lorville' },
+  orison: { system: 'Stanton', body: 'Crusader', display: 'Orison' },
+  area18: { system: 'Stanton', body: 'ArcCorp', display: 'Area18' },
+  newbabbage: { system: 'Stanton', body: 'microTech', display: 'New Babbage' },
+  babbage: { system: 'Stanton', body: 'microTech', display: 'New Babbage' },
+  // -- Stanton stations --
+  grimhex: { system: 'Stanton', body: 'Yela', display: 'GrimHEX' },
+  portolisar: { system: 'Stanton', body: 'Crusader', display: 'Port Olisar' },
+  olisar: { system: 'Stanton', body: 'Crusader', display: 'Port Olisar' },
+  everusharbor: { system: 'Stanton', body: 'Hurston', display: 'Everus Harbor' },
+  porttressler: { system: 'Stanton', body: 'microTech', display: 'Port Tressler' },
+  baijinipoint: { system: 'Stanton', body: 'ArcCorp', display: 'Baijini Point' },
+  seraphim: { system: 'Stanton', body: 'Crusader', display: 'Seraphim Station' },
+  kareah: { system: 'Stanton', body: 'Crusader', display: 'Security Post Kareah' },
+  // -- Pyro --
+  ruinstation: { system: 'Pyro', body: 'Pyro V', display: 'Ruin Station' },
+  endgame: { system: 'Pyro', body: 'Pyro V', display: 'Endgame' },
+  checkmate: { system: 'Pyro', body: 'Pyro V', display: 'Checkmate' },
+  rappel: { system: 'Pyro', body: 'Pyro V', display: 'Rappel' },
+  starlight: { system: 'Pyro', body: 'Pyro V', display: 'Starlight Service Station' },
+};
 
 /** Match S2 / Mk3 / V1 etc. — uppercased on render. */
 const SIZE_PATTERNS: RegExp[] = [
@@ -152,37 +223,136 @@ export interface LocationParts {
 }
 
 /** Parse a location / destination / planet identifier into
- *  system / body / place. Best-effort — falls back gracefully when
- *  the format isn't recognised. */
+ *  system / body / place. Best-effort — three tiers, in order:
+ *    1. Leading-system match (`OOC_Stanton_2_Crusader`)
+ *    2. Body match (`Hurston_Lorville` → infer Stanton)
+ *    3. Place match (`Orison_LOC` → infer Stanton/Crusader/Orison)
+ *  Only falls through to "no system" for truly unrecognised tokens. */
 export function parseLocationClass(raw: string): LocationParts {
   const parts = stripAndSplit(raw);
   if (parts.length === 0) {
     return { system: null, body: null, place: null, raw };
   }
-  const systemIdx = parts.findIndex((p) => KNOWN_SYSTEMS.has(p));
-  if (systemIdx === -1) {
+
+  // Tier 1 — system token in the segments.
+  const systemIdx = parts.findIndex((p) => KNOWN_SYSTEMS[p.toLowerCase()]);
+  if (systemIdx !== -1) {
+    const system = KNOWN_SYSTEMS[parts[systemIdx].toLowerCase()];
+    const tail = parts.slice(systemIdx + 1).filter((p) => !isPlanetIndex(p));
+    return resolveAfterSystem(system, tail, raw);
+  }
+
+  // Tier 2 — body token anywhere in the segments.
+  const namedParts = parts.filter((p) => !isPlanetIndex(p));
+  const bodyIdx = namedParts.findIndex((p) => KNOWN_BODIES[p.toLowerCase()]);
+  if (bodyIdx !== -1) {
+    const bodyMeta = KNOWN_BODIES[namedParts[bodyIdx].toLowerCase()];
+    const after = namedParts.slice(bodyIdx + 1);
+    const place =
+      after.length > 0 ? resolvePlace(after) : null;
     return {
-      system: null,
-      body: null,
-      place: titleCase(splitCamelCase(parts.join(' '))),
+      system: bodyMeta.system,
+      body: bodyMeta.display,
+      place,
       raw,
     };
   }
-  const system = parts[systemIdx];
-  const tail = parts.slice(systemIdx + 1);
-  // Tail like ['2b', 'Daymar'] → body=Daymar (drop the index token).
-  // Tail like ['1', 'Hurston', 'Lorville'] → body=Hurston, place=Lorville.
-  // Tail like ['2', 'Crusader'] → body=Crusader.
-  const namedTail = tail.filter((p) => !isPlanetIndex(p));
-  let body: string | null = null;
-  let place: string | null = null;
-  if (namedTail.length === 1) {
-    body = titleCase(splitCamelCase(namedTail[0]));
-  } else if (namedTail.length >= 2) {
-    body = titleCase(splitCamelCase(namedTail[0]));
-    place = titleCase(splitCamelCase(namedTail.slice(1).join(' ')));
+
+  // Tier 3 — place token anywhere in the segments. Try the longest
+  // joined form first so multi-word place names match before their
+  // individual tokens (`Port_Olisar` should win over `Olisar`).
+  const placeHit = findPlaceMatch(namedParts);
+  if (placeHit) {
+    return {
+      system: placeHit.system,
+      body: placeHit.body,
+      place: placeHit.display,
+      raw,
+    };
   }
-  return { system, body, place, raw };
+
+  // No tier matched — keep the title-cased whole as a place under
+  // "Other / unmapped". Genuinely unrecognised destinations.
+  return {
+    system: null,
+    body: null,
+    place: titleCase(splitCamelCase(parts.join(' '))),
+    raw,
+  };
+}
+
+/** Tail after the system was matched — figure out body / place. */
+function resolveAfterSystem(
+  system: string,
+  namedTail: string[],
+  raw: string,
+): LocationParts {
+  if (namedTail.length === 0) {
+    return { system, body: null, place: null, raw };
+  }
+  // Prefer a known-body match in the tail. Otherwise the first
+  // segment is treated as the body (matches legacy behavior).
+  const bodyIdx = namedTail.findIndex((p) => KNOWN_BODIES[p.toLowerCase()]);
+  if (bodyIdx !== -1) {
+    const bodyMeta = KNOWN_BODIES[namedTail[bodyIdx].toLowerCase()];
+    const after = namedTail.slice(bodyIdx + 1);
+    return {
+      system,
+      body: bodyMeta.display,
+      place: after.length > 0 ? resolvePlace(after) : null,
+      raw,
+    };
+  }
+  if (namedTail.length === 1) {
+    return {
+      system,
+      body: titleCase(splitCamelCase(namedTail[0])),
+      place: null,
+      raw,
+    };
+  }
+  return {
+    system,
+    body: titleCase(splitCamelCase(namedTail[0])),
+    place: titleCase(splitCamelCase(namedTail.slice(1).join(' '))),
+    raw,
+  };
+}
+
+/** Render a place from one or more trailing segments. Prefers a
+ *  catalog hit (so `Olisar` becomes "Port Olisar") and falls back to
+ *  title-cased camel-case splitting. */
+function resolvePlace(parts: string[]): string {
+  // Try the joined form first (`Port_Olisar` → `portolisar` key).
+  const joined = parts.join('').toLowerCase();
+  if (KNOWN_PLACES[joined]) {
+    return KNOWN_PLACES[joined].display;
+  }
+  // Then any single segment (`Olisar` → `olisar` key).
+  for (const p of parts) {
+    const hit = KNOWN_PLACES[p.toLowerCase()];
+    if (hit) return hit.display;
+  }
+  return titleCase(splitCamelCase(parts.join(' ')));
+}
+
+/** Walk segments looking for a place match (single or joined).
+ *  Returns the full hierarchy when found. */
+function findPlaceMatch(
+  parts: string[],
+):
+  | { system: string; body: string; display: string }
+  | null {
+  // Try the full joined form first (catches `Port_Olisar`,
+  // `New_Babbage` even when there's no system/body context).
+  const joined = parts.join('').toLowerCase();
+  if (KNOWN_PLACES[joined]) return KNOWN_PLACES[joined];
+  // Then each individual segment.
+  for (const p of parts) {
+    const hit = KNOWN_PLACES[p.toLowerCase()];
+    if (hit) return hit;
+  }
+  return null;
 }
 
 // ----- helpers ----------------------------------------------------
