@@ -38,6 +38,11 @@ export interface RollupNode {
   /** Optional tooltip — usually the raw class identifier so power
    *  users can cross-reference the wiki. */
   title?: string;
+  /** Optional inline subtitle rendered under the label. Used by the
+   *  `Other / unmapped` location bucket to expose the raw class
+   *  identifier on the page so we can see exactly what isn't being
+   *  recognised by the parser. */
+  subtitle?: string;
 }
 
 export function HierarchicalBucketList({
@@ -77,6 +82,7 @@ function TopRow({ node, max }: { node: RollupNode; max: number }) {
         pct={pct}
         badges={node.badges}
         title={node.title}
+        subtitle={node.subtitle}
       />
     );
   }
@@ -90,6 +96,7 @@ function TopRow({ node, max }: { node: RollupNode; max: number }) {
           pct={pct}
           badges={node.badges}
           title={node.title}
+        subtitle={node.subtitle}
           isGroup
         />
       </summary>
@@ -132,6 +139,7 @@ function ChildRow({
         pct={pct}
         badges={node.badges}
         title={node.title}
+        subtitle={node.subtitle}
         compact
       />
     );
@@ -146,6 +154,7 @@ function ChildRow({
           pct={pct}
           badges={node.badges}
           title={node.title}
+        subtitle={node.subtitle}
           isGroup
           compact
         />
@@ -172,6 +181,7 @@ function ChildRow({
                 pct={gpct}
                 badges={grand.badges}
                 title={grand.title}
+                subtitle={grand.subtitle}
                 compact
               />
             </li>
@@ -188,6 +198,7 @@ function BarRow({
   pct,
   badges,
   title,
+  subtitle,
   isGroup = false,
   compact = false,
 }: {
@@ -196,6 +207,7 @@ function BarRow({
   pct: number;
   badges?: Array<{ text: string; count: number }>;
   title?: string;
+  subtitle?: string;
   isGroup?: boolean;
   compact?: boolean;
 }) {
@@ -216,38 +228,61 @@ function BarRow({
             color: 'var(--fg)',
             overflow: 'hidden',
             display: 'flex',
-            gap: 6,
-            alignItems: 'baseline',
-            flexWrap: 'wrap',
+            flexDirection: 'column',
+            gap: 1,
           }}
           title={title}
         >
-          {isGroup && (
+          <span
+            style={{
+              display: 'flex',
+              gap: 6,
+              alignItems: 'baseline',
+              flexWrap: 'wrap',
+            }}
+          >
+            {isGroup && (
+              <span
+                aria-hidden="true"
+                style={{
+                  color: 'var(--fg-dim)',
+                  fontSize: 10,
+                  lineHeight: 1,
+                }}
+              >
+                ▸
+              </span>
+            )}
+            <span className="mono">{label}</span>
+            {badges?.map((b) => (
+              <span
+                key={b.text}
+                className="ss-badge"
+                style={{
+                  fontSize: 10,
+                  padding: '1px 6px',
+                  fontVariant: 'tabular-nums',
+                }}
+              >
+                {b.text} ×{b.count}
+              </span>
+            ))}
+          </span>
+          {subtitle && (
             <span
-              aria-hidden="true"
+              className="mono"
               style={{
-                color: 'var(--fg-dim)',
                 fontSize: 10,
-                lineHeight: 1,
+                color: 'var(--fg-dim)',
+                opacity: 0.75,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
               }}
             >
-              ▸
+              {subtitle}
             </span>
           )}
-          <span className="mono">{label}</span>
-          {badges?.map((b) => (
-            <span
-              key={b.text}
-              className="ss-badge"
-              style={{
-                fontSize: 10,
-                padding: '1px 6px',
-                fontVariant: 'tabular-nums',
-              }}
-            >
-              {b.text} ×{b.count}
-            </span>
-          ))}
         </span>
         <span
           className="mono"
@@ -474,6 +509,14 @@ export function rollUpLocations(
         label: place,
         count: entry.count,
         title: entry.raws.join(' · '),
+        // Surface the raw class identifier(s) as a visible subtitle
+        // so we can see exactly which strings aren't being matched
+        // by the parser. When several raw values collapse into the
+        // same display label (`Lorville Tower` and `LORVILLE_TOWER`
+        // both title-case the same way), they all get listed so we
+        // can spot duplicates that need a single canonical mapping.
+        subtitle: entry.raws.slice(0, 3).join(', ') +
+          (entry.raws.length > 3 ? ` (+${entry.raws.length - 3} more)` : ''),
       }))
       .sort((a, b) => b.count - a.count);
     const orphanTotal = orphanChildren.reduce((a, c) => a + c.count, 0);

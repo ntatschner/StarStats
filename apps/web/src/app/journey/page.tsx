@@ -57,9 +57,8 @@ import {
 } from '@/components/journey/RangeBar';
 import { logger } from '@/lib/logger';
 import {
-  loadAllReferences,
+  getReferences,
   prettyClass,
-  type ReferenceMap,
 } from '@/lib/reference';
 import { getSession } from '@/lib/session';
 
@@ -106,13 +105,13 @@ export default async function JourneyPage(props: {
   const hours = rangeToHours(range);
 
   // Stats tabs aggregate by raw `class_name` server-side, so we
-  // humanize the bucket labels client-side. Load the catalog only
-  // for tabs that need it; LocationTab / CommerceTab don't.
-  const needsReferences =
-    view === 'travel' ||
-    view === 'combat' ||
-    view === 'loadout';
-  const references = needsReferences ? await loadAllReferences() : null;
+  // humanize the bucket labels client-side. Each tab loads only the
+  // catalog categories it needs, in parallel with its stats fetch —
+  // see TravelTab / CombatTab / LoadoutTab below. The page-level
+  // `loadAllReferences()` we used to call here blocked the whole
+  // render on the 20K-entry items map even when the active tab
+  // didn't need it; cutting it removes the worst sequential wait.
+  //
   // Location uses fixed sub-windows (24h / 7d) per its UX titles —
   // the chip row would be misleading there. Every other tab honors
   // the range. The server's commerce endpoint now accepts hours too
@@ -161,26 +160,13 @@ export default async function JourneyPage(props: {
         <LocationTab token={session.token} />
       )}
       {view === 'travel' && (
-        <TravelTab
-          token={session.token}
-          locations={references!.locations}
-          hours={hours}
-        />
+        <TravelTab token={session.token} hours={hours} />
       )}
       {view === 'combat' && (
-        <CombatTab
-          token={session.token}
-          weapons={references!.weapons}
-          locations={references!.locations}
-          hours={hours}
-        />
+        <CombatTab token={session.token} hours={hours} />
       )}
       {view === 'loadout' && (
-        <LoadoutTab
-          token={session.token}
-          items={references!.items}
-          hours={hours}
-        />
+        <LoadoutTab token={session.token} hours={hours} />
       )}
       {view === 'stability' && (
         <StabilityTab token={session.token} hours={hours} />
@@ -319,16 +305,22 @@ async function LocationTab({ token }: { token: string }) {
 
 async function TravelTab({
   token,
-  locations,
   hours,
 }: {
   token: string;
-  locations: ReferenceMap;
   hours: number;
 }) {
   let stats: TravelStatsResponse;
+  let locations;
   try {
-    stats = await getTravelStats(token, hours);
+    // Run stats + locations catalog in parallel so the slower of
+    // the two governs total wait, not the sum. Travel only needs
+    // the locations category — vehicles/weapons/items would be
+    // wasted bytes on this tab.
+    [stats, locations] = await Promise.all([
+      getTravelStats(token, hours),
+      getReferences('location'),
+    ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=travel');
@@ -357,18 +349,22 @@ async function TravelTab({
 
 async function CombatTab({
   token,
-  weapons,
-  locations,
   hours,
 }: {
   token: string;
-  weapons: ReferenceMap;
-  locations: ReferenceMap;
   hours: number;
 }) {
   let stats: CombatStatsResponse;
+  let weapons;
+  let locations;
   try {
-    stats = await getCombatStats(token, hours);
+    // Stats + weapons + locations in parallel. Combat doesn't need
+    // vehicles or items, so we skip those two big maps entirely.
+    [stats, weapons, locations] = await Promise.all([
+      getCombatStats(token, hours),
+      getReferences('weapon'),
+      getReferences('location'),
+    ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=combat');
@@ -469,16 +465,21 @@ function KdTile({
 
 async function LoadoutTab({
   token,
-  items,
   hours,
 }: {
   token: string;
-  items: ReferenceMap;
   hours: number;
 }) {
   let stats: LoadoutStatsResponse;
+  let items;
   try {
-    stats = await getLoadoutStats(token, hours);
+    // Loadout is the only stats tab that genuinely needs the items
+    // category (~20K entries). Still worth parallelising with stats
+    // so the latencies overlap.
+    [stats, items] = await Promise.all([
+      getLoadoutStats(token, hours),
+      getReferences('item'),
+    ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/journey?view=loadout');
