@@ -62,6 +62,7 @@ pub fn routes(
 
     let share_no_state_router: Router = Router::new()
         .route("/v1/me/shares", get(list_shares))
+        .route("/v1/me/shared-with-me", get(list_shared_with_me))
         .route("/v1/me/share/:recipient_handle", delete(delete_share));
 
     let share_org_post_router = Router::new()
@@ -146,6 +147,24 @@ pub struct ListSharesResponse {
     /// checks.
     #[serde(default)]
     pub org_shares: Vec<OrgShareEntry>,
+}
+
+/// One inbound share: an owner who has granted the caller view
+/// access to their `stats_record`. The mirror of `ShareEntry`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SharedWithMeEntry {
+    pub owner_handle: String,
+}
+
+/// Response for `GET /v1/me/shared-with-me` — the inbound side of
+/// per-user sharing. Org-mediated shares (org membership ->
+/// `share_with_org`) are not enumerated here because they're a
+/// transitive grant rather than a direct one; the org list comes
+/// from `/v1/orgs/me` and the shares-to-that-org list lives under
+/// org detail pages.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ListSharedWithMeResponse {
+    pub shared_with_me: Vec<SharedWithMeEntry>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -581,6 +600,62 @@ pub async fn list_shares(
         Json(ListSharesResponse {
             shares: user_shares,
             org_shares,
+        }),
+    )
+        .into_response()
+}
+
+// -- /v1/me/shared-with-me -----------------------------------------
+
+#[utoipa::path(
+    get,
+    path = "/v1/me/shared-with-me",
+    tag = "sharing",
+    responses(
+        (
+            status = 200,
+            description = "List of owner handles who have shared their stats_record with the caller",
+            body = ListSharedWithMeResponse,
+        ),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 503, description = "SpiceDB not configured", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn list_shared_with_me(
+    Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
+    auth: AuthenticatedUser,
+) -> Response {
+    let Some(client) = spicedb.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorBody {
+                error: "spicedb_unavailable".into(),
+                detail: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let owners = match client
+        .list_shared_with_me(&auth.preferred_username)
+        .await
+    {
+        Ok(handles) => handles
+            .into_iter()
+            .map(|h| SharedWithMeEntry { owner_handle: h })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::error!(error = %e, "list_shared_with_me failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
+        }
+    };
+
+    (
+        StatusCode::OK,
+        no_store(),
+        Json(ListSharedWithMeResponse {
+            shared_with_me: owners,
         }),
     )
         .into_response()
@@ -1025,6 +1100,7 @@ mod tests {
             .route("/v1/me/visibility", post(set_visibility::<MemoryUserStore>))
             .route("/v1/me/share", post(add_share::<MemoryUserStore>))
             .route("/v1/me/share/:recipient_handle", delete(delete_share))
+            .route("/v1/me/shared-with-me", get(list_shared_with_me))
             .with_state(users)
             .layer(Extension(verifier))
             .layer(Extension(spicedb))
@@ -1177,6 +1253,29 @@ mod tests {
         let req = Request::builder()
             .method("DELETE")
             .uri("/v1/me/share/Bob")
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "spicedb_unavailable");
+    }
+
+    #[tokio::test]
+    async fn list_shared_with_me_returns_503_when_spicedb_skipped() {
+        // The inbound-shares endpoint must surface SpiceDB outages the
+        // same way the outbound side does. The web client maps 503
+        // -> "degraded" banner so the page still renders.
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/me/shared-with-me")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();

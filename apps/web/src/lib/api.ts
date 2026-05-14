@@ -1088,6 +1088,10 @@ export type RevokeShareResponse =
   apiSchema['schemas']['RevokeShareResponse'];
 export type ListSharesResponse = apiSchema['schemas']['ListSharesResponse'];
 export type ShareEntry = apiSchema['schemas']['ShareEntry'];
+export type ListSharedWithMeResponse =
+  apiSchema['schemas']['ListSharedWithMeResponse'];
+export type SharedWithMeEntry =
+  apiSchema['schemas']['SharedWithMeEntry'];
 export type PublicSummaryResponse =
   apiSchema['schemas']['PublicSummaryResponse'];
 export type PublicTimelineResponse =
@@ -1119,6 +1123,24 @@ export async function listShares(bearer: string): Promise<ListSharesResponse> {
   return request<ListSharesResponse>(
     'GET',
     '/v1/me/shares',
+    undefined,
+    bearer,
+  );
+}
+
+/**
+ * Inbound side of per-user sharing: the owners who have granted
+ * the caller view access to their stats_record. Mirrors
+ * `listShares` (outbound) but on the receiving end. Org-mediated
+ * shares aren't enumerated here — those come from /v1/orgs/me +
+ * the per-org detail page.
+ */
+export async function listSharedWithMe(
+  bearer: string,
+): Promise<ListSharedWithMeResponse> {
+  return request<ListSharedWithMeResponse>(
+    'GET',
+    '/v1/me/shared-with-me',
     undefined,
     bearer,
   );

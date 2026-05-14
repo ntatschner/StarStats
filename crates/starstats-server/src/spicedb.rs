@@ -338,6 +338,72 @@ impl SpicedbClient {
         Ok(out)
     }
 
+    /// Inbound shares: list the owner-handles whose `stats_record`
+    /// has a `share_with_user@user:<recipient_handle>` row. This is
+    /// the mirror of `list_share_with_user` — there we pin the
+    /// resource and walk subjects; here we pin the subject and walk
+    /// resources, so SpiceDB returns the owners who have granted the
+    /// caller read access.
+    ///
+    /// The builder traits used for outbound queries only set resource
+    /// fields, so we build the `RelationshipFilter` by hand here to
+    /// populate the subject-id slot (matches the pattern in
+    /// `delete_org_member_all_roles`).
+    pub async fn list_shared_with_me(
+        &self,
+        recipient_handle: &str,
+    ) -> Result<Vec<String>> {
+        let filter = RelationshipFilter {
+            resource_type: "stats_record".to_string(),
+            // Empty = no resource_id filter; we want every owner who
+            // has shared with this user.
+            optional_resource_id: String::new(),
+            optional_resource_id_prefix: String::new(),
+            optional_relation: "share_with_user".to_string(),
+            optional_subject_filter: Some(SubjectFilter {
+                subject_type: "user".to_string(),
+                optional_subject_id: recipient_handle.to_string(),
+                optional_relation: None,
+            }),
+        };
+        let req = ReadRelationshipsRequest {
+            consistency: None,
+            relationship_filter: Some(filter),
+            optional_limit: 0,
+            optional_cursor: None,
+        };
+
+        let mut inner = self.inner.clone();
+        let mut stream = inner
+            .read_relationships(req)
+            .await
+            .context("SpiceDB ReadRelationships (shared_with_me) failed")?;
+
+        let mut out: Vec<String> = Vec::new();
+        loop {
+            match stream.message().await {
+                Ok(Some(msg)) => {
+                    if let Some(rel) = msg.relationship {
+                        if let Some(resource) = rel.resource {
+                            // resource.object_id is the OWNER's handle
+                            // — the person sharing with us.
+                            if !resource.object_id.is_empty() {
+                                out.push(resource.object_id);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "SpiceDB ReadRelationships stream error: {e}"
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // -- Org membership / org-share helpers --------------------------
     //
     // Wave-2B layers `organization` + `share_with_org` on top of the

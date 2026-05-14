@@ -881,6 +881,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/shared-with-me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_shared_with_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me/shares": {
         parameters: {
             query?: never;
@@ -1177,6 +1193,38 @@ export interface paths {
             cookie?: never;
         };
         get: operations["reference_get_vehicle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/reference/{category}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["reference_list_category"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/reference/{category}/{class_name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["reference_get_entry"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1708,6 +1756,17 @@ export interface components {
         ListResponse: {
             submissions: components["schemas"]["SubmissionDto"][];
         };
+        /**
+         * @description Response for `GET /v1/me/shared-with-me` — the inbound side of
+         *     per-user sharing. Org-mediated shares (org membership ->
+         *     `share_with_org`) are not enumerated here because they're a
+         *     transitive grant rather than a direct one; the org list comes
+         *     from `/v1/orgs/me` and the shares-to-that-org list lives under
+         *     org detail pages.
+         */
+        ListSharedWithMeResponse: {
+            shared_with_me: components["schemas"]["SharedWithMeEntry"][];
+        };
         ListSharesResponse: {
             /**
              * @description Orgs with `share_with_org` rows pointing at the caller's
@@ -1925,6 +1984,39 @@ export interface components {
             label: string;
             token: string;
         };
+        /**
+         * @description Top-level category an entry in the generic `reference_registry`
+         *     belongs to. Mirrors the `reference_registry_category_chk` CHECK
+         *     constraint in migration 0022 — adding a category requires a
+         *     follow-up migration to widen the allow-list.
+         * @enum {string}
+         */
+        ReferenceCategory: "vehicle" | "weapon" | "item" | "location";
+        /**
+         * @description A single entry in the generic reference registry. Per-category
+         *     extras live in `metadata` as a JSON object — schema-on-read — so
+         *     new categories can ship without DDL. `VehicleReference` (above)
+         *     remains the typed view callers use for vehicle-specific rendering;
+         *     once the store refactor lands it will be decoded from a
+         *     `ReferenceEntry` with `category == Vehicle`.
+         */
+        ReferenceEntry: {
+            category: components["schemas"]["ReferenceCategory"];
+            class_name: string;
+            display_name: string;
+            /**
+             * @description JSON object holding per-category extras (manufacturer, role,
+             *     size, slot, parent system…). `Default::default()` returns the
+             *     empty object so unrenderable fields don't appear at all in
+             *     JSON output. `serde_json::Value` does not implement `Eq`
+             *     because of `f64`, so `ReferenceEntry` is `PartialEq` only.
+             */
+            metadata?: Record<string, never>;
+        };
+        /** @description Response wrapper for `GET /v1/reference/{category}`. */
+        ReferenceListResponse: {
+            entries: components["schemas"]["ReferenceEntry"][];
+        };
         RegenerateRecoveryRequest: {
             password: string;
         };
@@ -2112,6 +2204,13 @@ export interface components {
         ShareResponse: {
             shared_with: string;
         };
+        /**
+         * @description One inbound share: an owner who has granted the caller view
+         *     access to their `stats_record`. The mirror of `ShareEntry`.
+         */
+        SharedWithMeEntry: {
+            owner_handle: string;
+        };
         SignupRequest: {
             claimed_handle: string;
             email: string;
@@ -2231,6 +2330,20 @@ export interface components {
             last_payment_at?: string | null;
             name_plate?: string | null;
             state: string;
+        };
+        /**
+         * @description Body for `POST /v1/admin/smtp/test`.
+         *
+         *     `to_address` lets an admin bootstrap from a not-yet-configured
+         *     state: when SMTP has never worked, the admin's own email is by
+         *     definition unverified, and the original "must be verified" gate
+         *     becomes a deadlock. Letting them direct the test to a known-
+         *     working external address (a personal mailbox, etc.) breaks the
+         *     cycle. When omitted, behaviour is unchanged: send to the admin's
+         *     own verified email, refuse with `email_unverified` otherwise.
+         */
+        TestSendRequest: {
+            to_address?: string | null;
         };
         TestSendResponse: {
             sent_to: string;
@@ -2659,9 +2772,13 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSendRequest"];
+            };
+        };
         responses: {
-            /** @description Test email sent to the caller */
+            /** @description Test email sent (to caller's own email or to_address override) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2670,7 +2787,7 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendResponse"];
                 };
             };
-            /** @description Caller's email is not verified */
+            /** @description Caller's email is not verified, or to_address is malformed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5253,6 +5370,42 @@ export interface operations {
             };
         };
     };
+    list_shared_with_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of owner handles who have shared their stats_record with the caller */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListSharedWithMeResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description SpiceDB not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
     list_shares: {
         parameters: {
             query?: never;
@@ -6166,6 +6319,90 @@ export interface operations {
                 };
             };
             /** @description No vehicle with that class_name */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    reference_list_category: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description One of: vehicle, weapon, item, location */
+                category: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Full list of cached entries for the category */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferenceListResponse"];
+                };
+            };
+            /** @description Unknown category */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    reference_get_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description One of: vehicle, weapon, item, location */
+                category: string;
+                /** @description Entry class_name (case-insensitive) */
+                class_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reference entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferenceEntry"];
+                };
+            };
+            /** @description No entry with that (category, class_name) */
             404: {
                 headers: {
                     [name: string]: unknown;
