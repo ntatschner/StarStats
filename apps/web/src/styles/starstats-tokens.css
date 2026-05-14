@@ -474,7 +474,13 @@ body {
   padding: 0 var(--s5) 0 var(--s5);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
-  position: relative;
+  /* Sticky so the brand + handle stay visible while the main content
+     area scrolls underneath. z-index sits above in-page sticky chip
+     strips (range bar, tab headers) but below the mobile drawer
+     overlay (z-index 50 in the open state). */
+  position: sticky;
+  top: 0;
+  z-index: 40;
 }
 .ss-rail {
   border-right: 1px solid var(--border);

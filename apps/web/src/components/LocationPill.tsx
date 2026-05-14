@@ -133,3 +133,60 @@ function formatAge(isoTimestamp: string): string {
   const ageDay = Math.floor(ageHr / 24);
   return `${ageDay}d ago`;
 }
+
+/**
+ * Compact header variant — single-line chip that fits in `.ss-topbar`
+ * next to the brand mark. Shares the headline + glyph logic with the
+ * full card so they stay visually aligned. Renders nothing when the
+ * server reported no recent activity (mirroring LocationPill).
+ */
+export function LocationChip({
+  location,
+}: {
+  location: ResolvedLocation | null;
+}) {
+  if (location === null) return null;
+  const headline =
+    location.city ?? location.planet ?? location.shard ?? 'In transit';
+  // Show one bit of qualifying context after the headline so a city
+  // name like "Lorville" carries its planet ("Hurston") when there's
+  // room. Falls back to system when we only have a planet.
+  const sub =
+    location.city && location.planet
+      ? location.planet
+      : location.planet && location.system && location.system !== location.planet
+        ? location.system
+        : null;
+  return (
+    <span
+      className="ss-badge"
+      style={{
+        borderColor: 'var(--accent)',
+        color: 'var(--fg)',
+        gap: 6,
+        maxWidth: 260,
+        overflow: 'hidden',
+      }}
+      title={`${headline}${sub ? ` · ${sub}` : ''} · updated ${formatAge(location.last_seen_at)}`}
+      aria-label="Current in-game location"
+    >
+      <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>
+        {pickGlyph(location)}
+      </span>
+      <span
+        className="mono"
+        style={{
+          fontSize: 12,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {headline}
+        {sub && (
+          <span style={{ color: 'var(--fg-dim)' }}> · {sub}</span>
+        )}
+      </span>
+    </span>
+  );
+}

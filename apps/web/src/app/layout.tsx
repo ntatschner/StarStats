@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { getCurrentLocation, type ResolvedLocation } from '@/lib/api';
+import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
 import { getTheme } from '@/lib/theme';
 import { QuantumWarpBackground } from '@/components/shell/QuantumWarpBackground';
@@ -19,6 +21,18 @@ export default async function RootLayout({
   const [session, theme] = await Promise.all([getSession(), getTheme()]);
   const hasSession = session !== null;
 
+  // Current-location chip in TopBar. Fetched per-render so the header
+  // chip stays fresh; 204 → null is the common case, any error
+  // degrades silently to "no chip" rather than crashing the shell.
+  let location: ResolvedLocation | null = null;
+  if (session) {
+    try {
+      location = await getCurrentLocation(session.token);
+    } catch (e) {
+      logger.warn({ err: e }, 'topbar location fetch failed');
+    }
+  }
+
   return (
     <html lang="en" data-theme={theme}>
       <body>
@@ -28,7 +42,7 @@ export default async function RootLayout({
             className="ss-app"
             style={{ position: 'relative', zIndex: 1, minHeight: '100vh' }}
           >
-            <TopBar handle={session.claimedHandle} />
+            <TopBar handle={session.claimedHandle} location={location} />
             <LeftRail
               handle={session.claimedHandle}
               staffRoles={session.staffRoles}
