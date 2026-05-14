@@ -36,8 +36,11 @@ function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
   ) as Route;
   const isStaff = staffRoles.length > 0;
   return [
+    // Insights — the user's own data surfaces. "Manifest" is the
+    // dashboard landing; the rest drill into different cuts of the
+    // same event stream.
     {
-      title: 'Main',
+      title: 'Insights',
       items: [
         { label: 'Manifest', href: '/dashboard' },
         {
@@ -59,25 +62,38 @@ function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
           href: '/my-logs',
           match: (p) => p === '/my-logs' || p.startsWith('/my-logs/'),
         },
+      ],
+    },
+    // Community — outward-facing surfaces (profile pages, org rosters,
+    // user-submitted reference fixes).
+    {
+      title: 'Community',
+      items: [
         {
-          label: 'Submissions',
-          href: '/submissions',
-          match: (p) => p === '/submissions' || p.startsWith('/submissions/'),
-        },
-        {
-          label: 'Donate',
-          href: '/donate',
-          match: (p) => p === '/donate' || p.startsWith('/donate/'),
-        },
-        {
-          label: 'Devices',
-          href: '/devices',
-          match: (p) => p === '/devices' || p.startsWith('/devices/'),
+          label: 'Profile',
+          href: profileHref,
+          match: (p) => p.startsWith('/u/'),
         },
         {
           label: 'Orgs',
           href: '/orgs',
           match: (p) => p === '/orgs' || p.startsWith('/orgs/'),
+        },
+        {
+          label: 'Submissions',
+          href: '/submissions',
+          match: (p) => p === '/submissions' || p.startsWith('/submissions/'),
+        },
+      ],
+    },
+    // Setup — one-off configuration surfaces the user visits rarely.
+    {
+      title: 'Setup',
+      items: [
+        {
+          label: 'Devices',
+          href: '/devices',
+          match: (p) => p === '/devices' || p.startsWith('/devices/'),
         },
         {
           label: 'Lore',
@@ -88,9 +104,9 @@ function buildNav(handle: string | null, staffRoles: string[]): NavSection[] {
           match: (p) => p === '/lore' || p.startsWith('/lore/'),
         },
         {
-          label: 'Profile',
-          href: profileHref,
-          match: (p) => p.startsWith('/u/'),
+          label: 'Donate',
+          href: '/donate',
+          match: (p) => p === '/donate' || p.startsWith('/donate/'),
         },
       ],
     },
