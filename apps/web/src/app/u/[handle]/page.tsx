@@ -15,6 +15,8 @@
  * endpoint we call.
  */
 
+import Link from 'next/link';
+import type { Route } from 'next';
 import {
   ApiCallError,
   getFriendSummary,
@@ -225,7 +227,7 @@ export default async function PublicProfilePage(props: PageProps) {
           flexWrap: 'wrap',
         }}
       >
-        <div>
+        <div style={{ flex: 1, minWidth: 240 }}>
           <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
             {view.kind === 'self'
               ? 'Your profile'
@@ -270,6 +272,38 @@ export default async function PublicProfilePage(props: PageProps) {
               <span className="ss-badge ss-badge--ok">RSI verified</span>
             )}
           </div>
+        </div>
+        {/* Sharing CTAs — context-sensitive deep links into /sharing.
+            Self view: jump to your own sharing management. Other
+            users: pre-populate the add-handle field so the user can
+            "share back" with a single confirm click. */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'flex-end',
+            gap: 6,
+          }}
+        >
+          {view.kind === 'self' ? (
+            <Link
+              href="/sharing"
+              className="ss-btn ss-btn--ghost"
+              style={{ textDecoration: 'none' }}
+            >
+              Manage sharing
+            </Link>
+          ) : (
+            <Link
+              href={
+                (`/sharing?handle=${encodeURIComponent(data.claimed_handle)}`) as Route
+              }
+              className="ss-btn ss-btn--ghost"
+              style={{ textDecoration: 'none' }}
+            >
+              Share back
+            </Link>
+          )}
         </div>
       </header>
 

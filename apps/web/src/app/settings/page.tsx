@@ -3,7 +3,6 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import {
   ApiCallError,
-  addShare,
   changePassword,
   deleteAccount,
   emailChangeStart,
@@ -11,25 +10,15 @@ import {
   getMyHangar,
   getMyProfile,
   getPreferences,
-  getVisibility,
-  listOrgs,
-  listShares,
   refreshProfile,
   refreshRsiOrgs,
-  removeShare,
   resendVerification,
   rsiVerifyCheck,
   rsiVerifyStart,
-  setVisibility,
-  shareWithOrg,
-  unshareWithOrg,
   type HangarSnapshot,
-  type ListOrgsResponse,
-  type ListSharesResponse,
   type MeResponse,
   type ProfileResponse,
   type RsiStartResponse,
-  type VisibilityResponse,
 } from '@/lib/api';
 import { HangarCard } from '@/components/HangarCard';
 import { logger } from '@/lib/logger';
@@ -129,17 +118,6 @@ const mutedStyle: React.CSSProperties = {
 const dimStyle: React.CSSProperties = {
   color: 'var(--fg-dim)',
   fontSize: 12,
-};
-
-const sharePillStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  padding: '10px 14px',
-  background: 'var(--bg-elev)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--r-sm)',
-  gap: 12,
 };
 
 const twoColStyle: React.CSSProperties = {
@@ -328,34 +306,8 @@ export default async function SettingsPage(props: {
     throw e;
   }
 
-  // Sharing state. We need to distinguish the failure modes so we can
-  // render an honest message:
-  //   - 401 → session expired, bounce to login
-  //   - 503 → SpiceDB is down, degrade gracefully ("authorisation
-  //           service is offline")
-  //   - anything else → unknown failure, don't pretend SpiceDB is the
-  //                     problem (could be DB down, network blip, bug)
-  let visibility: VisibilityResponse | null = null;
-  let shares: ListSharesResponse | null = null;
-  let myOrgs: ListOrgsResponse | null = null;
-  let sharingDegraded: 'spicedb_unavailable' | 'unknown' | null = null;
-  try {
-    [visibility, shares, myOrgs] = await Promise.all([
-      getVisibility(session.token),
-      listShares(session.token),
-      listOrgs(session.token),
-    ]);
-  } catch (e) {
-    if (e instanceof ApiCallError && e.status === 401) {
-      redirect('/auth/login?next=/settings');
-    }
-    if (e instanceof ApiCallError && e.status === 503) {
-      sharingDegraded = 'spicedb_unavailable';
-    } else {
-      logger.error({ err: e }, 'load sharing state failed');
-      sharingDegraded = 'unknown';
-    }
-  }
+  // Sharing state moved to /sharing in 0.0.4-beta — no longer
+  // loaded here. See apps/web/src/app/sharing/page.tsx.
 
   // Pull (or issue) the RSI verification code only when the handle
   // isn't proven yet — already-verified users don't need a code.
@@ -596,145 +548,6 @@ export default async function SettingsPage(props: {
       redirect('/settings?error=unexpected#password');
     }
     redirect('/settings?status=password_changed#password');
-  }
-
-  async function visibilityAction(formData: FormData) {
-    'use server';
-    const session = await getSession();
-    if (!session) redirect('/auth/login?next=/settings');
-    const wantPublic = String(formData.get('public') ?? 'false') === 'true';
-    try {
-      await setVisibility(session.token, wantPublic);
-    } catch (e) {
-      if (e instanceof ApiCallError && e.status === 401) {
-        redirect('/auth/login?next=/settings');
-      }
-      if (e instanceof ApiCallError && e.status === 403) {
-        redirect('/settings?error=rsi_handle_not_verified#sharing');
-      }
-      if (e instanceof ApiCallError && e.status === 503) {
-        redirect('/settings?error=spicedb_unavailable#sharing');
-      }
-      logger.error({ err: e }, 'set visibility failed');
-      redirect('/settings?error=unexpected#sharing');
-    }
-    redirect(
-      `/settings?status=visibility_${wantPublic ? 'public' : 'private'}#sharing`,
-    );
-  }
-
-  async function addShareAction(formData: FormData) {
-    'use server';
-    const session = await getSession();
-    if (!session) redirect('/auth/login?next=/settings');
-    const recipient = String(formData.get('recipient_handle') ?? '').trim();
-    if (recipient === '') {
-      redirect('/settings?error=invalid_recipient_handle#sharing');
-    }
-    try {
-      await addShare(session.token, recipient);
-    } catch (e) {
-      if (e instanceof ApiCallError) {
-        if (e.status === 401) redirect('/auth/login?next=/settings');
-        if (e.status === 403) {
-          redirect('/settings?error=rsi_handle_not_verified#sharing');
-        }
-        if (e.status === 404) {
-          redirect('/settings?error=recipient_not_found#sharing');
-        }
-        if (e.status === 400) {
-          redirect(
-            `/settings?error=${encodeURIComponent(e.body.error)}#sharing`,
-          );
-        }
-        if (e.status === 503) {
-          redirect('/settings?error=spicedb_unavailable#sharing');
-        }
-      }
-      logger.error({ err: e }, 'add share failed');
-      redirect('/settings?error=unexpected#sharing');
-    }
-    redirect('/settings?status=share_added#sharing');
-  }
-
-  async function revokeShareAction(formData: FormData) {
-    'use server';
-    const session = await getSession();
-    if (!session) redirect('/auth/login?next=/settings');
-    const recipient = String(formData.get('recipient_handle') ?? '').trim();
-    if (recipient === '') {
-      redirect('/settings?error=invalid_recipient_handle#sharing');
-    }
-    try {
-      await removeShare(session.token, recipient);
-    } catch (e) {
-      if (e instanceof ApiCallError) {
-        if (e.status === 401) redirect('/auth/login?next=/settings');
-        if (e.status === 503) {
-          redirect('/settings?error=spicedb_unavailable#sharing');
-        }
-      }
-      logger.error({ err: e }, 'remove share failed');
-      redirect('/settings?error=unexpected#sharing');
-    }
-    redirect('/settings?status=share_revoked#sharing');
-  }
-
-  async function shareOrgAction(formData: FormData) {
-    'use server';
-    const session = await getSession();
-    if (!session) redirect('/auth/login?next=/settings');
-    const slug = String(formData.get('org_slug') ?? '').trim();
-    if (slug === '') {
-      redirect('/settings?error=invalid_org_slug#sharing');
-    }
-    try {
-      await shareWithOrg(session.token, slug);
-    } catch (e) {
-      if (e instanceof ApiCallError) {
-        if (e.status === 401) redirect('/auth/login?next=/settings');
-        if (e.status === 403) {
-          redirect('/settings?error=rsi_handle_not_verified#sharing');
-        }
-        if (e.status === 404) {
-          redirect('/settings?error=org_not_found#sharing');
-        }
-        if (e.status === 400) {
-          redirect(
-            `/settings?error=${encodeURIComponent(e.body.error)}#sharing`,
-          );
-        }
-        if (e.status === 503) {
-          redirect('/settings?error=spicedb_unavailable#sharing');
-        }
-      }
-      logger.error({ err: e }, 'share with org failed');
-      redirect('/settings?error=unexpected#sharing');
-    }
-    redirect('/settings?status=org_share_added#sharing');
-  }
-
-  async function revokeOrgShareAction(formData: FormData) {
-    'use server';
-    const session = await getSession();
-    if (!session) redirect('/auth/login?next=/settings');
-    const slug = String(formData.get('org_slug') ?? '').trim();
-    if (slug === '') {
-      redirect('/settings?error=invalid_org_slug#sharing');
-    }
-    try {
-      await unshareWithOrg(session.token, slug);
-    } catch (e) {
-      if (e instanceof ApiCallError) {
-        if (e.status === 401) redirect('/auth/login?next=/settings');
-        if (e.status === 503) {
-          redirect('/settings?error=spicedb_unavailable#sharing');
-        }
-      }
-      logger.error({ err: e }, 'remove org share failed');
-      redirect('/settings?error=unexpected#sharing');
-    }
-    redirect('/settings?status=org_share_revoked#sharing');
   }
 
   async function deleteAction(formData: FormData) {
@@ -1021,255 +834,25 @@ export default async function SettingsPage(props: {
           without leaving the browser. */}
       <HangarCard snapshot={hangar} />
 
-      {/* Sharing */}
+      {/* Sharing moved to /sharing in 0.0.4-beta. This stub keeps
+          /settings#sharing anchor links working for old bookmarks
+          and surfaces the new location for users who land here. */}
       <section className="ss-card" id="sharing">
         <header style={cardHeaderStyle}>
           <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
             Sharing
           </div>
-          <h2 style={cardTitleStyle}>Public profile &amp; access</h2>
+          <h2 style={cardTitleStyle}>Moved to its own page</h2>
         </header>
         <div style={cardBodyStyle}>
-          {sharingDegraded === 'spicedb_unavailable' ? (
-            <p style={mutedStyle}>
-              Sharing is temporarily unavailable. The authorisation
-              service is offline — try again shortly.
-            </p>
-          ) : sharingDegraded === 'unknown' ? (
-            <p style={mutedStyle}>
-              Couldn&apos;t load your sharing settings. Refresh the page
-              to try again — if it keeps failing, please report it.
-            </p>
-          ) : (
-            <>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  gap: 16,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 4,
-                    flex: 1,
-                    minWidth: 240,
-                  }}
-                >
-                  <span
-                    style={{ fontWeight: 600, color: 'var(--fg)' }}
-                  >
-                    Public profile
-                  </span>
-                  <span style={{ color: 'var(--fg-muted)', fontSize: 13 }}>
-                    When public, anyone can view your summary and timeline
-                    at{' '}
-                    <span className="mono" style={{ color: 'var(--fg)' }}>
-                      /u/{me.claimed_handle}
-                    </span>
-                    .
-                  </span>
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                  }}
-                >
-                  <span className={`ss-badge ${visibility?.public ? 'ss-badge--ok' : ''}`}>
-                    {visibility?.public ? (
-                      <>
-                        <span className="ss-badge-dot" />
-                        Public
-                      </>
-                    ) : (
-                      'Private'
-                    )}
-                  </span>
-                  <form action={visibilityAction} style={{ margin: 0 }}>
-                    <input
-                      type="hidden"
-                      name="public"
-                      value={visibility?.public ? 'false' : 'true'}
-                    />
-                    <button
-                      type="submit"
-                      className="ss-btn ss-btn--ghost"
-                    >
-                      {visibility?.public ? 'Make private' : 'Make public'}
-                    </button>
-                  </form>
-                </div>
-              </div>
-
-              <hr className="ss-rule" />
-
-              <div
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 12,
-                }}
-              >
-                <span style={{ fontWeight: 600, color: 'var(--fg)' }}>
-                  Shared with specific handles
-                </span>
-                {shares && shares.shares.length > 0 ? (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 8,
-                    }}
-                  >
-                    {shares.shares.map((entry) => (
-                      <div key={entry.recipient_handle} style={sharePillStyle}>
-                        <span className="mono">{entry.recipient_handle}</span>
-                        <form
-                          action={revokeShareAction}
-                          style={{ margin: 0 }}
-                        >
-                          <input
-                            type="hidden"
-                            name="recipient_handle"
-                            value={entry.recipient_handle}
-                          />
-                          <button
-                            type="submit"
-                            className="ss-btn ss-btn--link"
-                            style={{ color: 'var(--danger)' }}
-                          >
-                            Revoke
-                          </button>
-                        </form>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p style={mutedStyle}>
-                    You haven&apos;t shared your stats with anyone yet.
-                  </p>
-                )}
-                <form action={addShareAction} style={formRowEndStyle}>
-                  <label className="ss-label" style={{ flex: 1, minWidth: 200 }}>
-                    <span className="ss-label-text">Add by RSI handle</span>
-                    <input
-                      className="ss-input"
-                      type="text"
-                      name="recipient_handle"
-                      required
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="EnterTheSquadron"
-                    />
-                  </label>
-                  <button
-                    type="submit"
-                    className="ss-btn ss-btn--primary"
-                  >
-                    Grant access
-                  </button>
-                </form>
-              </div>
-
-              <hr className="ss-rule" />
-
-              <div
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 12,
-                }}
-              >
-                <span style={{ fontWeight: 600, color: 'var(--fg)' }}>
-                  Org shares
-                </span>
-                {shares && shares.org_shares && shares.org_shares.length > 0 ? (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 8,
-                    }}
-                  >
-                    {shares.org_shares.map((entry) => (
-                      <div key={entry.org_slug} style={sharePillStyle}>
-                        <span className="mono">{entry.org_slug}</span>
-                        <form
-                          action={revokeOrgShareAction}
-                          style={{ margin: 0 }}
-                        >
-                          <input
-                            type="hidden"
-                            name="org_slug"
-                            value={entry.org_slug}
-                          />
-                          <button
-                            type="submit"
-                            className="ss-btn ss-btn--link"
-                            style={{ color: 'var(--danger)' }}
-                          >
-                            Revoke
-                          </button>
-                        </form>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p style={mutedStyle}>
-                    You haven&apos;t shared your stats with any orgs yet.
-                  </p>
-                )}
-                {myOrgs && myOrgs.orgs.length > 0 ? (
-                  <form action={shareOrgAction} style={formRowEndStyle}>
-                    <label
-                      className="ss-label"
-                      style={{ flex: 1, minWidth: 200 }}
-                    >
-                      <span className="ss-label-text">Share with org</span>
-                      <select
-                        className="ss-input"
-                        name="org_slug"
-                        required
-                        defaultValue=""
-                      >
-                        <option value="" disabled>
-                          Pick an org…
-                        </option>
-                        {myOrgs.orgs.map((o) => (
-                          <option key={o.id} value={o.slug}>
-                            {o.name} ({o.slug})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      type="submit"
-                      className="ss-btn ss-btn--primary"
-                    >
-                      Share with org
-                    </button>
-                  </form>
-                ) : (
-                  <p style={mutedStyle}>
-                    You don&apos;t own any orgs yet.{' '}
-                    <Link
-                      href="/orgs/new"
-                      style={{ color: 'var(--accent)' }}
-                    >
-                      Create one
-                    </Link>{' '}
-                    to share with a group.
-                  </p>
-                )}
-              </div>
-            </>
-          )}
+          <p style={mutedStyle}>
+            Profile visibility, granted shares, and the list of people
+            sharing with you now live at{' '}
+            <Link href="/sharing" style={{ color: 'var(--accent)' }}>
+              /sharing
+            </Link>
+            .
+          </p>
         </div>
       </section>
 
