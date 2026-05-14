@@ -112,6 +112,12 @@ const KNOWN_BODIES: Record<string, { system: string; display: string }> = {
   // -- Hurston Dynamics short code (engine emits `HurDyn_*` for
   //    several Hurston-surface installations). --
   hurdyn: { system: 'Stanton', display: 'Hurston' },
+  // -- Rest Stops (engine `LOC_RR_S<n>_L<m>`) live at Stanton's
+  //    Lagrange points but aren't tied to any single body. We
+  //    file them under Stanton with a synthetic 'Rest Stops'
+  //    body so the rollup still has a meaningful three-level
+  //    hierarchy (Stanton -> Rest Stops -> S1 L3). --
+  rr: { system: 'Stanton', display: 'Rest Stops' },
   // -- System stars themselves (when the engine references the
   //    star, it does so via `<System>Star`). Treat as the system. --
   stantonstar: { system: 'Stanton', display: 'Stanton' },
@@ -278,6 +284,14 @@ export function parseLocationClass(
   if (parts.length === 0) {
     return { system: null, body: null, place: null, raw };
   }
+
+  // Special: `LOC_rs_ext_<a>-<b>_jp<N>` is the engine's name for an
+  // interstellar Jump Point object container. These don't fit the
+  // body/place model — they connect two systems. Group them under
+  // a synthetic `Jump Points` pseudo-system so the user sees jump
+  // transits as their own top-level slice on the rollup.
+  const jp = matchJumpPoint(parts, raw);
+  if (jp) return jp;
 
   // Tier 0 — wiki catalog hit on any token. This is the authoritative
   // source; everything beneath is fallback for engine-only forms
@@ -472,6 +486,49 @@ const NON_DESTINATION_PATTERNS: RegExp[] = [
   // Party member / friend markers.
   /^PartyMember/i,
 ];
+
+/** Match an engine `rs_ext_<a>-<b>_jp<N>` jump-point identifier and
+ *  build a LocationParts using the `Jump Points` pseudo-system. The
+ *  shape from `stripAndSplit` is `['rs', 'ext', '<a>-<b>', 'jp<N>']`
+ *  (LOC_ already stripped, casing varies). Returns null when the
+ *  segments don't fit the JP pattern. */
+function matchJumpPoint(parts: string[], raw: string): LocationParts | null {
+  if (parts.length < 3) return null;
+  const head = parts[0]?.toLowerCase();
+  const kind = parts[1]?.toLowerCase();
+  if (head !== 'rs' || kind !== 'ext') return null;
+  const routeRaw = parts[2];
+  const jpToken = parts[3] ?? null;
+  return {
+    system: 'Jump Points',
+    body: prettifyRoute(routeRaw),
+    place: jpToken ? `Jump Point ${jpToken.replace(/^jp/i, '').toUpperCase()}` : null,
+    raw,
+  };
+}
+
+/** Render an `<a>-<b>` route token as `"A ↔ B"`, mapping known
+ *  short codes to canonical system names. Unknown codes get
+ *  title-cased so the row stays readable. */
+function prettifyRoute(route: string): string {
+  const parts = route.split('-').map(prettifyRouteToken);
+  return parts.join(' ↔ ');
+}
+
+function prettifyRouteToken(token: string): string {
+  const known: Record<string, string> = {
+    stan: 'Stanton',
+    stanton: 'Stanton',
+    pyro: 'Pyro',
+    nyx: 'Nyx',
+    castra: 'Castra',
+    terra: 'Terra',
+    sol: 'Sol',
+    magnus: 'Magnus',
+    cru: 'Crusader',
+  };
+  return known[token.toLowerCase()] ?? titleCase(splitCamelCase(token));
+}
 
 /** Catalog Tier 0 lookup. Walks token candidates against the three
  *  catalog indexes (tag, name, slug) in priority order. First hit
