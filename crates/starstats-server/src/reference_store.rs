@@ -22,7 +22,19 @@
 
 use crate::reference_data::{ReferenceCategory, ReferenceEntry, VehicleReference};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+
+/// Admin dashboard summary for one reference category. `entry_count`
+/// is the row count in `reference_registry` filtered by category;
+/// `latest_updated_at` is `MAX(updated_at)` (NULL when the category
+/// has no rows yet, e.g. a freshly-added one whose cron hasn't run).
+#[derive(Debug, Clone)]
+pub struct CategorySummary {
+    pub category: ReferenceCategory,
+    pub entry_count: i64,
+    pub latest_updated_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceStoreError {
@@ -60,6 +72,32 @@ pub trait ReferenceStore: Send + Sync + 'static {
         &self,
         category: ReferenceCategory,
     ) -> Result<Vec<ReferenceEntry>, ReferenceStoreError>;
+
+    /// Admin-only: row counts + latest update timestamp per category.
+    /// Cheap aggregate over the registry; the admin dashboard uses
+    /// this to surface stale categories at a glance.
+    async fn category_summaries(
+        &self,
+    ) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
+        // Default impl: walk each category via list_category. Slow
+        // but correct for the in-memory test store; the Postgres
+        // impl overrides with a single GROUP BY aggregate.
+        let mut out = Vec::new();
+        for c in [
+            ReferenceCategory::Vehicle,
+            ReferenceCategory::Weapon,
+            ReferenceCategory::Item,
+            ReferenceCategory::Location,
+        ] {
+            let entries = self.list_category(c).await?;
+            out.push(CategorySummary {
+                category: c,
+                entry_count: entries.len() as i64,
+                latest_updated_at: None,
+            });
+        }
+        Ok(out)
+    }
 
     // -- Legacy vehicle-shaped helpers ---------------------------------
     //
@@ -244,6 +282,40 @@ impl ReferenceStore for PostgresReferenceStore {
                 metadata,
             })
             .collect())
+    }
+
+    async fn category_summaries(
+        &self,
+    ) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
+        // Single GROUP BY beats 4 list_category round-trips. Outer
+        // LEFT JOIN against the static category list keeps every
+        // category present even when it has no rows yet, which
+        // matters for "is the location sync running?" diagnostics.
+        let rows: Vec<(String, i64, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT cat, COALESCE(cnt, 0), latest
+             FROM unnest(ARRAY['vehicle','weapon','item','location']) AS cat
+             LEFT JOIN (
+                 SELECT category, COUNT(*) AS cnt, MAX(updated_at) AS latest
+                 FROM reference_registry
+                 GROUP BY category
+             ) agg ON agg.category = cat",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (cat_str, count, latest) in rows {
+            let Some(category) = ReferenceCategory::parse(&cat_str) else {
+                tracing::warn!(category = %cat_str, "unknown reference category in summary");
+                continue;
+            };
+            out.push(CategorySummary {
+                category,
+                entry_count: count,
+                latest_updated_at: latest,
+            });
+        }
+        Ok(out)
     }
 }
 

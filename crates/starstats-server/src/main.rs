@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod admin_org_routes;
+mod admin_reference_routes;
 mod admin_routes;
 mod admin_submission_routes;
 mod admin_user_routes;
@@ -356,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(admin_submission_routes::router(submissions_store))
         .merge(admin_user_routes::router(users.clone()))
         .merge(admin_org_routes::router(orgs.clone()))
+        .merge(admin_reference_routes::router(reference_store.clone()))
         .merge(smtp_admin_routes::router(
             smtp_config_store.clone(),
             users.clone(),

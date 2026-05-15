@@ -12,6 +12,7 @@
 //! `starstats-server-openapi` bin for offline TS codegen.
 
 use crate::admin_org_routes;
+use crate::admin_reference_routes;
 use crate::admin_routes;
 use crate::admin_submission_routes;
 use crate::admin_user_routes;
@@ -173,6 +174,8 @@ impl Modify for SecurityAddon {
         admin_org_routes::list_orgs_admin::<crate::orgs::PostgresOrgStore>,
         admin_org_routes::get_org_admin::<crate::orgs::PostgresOrgStore>,
         admin_org_routes::delete_org_admin::<crate::orgs::PostgresOrgStore>,
+        admin_reference_routes::list_reference_categories::<crate::reference_store::PostgresReferenceStore>,
+        admin_reference_routes::list_reference_entries::<crate::reference_store::PostgresReferenceStore>,
         smtp_admin_routes::get_smtp,
         smtp_admin_routes::put_smtp,
         smtp_admin_routes::test_smtp,
@@ -242,6 +245,10 @@ impl Modify for SecurityAddon {
         admin_org_routes::AdminOrgDto,
         admin_org_routes::AdminOrgListResponse,
         admin_org_routes::AdminOrgDeleteResponse,
+        admin_reference_routes::AdminReferenceCategoryDto,
+        admin_reference_routes::AdminReferenceCategoriesResponse,
+        admin_reference_routes::AdminReferenceEntryDto,
+        admin_reference_routes::AdminReferenceEntriesResponse,
         admin_submission_routes::SubmissionTransitionResponse,
         admin_submission_routes::RejectRequest,
         admin_submission_routes::AdminQueueResponse,

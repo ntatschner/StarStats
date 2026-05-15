@@ -703,6 +703,14 @@ export type AdminOrgListResponse =
   apiSchema['schemas']['AdminOrgListResponse'];
 export type AdminOrgDeleteResponse =
   apiSchema['schemas']['AdminOrgDeleteResponse'];
+export type AdminReferenceCategoryDto =
+  apiSchema['schemas']['AdminReferenceCategoryDto'];
+export type AdminReferenceCategoriesResponse =
+  apiSchema['schemas']['AdminReferenceCategoriesResponse'];
+export type AdminReferenceEntryDto =
+  apiSchema['schemas']['AdminReferenceEntryDto'];
+export type AdminReferenceEntriesResponse =
+  apiSchema['schemas']['AdminReferenceEntriesResponse'];
 export type SubmissionTransitionResponse =
   apiSchema['schemas']['SubmissionTransitionResponse'];
 
@@ -925,6 +933,39 @@ export async function deleteAdminOrg(
   return request<AdminOrgDeleteResponse>(
     'DELETE',
     `/v1/admin/orgs/${encodeURIComponent(slug)}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Per-category summary of the reference_registry. Surfaces row count
+ *  + last sync time so admins can spot a stuck cron at a glance. */
+export async function getAdminReferenceCategories(
+  bearer: string,
+): Promise<AdminReferenceCategoriesResponse> {
+  return request<AdminReferenceCategoriesResponse>(
+    'GET',
+    '/v1/admin/reference/categories',
+    undefined,
+    bearer,
+  );
+}
+
+/** Paginated entry list for a single category. `q` is a
+ *  case-insensitive substring filter on class_name + display_name. */
+export async function getAdminReferenceEntries(
+  bearer: string,
+  category: string,
+  params: { q?: string; limit?: number; offset?: number } = {},
+): Promise<AdminReferenceEntriesResponse> {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set('q', params.q);
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<AdminReferenceEntriesResponse>(
+    'GET',
+    `/v1/admin/reference/${encodeURIComponent(category)}${suffix}`,
     undefined,
     bearer,
   );

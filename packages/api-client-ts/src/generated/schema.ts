@@ -146,6 +146,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/reference/categories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_reference_categories"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/reference/{category}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_reference_entries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/smtp": {
         parameters: {
             query?: never;
@@ -1549,6 +1581,50 @@ export interface components {
              */
             has_more: boolean;
             items: components["schemas"]["SubmissionDto"][];
+        };
+        AdminReferenceCategoriesResponse: {
+            categories: components["schemas"]["AdminReferenceCategoryDto"][];
+        };
+        AdminReferenceCategoryDto: {
+            /**
+             * @description Lowercase category slug (`vehicle` / `weapon` / `item` / `location`)
+             *     — matches the value used in the `category` URL segment.
+             */
+            category: string;
+            /** Format: int64 */
+            entry_count: number;
+            /**
+             * Format: date-time
+             * @description `MAX(updated_at)` across the rows for this category. Null when
+             *     the cron hasn't populated this category yet.
+             */
+            latest_updated_at?: string | null;
+        };
+        AdminReferenceEntriesResponse: {
+            category: string;
+            entries: components["schemas"]["AdminReferenceEntryDto"][];
+            /**
+             * @description Substring filter that was applied (after lowercase normalize),
+             *     or null when none. Echoed back to make the URL self-describing
+             *     in the admin UI.
+             */
+            q?: string | null;
+            /**
+             * @description Total rows in the category — same number the summary endpoint
+             *     returns. Surfaced here so the UI can paginate without a second
+             *     call.
+             */
+            total: number;
+        };
+        AdminReferenceEntryDto: {
+            class_name: string;
+            display_name: string;
+            /**
+             * @description Free-form JSON object holding per-category extras (manufacturer,
+             *     role, size, parent system…). Schema-on-read — the cron writes
+             *     whatever the wiki returns and this passes it through verbatim.
+             */
+            metadata: Record<string, never>;
         };
         /**
          * @description Lightweight admin-side view of a user. Skips secrets (password
@@ -3082,6 +3158,95 @@ export interface operations {
             };
             /** @description Org not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_reference_categories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-category summary of reference_registry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminReferenceCategoriesResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_reference_entries: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Optional case-insensitive substring filter over class_name +
+                 *     display_name. Applied in-memory after the store returns the
+                 *     full category — fine because category sizes top out around
+                 *     ~20k (items) and the admin tool isn't a hot path.
+                 */
+                q?: string;
+                /** @description 1-based page number; defaults to 1. Pages of 100. */
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                /** @description vehicle | weapon | item | location */
+                category: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paged entry list within a category */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminReferenceEntriesResponse"];
+                };
+            };
+            /** @description Unknown category */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
