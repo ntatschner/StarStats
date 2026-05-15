@@ -68,6 +68,16 @@ pub trait OrgStore: Send + Sync + 'static {
 
     async fn list_for_owner(&self, user_id: Uuid) -> Result<Vec<Org>, OrgError>;
 
+    /// Admin-only paginated list across ALL orgs. Substring match
+    /// over name OR slug. Ordered by `created_at DESC` so new orgs
+    /// surface first.
+    async fn list_all(
+        &self,
+        q: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Org>, OrgError>;
+
     async fn delete_by_id(&self, id: Uuid) -> Result<(), OrgError>;
 
     /// Update the display name only. The slug stays put because it's
@@ -275,6 +285,62 @@ impl OrgStore for PostgresOrgStore {
             .collect())
     }
 
+    async fn list_all(
+        &self,
+        q: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Org>, OrgError> {
+        let limit = limit.clamp(1, 200);
+        let offset = offset.max(0);
+        let q_norm = q.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        let rows = if let Some(q) = q_norm {
+            let pattern = format!("%{q}%");
+            sqlx::query_as::<_, (Uuid, String, String, Uuid, DateTime<Utc>, DateTime<Utc>)>(
+                r#"
+                SELECT id, name, slug, owner_user_id, created_at, updated_at
+                FROM organizations
+                WHERE name ILIKE $1 OR slug ILIKE $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(pattern)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, (Uuid, String, String, Uuid, DateTime<Utc>, DateTime<Utc>)>(
+                r#"
+                SELECT id, name, slug, owner_user_id, created_at, updated_at
+                FROM organizations
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2
+                "#,
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, name, slug, owner_user_id, created_at, updated_at)| Org {
+                    id,
+                    name,
+                    slug,
+                    owner_user_id,
+                    created_at,
+                    updated_at,
+                },
+            )
+            .collect())
+    }
+
     async fn delete_by_id(&self, id: Uuid) -> Result<(), OrgError> {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(id)
@@ -364,6 +430,33 @@ pub mod test_support {
                 .collect();
             out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             Ok(out)
+        }
+
+        async fn list_all(
+            &self,
+            q: Option<&str>,
+            limit: i64,
+            offset: i64,
+        ) -> Result<Vec<Org>, OrgError> {
+            let limit = limit.clamp(1, 200) as usize;
+            let offset = offset.max(0) as usize;
+            let q_lower = q
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty());
+            let rows = self.rows.lock().unwrap();
+            let mut out: Vec<Org> = rows
+                .values()
+                .filter(|o| match q_lower.as_ref() {
+                    None => true,
+                    Some(q) => {
+                        o.name.to_lowercase().contains(q)
+                            || o.slug.to_lowercase().contains(q)
+                    }
+                })
+                .cloned()
+                .collect();
+            out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(out.into_iter().skip(offset).take(limit).collect())
         }
 
         async fn delete_by_id(&self, id: Uuid) -> Result<(), OrgError> {

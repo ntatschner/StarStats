@@ -698,6 +698,11 @@ export type AdminUserListResponse =
 export type GrantRoleRequest = apiSchema['schemas']['GrantRoleRequest'];
 export type RoleTransitionResponse =
   apiSchema['schemas']['RoleTransitionResponse'];
+export type AdminOrgDto = apiSchema['schemas']['AdminOrgDto'];
+export type AdminOrgListResponse =
+  apiSchema['schemas']['AdminOrgListResponse'];
+export type AdminOrgDeleteResponse =
+  apiSchema['schemas']['AdminOrgDeleteResponse'];
 export type SubmissionTransitionResponse =
   apiSchema['schemas']['SubmissionTransitionResponse'];
 
@@ -875,6 +880,51 @@ export async function revokeAdminUserRole(
   return request<RoleTransitionResponse>(
     'DELETE',
     `/v1/admin/users/${encodeURIComponent(id)}/roles/${encodeURIComponent(role)}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Paginated orgs list (admin view across ALL orgs). */
+export async function getAdminOrgs(
+  bearer: string,
+  params: { q?: string; limit?: number; offset?: number } = {},
+): Promise<AdminOrgListResponse> {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set('q', params.q);
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<AdminOrgListResponse>(
+    'GET',
+    `/v1/admin/orgs${suffix}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Org detail for the admin console. */
+export async function getAdminOrg(
+  bearer: string,
+  slug: string,
+): Promise<AdminOrgDto> {
+  return request<AdminOrgDto>(
+    'GET',
+    `/v1/admin/orgs/${encodeURIComponent(slug)}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Admin force-delete an org. Wipes SpiceDB relationships + the
+ *  Postgres row. Admin-only. */
+export async function deleteAdminOrg(
+  bearer: string,
+  slug: string,
+): Promise<AdminOrgDeleteResponse> {
+  return request<AdminOrgDeleteResponse>(
+    'DELETE',
+    `/v1/admin/orgs/${encodeURIComponent(slug)}`,
     undefined,
     bearer,
   );

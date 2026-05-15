@@ -114,6 +114,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_orgs_admin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/orgs/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_org_admin"];
+        put?: never;
+        post?: never;
+        delete: operations["delete_org_admin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/smtp": {
         parameters: {
             query?: never;
@@ -1486,6 +1518,28 @@ export interface components {
         };
         AddMemberResponse: {
             added: boolean;
+        };
+        AdminOrgDeleteResponse: {
+            deleted: boolean;
+        };
+        AdminOrgDto: {
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /**
+             * Format: int32
+             * @description Active SpiceDB member relationships (owner + admin + member
+             *     roles, deduplicated). Surfaced so admins can spot
+             *     abandoned-but-not-empty orgs at a glance.
+             */
+            member_count: number;
+            name: string;
+            owner_user_id: string;
+            slug: string;
+        };
+        AdminOrgListResponse: {
+            has_more: boolean;
+            orgs: components["schemas"]["AdminOrgDto"][];
         };
         AdminQueueResponse: {
             /**
@@ -2902,6 +2956,132 @@ export interface operations {
             };
             /** @description Database error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_orgs_admin: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Orgs page (most recent first) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOrgListResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_org_admin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Org detail with member count */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOrgDto"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Org not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_org_admin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Org deleted (idempotent) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOrgDeleteResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks admin role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Org not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

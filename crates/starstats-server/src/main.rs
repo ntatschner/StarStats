@@ -37,6 +37,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod admin_org_routes;
 mod admin_routes;
 mod admin_submission_routes;
 mod admin_user_routes;
@@ -343,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
     let preferences_router = preferences_routes::routes(preferences);
     let magic_router = magic_link_routes::routes(users.clone(), magic_link_store);
     let totp_router = totp_routes::routes(users.clone(), recovery_store);
-    let org_router = org_routes::routes(orgs, users.clone());
+    let org_router = org_routes::routes(orgs.clone(), users.clone());
     let reference_router = reference_routes::routes(reference_store.clone());
     let submission_router = submission_routes::routes(submissions_store.clone());
     // Admin sub-routers — gated by RequireAdmin / RequireModerator
@@ -354,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_router = admin_routes::router()
         .merge(admin_submission_routes::router(submissions_store))
         .merge(admin_user_routes::router(users.clone()))
+        .merge(admin_org_routes::router(orgs.clone()))
         .merge(smtp_admin_routes::router(
             smtp_config_store.clone(),
             users.clone(),
