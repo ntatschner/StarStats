@@ -110,10 +110,7 @@ export default async function AdminLandingPage() {
         />
       </div>
 
-      <section
-        className="ss-card"
-        style={{ padding: '20px 24px', opacity: 0.7 }}
-      >
+      <section className="ss-card" style={{ padding: '20px 24px' }}>
         <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
           Recent admin actions
         </div>
@@ -125,19 +122,26 @@ export default async function AdminLandingPage() {
             letterSpacing: '-0.01em',
           }}
         >
-          Coming in a future slice
+          Open the audit log
         </h2>
         <p
           style={{
-            margin: '10px 0 0',
+            margin: '10px 0 16px',
             color: 'var(--fg-muted)',
             fontSize: 13,
             lineHeight: 1.6,
           }}
         >
-          The audit log endpoint lands in Slice 5 — accept/reject/dismiss
-          decisions will surface here with attribution and reasons.
+          Every state-changing API call writes one hash-chained row. The
+          viewer is filterable by actor, action, and timestamp range.
         </p>
+        <Link
+          href={'/admin/audit' as Route}
+          className="ss-btn ss-btn--ghost"
+          style={{ textDecoration: 'none' }}
+        >
+          Audit log →
+        </Link>
       </section>
     </div>
   );

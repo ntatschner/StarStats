@@ -101,10 +101,19 @@ export function AdminNav({ current }: { current: CurrentTab }) {
           );
         }
 
+        // `prefetch={false}` because the admin tabs each fetch
+        // session-scoped data on render — prefetching them on viewport
+        // entry burns one request per tab on every admin page visit
+        // (8 tabs × N pages = thrash). It also dodges a Next.js
+        // client-router state bug where one tab (audit) would silently
+        // abort click navigation if its prefetched RSC was in a
+        // transient state from an earlier visit; disabling prefetch
+        // makes every click a fresh navigation request.
         return (
           <Link
             key={t.id}
             href={t.href!}
+            prefetch={false}
             data-active={active ? 'true' : undefined}
             style={{
               ...baseStyle,
