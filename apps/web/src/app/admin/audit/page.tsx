@@ -33,6 +33,29 @@ interface SearchParams {
 
 const PAGE_SIZE = 50;
 
+/**
+ * `<input type="datetime-local">` submits values as `YYYY-MM-DDTHH:MM`
+ * (or `YYYY-MM-DDTHH:MM:SS`) with NO timezone — the spec deliberately
+ * treats it as wall-clock time. The Rust API deserializes the field
+ * as `chrono::DateTime<Utc>` which demands RFC 3339, so we have to
+ * append seconds (if missing) and a `Z` suffix before sending.
+ *
+ * The user's intent ("12:00 today") is interpreted as UTC by this
+ * shim. A future iteration could read the browser's TZ offset and
+ * convert properly, but UTC keeps the admin tool predictable across
+ * sessions and is what an audit timeline wants anyway.
+ *
+ * Returns `null` when the input is unparseable so the API call can
+ * skip the filter rather than 400.
+ */
+function normalizeDateTimeLocal(raw: string): string | null {
+  if (!raw) return null;
+  if (/Z$|[+-]\d{2}:\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(raw)) return `${raw}Z`;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) return `${raw}:00Z`;
+  return null;
+}
+
 export default async function AdminAuditPage(props: {
   searchParams: Promise<SearchParams>;
 }) {
@@ -46,13 +69,22 @@ export default async function AdminAuditPage(props: {
   const until = params.until?.trim() ?? '';
   const offset = parseOffset(params.offset);
 
+  const sinceIso = normalizeDateTimeLocal(since);
+  const untilIso = normalizeDateTimeLocal(until);
+  // If the user typed something that isn't a valid datetime (e.g.
+  // pasted gibberish into the URL), drop the filter rather than 400.
+  // We surface the dropped filter below the bar so they know.
+  const sinceDropped = since !== '' && sinceIso === null;
+  const untilDropped = until !== '' && untilIso === null;
+
   let result: AuditListResponse;
+  let badRequestError: string | null = null;
   try {
     result = await getAdminAuditLog(session.token, {
       actor: actor || undefined,
       action: action || undefined,
-      since: since || undefined,
-      until: until || undefined,
+      since: sinceIso ?? undefined,
+      until: untilIso ?? undefined,
       limit: PAGE_SIZE,
       offset,
     });
@@ -63,7 +95,14 @@ export default async function AdminAuditPage(props: {
     if (e instanceof ApiCallError && e.status === 403) {
       redirect('/dashboard');
     }
-    throw e;
+    // 400 means the API rejected one of our params. Show inline so
+    // the page still renders (the filter bar stays usable).
+    if (e instanceof ApiCallError && e.status === 400) {
+      badRequestError = e.message;
+      result = { entries: [], has_more: false };
+    } else {
+      throw e;
+    }
   }
 
   const hasNewer = offset > 0;
@@ -121,6 +160,30 @@ export default async function AdminAuditPage(props: {
         since={since}
         until={until}
       />
+
+      {(badRequestError || sinceDropped || untilDropped) && (
+        <div
+          className="ss-badge"
+          style={{
+            alignSelf: 'flex-start',
+            borderColor: 'var(--danger)',
+            color: 'var(--danger)',
+            fontSize: 12,
+            lineHeight: 1.4,
+            padding: '6px 10px',
+          }}
+        >
+          {badRequestError
+            ? `API rejected the request: ${badRequestError}`
+            : `Ignored unparseable ${
+                sinceDropped && untilDropped
+                  ? 'since/until'
+                  : sinceDropped
+                    ? 'since'
+                    : 'until'
+              } filter — expected YYYY-MM-DDTHH:MM`}
+        </div>
+      )}
 
       <section className="ss-card" style={{ padding: 0, overflow: 'hidden' }}>
         {result.entries.length === 0 ? (
