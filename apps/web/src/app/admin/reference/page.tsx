@@ -81,9 +81,9 @@ export default async function AdminReferencePage() {
             maxWidth: 640,
           }}
         >
-          The wiki-sync cron writes here daily. If a category hasn't
-          been touched in a while, the sync is probably broken
-          upstream — check the server logs.
+          The wiki-sync cron writes here daily. If a category
+          hasn&apos;t been touched in a while, the sync is probably
+          broken upstream — check the server logs.
         </p>
       </header>
 
