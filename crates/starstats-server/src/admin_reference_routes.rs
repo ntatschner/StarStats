@@ -77,7 +77,9 @@ pub struct AdminReferenceEntriesParams {
     /// ~20k (items) and the admin tool isn't a hot path.
     #[serde(default)]
     pub q: Option<String>,
-    /// 1-based page number; defaults to 1. Pages of 100.
+    /// Page size; defaults to 100, capped at 500. Larger than the
+    /// 50/200 used elsewhere because entries are pure metadata —
+    /// no SpiceDB fan-out, no JOINs — so wider pages are cheap.
     #[serde(default)]
     pub limit: Option<usize>,
     #[serde(default)]

@@ -23,9 +23,15 @@ const FEATURES: ReadonlyArray<{
   },
   {
     glyph: '↗',
-    title: 'Share what you want',
+    title: 'Share what you want, exactly',
     body:
-      'Public profile, friends-only, org-only, or fully private. Prove an RSI handle is yours by pasting a code into your bio for one minute.',
+      'Per-event visibility on top of profile-level controls: public, RSI org-only, named-handle grants with expiry, or fully private. Verify a handle is yours by pasting a code into your bio for a minute.',
+  },
+  {
+    glyph: '◈',
+    title: 'Org workspaces',
+    body:
+      'RSI org owners get a shared dashboard with roles enforced by Zanzibar-style ReBAC — per-org privacy is a relationship check, not a row filter.',
   },
   {
     glyph: '✦',
@@ -44,6 +50,12 @@ const FEATURES: ReadonlyArray<{
     title: 'Locked-down sign-in',
     body:
       'Magic link or password, two-factor with backup codes, per-device pairing. Handle verification stops anyone claiming yours.',
+  },
+  {
+    glyph: '⌘',
+    title: 'Self-host the whole stack',
+    body:
+      'Bring your own Postgres + SpiceDB and run the API on your own box. Comes with a built-in admin console for roles, orgs, audit log, and reference-data inspection.',
   },
 ];
 
@@ -155,7 +167,7 @@ export default async function HomePage() {
                   verticalAlign: 'middle',
                 }}
               />
-              v0.4 · Pyro patch ready
+              v0.0.3-beta · Pyro patch ready
             </div>
             <h1
               style={{

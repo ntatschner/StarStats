@@ -87,8 +87,19 @@ Pulled from RSI (when you've pasted your session cookie):
   Members are suppressed at ingest; the web timeline renders the
   summary with a friendly per-rule label and event count.
 - **Web companion.** A Next.js dashboard that surfaces the same data
-  with sharing controls and a longer history view than the tray
-  affords.
+  with a longer history view than the tray affords.
+- **Granular sharing.** Per-event visibility on top of profile-level
+  controls: public, RSI org-only, named-handle grants (with expiry +
+  notes), or fully private. Inbound shares land on a dedicated
+  `/sharing` page with a nav badge for unread.
+- **Org workspace.** RSI org owners get a shared dashboard with
+  member roles enforced by Zanzibar-style ReBAC (SpiceDB), so per-org
+  privacy is a relationship check rather than a row filter.
+- **Self-hosting + admin console.** Bring your own Postgres +
+  SpiceDB and run the API on your own box. A built-in admin surface
+  covers role grants (moderator / admin with self-revoke protection),
+  org force-delete with confirmation, system-wide audit log filtering,
+  and read-only inspection of the wiki-sync reference data.
 - **EAC-safe by construction.** See
   [`EAC-SAFETY.md`](EAC-SAFETY.md). It's the entire reason this
   project exists.
@@ -219,8 +230,6 @@ explicitly aren't done yet:
 - The `starstats.app` website is registered but not deployed — links
   to it in this README are forward-looking.
 - macOS builds. Tauri targets it; CI doesn't yet.
-- Sharing UI in the web app is partial — public profile views are
-  there, granular per-event sharing isn't.
 - A formal stable API. Until 1.0 the OpenAPI spec is allowed to break
   on minor releases.
 
