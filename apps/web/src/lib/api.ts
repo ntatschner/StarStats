@@ -690,6 +690,8 @@ export type WithdrawResponse = apiSchema['schemas']['WithdrawResponse'];
 
 export type AdminQueueResponse =
   apiSchema['schemas']['AdminQueueResponse'];
+export type AuditEntryDto = apiSchema['schemas']['AuditEntryDto'];
+export type AuditListResponse = apiSchema['schemas']['AuditListResponse'];
 export type SubmissionTransitionResponse =
   apiSchema['schemas']['SubmissionTransitionResponse'];
 
@@ -808,6 +810,42 @@ export async function getAdminSubmissionQueue(
   return request<AdminQueueResponse>(
     'GET',
     `/v1/admin/submissions/queue?${qs.toString()}`,
+    undefined,
+    bearer,
+  );
+}
+
+/**
+ * Paginated audit-log fetch for the /admin/audit page. Server is
+ * gated on moderator role; the client gates the page on
+ * `session.staffRoles` for UX but never trusts the cookie alone.
+ *
+ * Filters are passed through as querystring params; empty/undefined
+ * filters are omitted so the server treats them as "no filter"
+ * rather than "filter for empty string".
+ */
+export async function getAdminAuditLog(
+  bearer: string,
+  params: {
+    actor?: string;
+    action?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<AuditListResponse> {
+  const qs = new URLSearchParams();
+  if (params.actor) qs.set('actor', params.actor);
+  if (params.action) qs.set('action', params.action);
+  if (params.since) qs.set('since', params.since);
+  if (params.until) qs.set('until', params.until);
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<AuditListResponse>(
+    'GET',
+    `/v1/admin/audit${suffix}`,
     undefined,
     bearer,
   );

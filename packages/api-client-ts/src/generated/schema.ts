@@ -92,6 +92,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/admin/audit — paginated audit-log viewer. Gated on
+         *     moderator; admins inherit. Returns the most recent rows first
+         *     because the timeline expectation on the admin UI is "what just
+         *     happened?".
+         */
+        get: operations["list_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/smtp": {
         parameters: {
             query?: never;
@@ -1421,6 +1443,30 @@ export interface components {
             detail?: string | null;
             error: string;
         };
+        /**
+         * @description Audit list DTO surfaced on `GET /v1/admin/audit`. `payload` is
+         *     passed through as opaque JSON — the admin UI renders it as
+         *     pretty-printed JSON because the schema varies by `action`.
+         */
+        AuditEntryDto: {
+            action: string;
+            actor_handle?: string | null;
+            actor_sub?: string | null;
+            /** Format: date-time */
+            occurred_at: string;
+            payload: unknown;
+            /** Format: int64 */
+            seq: number;
+        };
+        AuditListResponse: {
+            entries: components["schemas"]["AuditEntryDto"][];
+            /**
+             * @description True when the server returned a full page — the next page
+             *     likely has more rows. Cheaper than COUNT(*) on a growing
+             *     table.
+             */
+            has_more: boolean;
+        };
         AuthResponse: {
             claimed_handle: string;
             /**
@@ -2689,6 +2735,66 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ReadyResponseSchema"];
                 };
+            };
+        };
+    };
+    list_audit: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring match against `actor_handle`. */
+                actor?: string;
+                /**
+                 * @description Exact match against the `action` column (e.g.
+                 *     `share.granted`, `submissions.accepted`).
+                 */
+                action?: string;
+                /** @description ISO-8601 lower bound on `occurred_at`. */
+                since?: string;
+                /** @description ISO-8601 upper bound on `occurred_at`. */
+                until?: string;
+                /** @description Page size, clamped server-side to [1, 200]. */
+                limit?: number;
+                /**
+                 * @description Offset for pagination. Cursor-based pagination is a future
+                 *     wave once volume warrants it.
+                 */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audit entries (most recent first) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditListResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

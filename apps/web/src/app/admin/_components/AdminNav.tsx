@@ -29,13 +29,11 @@ const TABS: ReadonlyArray<{
   },
   { id: 'smtp', label: 'SMTP', href: '/admin/smtp' as Route },
   {
-    // Slice 5 — audit log endpoint not yet implemented; render the
-    // tab as a disabled placeholder so the eventual landing spot is
-    // visible to moderators today.
+    // Audit log viewer landed alongside the admin build-out — the
+    // tab is live now.
     id: 'audit',
     label: 'Audit log',
-    href: undefined,
-    tag: 'Slice 5',
+    href: '/admin/audit' as Route,
   },
 ];
 

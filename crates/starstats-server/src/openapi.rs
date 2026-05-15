@@ -11,6 +11,7 @@
 //! to fetch live; the same spec is dumped to stdout by the
 //! `starstats-server-openapi` bin for offline TS codegen.
 
+use crate::admin_routes;
 use crate::admin_submission_routes;
 use crate::api_error;
 use crate::auth_routes;
@@ -158,6 +159,7 @@ impl Modify for SecurityAddon {
         submission_routes::vote,
         submission_routes::flag,
         submission_routes::withdraw,
+        admin_routes::list_audit,
         admin_submission_routes::accept,
         admin_submission_routes::reject,
         admin_submission_routes::dismiss_flag,
@@ -222,6 +224,8 @@ impl Modify for SecurityAddon {
         submission_routes::FlagResponse,
         submission_routes::WithdrawResponse,
         // Admin submission moderation
+        admin_routes::AuditEntryDto,
+        admin_routes::AuditListResponse,
         admin_submission_routes::SubmissionTransitionResponse,
         admin_submission_routes::RejectRequest,
         admin_submission_routes::AdminQueueResponse,

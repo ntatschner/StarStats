@@ -42,9 +42,60 @@ pub struct AuditEntry {
     pub payload: Value,
 }
 
+/// Read-side record. Includes the DB-assigned `seq` + `occurred_at` so
+/// the admin audit page can paginate and timeline-sort. Hash columns
+/// (`prev_hash`/`row_hash`) are NOT surfaced — those are integrity
+/// metadata, not user-visible.
+#[derive(Debug, Clone)]
+pub struct AuditEntryRecord {
+    pub seq: i64,
+    pub occurred_at: DateTime<Utc>,
+    pub actor_sub: Option<String>,
+    pub actor_handle: Option<String>,
+    pub action: String,
+    pub payload: Value,
+}
+
+/// Filters for `AuditQuery::list`. All fields are optional; an empty
+/// filter returns the most recent rows up to `limit`. Pagination is
+/// offset-based — cursor pagination deferred until volume warrants
+/// the extra plumbing.
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilters {
+    /// Match against `actor_handle` (case-insensitive substring).
+    /// Picked over `actor_sub` because admins reason about handles,
+    /// not UUIDs.
+    pub actor_handle: Option<String>,
+    /// Match against `action` (exact; the field is a small enum-like
+    /// dictionary on the write side).
+    pub action: Option<String>,
+    /// Inclusive lower bound on `occurred_at`.
+    pub since: Option<DateTime<Utc>>,
+    /// Inclusive upper bound on `occurred_at`.
+    pub until: Option<DateTime<Utc>>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 #[async_trait]
 pub trait AuditLog: Send + Sync + 'static {
     async fn append(&self, entry: AuditEntry) -> Result<(), AuditError>;
+}
+
+/// Read-side trait — separate from [`AuditLog`] so the existing
+/// `Arc<dyn AuditLog>` plumbing stays focused on writes. Admin
+/// surfaces inject `Arc<dyn AuditQuery>` independently.
+#[async_trait]
+pub trait AuditQuery: Send + Sync + 'static {
+    /// Return up to `filters.limit` rows matching the filters,
+    /// ordered by `seq DESC` (most recent first), skipping
+    /// `filters.offset` rows. The returned `Vec` length plus
+    /// whatever the caller knows about `offset` is enough to drive
+    /// "has more" — explicit count queries are deferred.
+    async fn list(
+        &self,
+        filters: AuditFilters,
+    ) -> Result<Vec<AuditEntryRecord>, AuditError>;
 }
 
 pub struct PostgresAuditLog {
@@ -152,6 +203,100 @@ impl AuditLog for PostgresAuditLog {
     }
 }
 
+#[async_trait]
+impl AuditQuery for PostgresAuditLog {
+    async fn list(
+        &self,
+        filters: AuditFilters,
+    ) -> Result<Vec<AuditEntryRecord>, AuditError> {
+        // The handler clamps these into a safe range before calling;
+        // defence-in-depth here keeps a misuse from issuing an
+        // unbounded scan.
+        let limit = filters.limit.clamp(1, 500);
+        let offset = filters.offset.max(0);
+
+        // Filters are composed conditionally so a wide-open query
+        // doesn't pay for noop predicates. `actor_handle` uses ILIKE
+        // for substring search — handles are ASCII so the lower(...)
+        // ICU concern doesn't apply, but ILIKE makes the intent
+        // obvious to the next reader.
+        let mut sql = String::from(
+            "SELECT seq, occurred_at, actor_sub, actor_handle, action, payload
+             FROM audit_log
+             WHERE 1=1",
+        );
+        if filters.actor_handle.is_some() {
+            sql.push_str(" AND actor_handle ILIKE $1");
+        }
+        if filters.action.is_some() {
+            sql.push_str(if filters.actor_handle.is_some() {
+                " AND action = $2"
+            } else {
+                " AND action = $1"
+            });
+        }
+        // since/until use bind indices that depend on whether the
+        // earlier filters are present, so build the placeholders
+        // dynamically.
+        let mut next_idx = 1
+            + filters.actor_handle.is_some() as usize
+            + filters.action.is_some() as usize;
+        if filters.since.is_some() {
+            sql.push_str(&format!(" AND occurred_at >= ${next_idx}"));
+            next_idx += 1;
+        }
+        if filters.until.is_some() {
+            sql.push_str(&format!(" AND occurred_at <= ${next_idx}"));
+            next_idx += 1;
+        }
+        sql.push_str(&format!(
+            " ORDER BY seq DESC LIMIT ${} OFFSET ${}",
+            next_idx,
+            next_idx + 1,
+        ));
+
+        let mut q = sqlx::query_as::<
+            _,
+            (
+                i64,
+                DateTime<Utc>,
+                Option<String>,
+                Option<String>,
+                String,
+                Value,
+            ),
+        >(&sql);
+        if let Some(handle) = filters.actor_handle.as_ref() {
+            q = q.bind(format!("%{handle}%"));
+        }
+        if let Some(action) = filters.action.as_ref() {
+            q = q.bind(action);
+        }
+        if let Some(since) = filters.since {
+            q = q.bind(since);
+        }
+        if let Some(until) = filters.until {
+            q = q.bind(until);
+        }
+        q = q.bind(limit).bind(offset);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(seq, occurred_at, actor_sub, actor_handle, action, payload)| {
+                AuditEntryRecord {
+                    seq,
+                    occurred_at,
+                    actor_sub,
+                    actor_handle,
+                    action,
+                    payload,
+                }
+            })
+            .collect())
+    }
+}
+
 /// Build canonical bytes for a JSON value: object keys in
 /// lexicographic order, no whitespace. `serde_json::to_vec` already
 /// produces no whitespace; we reach into the value to sort keys.
@@ -210,6 +355,39 @@ pub mod test_support {
                 .expect("audit memlog poisoned")
                 .push(entry);
             Ok(())
+        }
+    }
+
+    /// Test-only `AuditQuery` impl. Doesn't bother with predicate
+    /// composition — tests pin behaviour at the route layer where
+    /// the Postgres impl runs the real SQL, so this just surfaces
+    /// every entry seq'd by insertion order.
+    #[async_trait]
+    impl AuditQuery for MemoryAuditLog {
+        async fn list(
+            &self,
+            filters: AuditFilters,
+        ) -> Result<Vec<AuditEntryRecord>, AuditError> {
+            let snap = self.entries.lock().expect("audit memlog poisoned");
+            let limit = filters.limit.clamp(1, 500) as usize;
+            let offset = filters.offset.max(0) as usize;
+            let now = Utc::now();
+            let records: Vec<AuditEntryRecord> = snap
+                .iter()
+                .enumerate()
+                .rev()
+                .skip(offset)
+                .take(limit)
+                .map(|(idx, e)| AuditEntryRecord {
+                    seq: (idx as i64) + 1,
+                    occurred_at: now,
+                    actor_sub: e.actor_sub.clone(),
+                    actor_handle: e.actor_handle.clone(),
+                    action: e.action.clone(),
+                    payload: e.payload.clone(),
+                })
+                .collect();
+            Ok(records)
         }
     }
 }

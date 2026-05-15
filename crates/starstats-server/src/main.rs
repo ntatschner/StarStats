@@ -199,9 +199,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the audit log with the optional mirror. `with_mirror(None)`
     // is the no-mirror path; `Some(...)` wires best-effort PUTs.
+    // The same `PostgresAuditLog` instance is shared as both the
+    // writer (Arc<dyn AuditLog>) and the reader (Arc<dyn AuditQuery>)
+    // — there's only ever one DB pool behind it, so cloning the Arc
+    // is cheap and keeps the two trait views in sync without
+    // duplicating connection management.
     let mirror_for_audit: Option<Arc<MinioMirror>> = minio_mirror.as_ref().clone().map(Arc::new);
-    let audit: Arc<dyn AuditLog> =
-        Arc::new(PostgresAuditLog::new(pool.clone()).with_mirror(mirror_for_audit));
+    let pg_audit = Arc::new(
+        PostgresAuditLog::new(pool.clone()).with_mirror(mirror_for_audit),
+    );
+    let audit: Arc<dyn AuditLog> = pg_audit.clone();
+    let audit_query: Arc<dyn crate::audit::AuditQuery> = pg_audit;
 
     // Type-erased handle for the StaffRoleStore extension. The admin
     // extractors look up `Arc<dyn StaffRoleStore>` from request
@@ -453,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(health_pool))
         .layer(Extension(spicedb))
         .layer(Extension(share_metadata_dyn))
+        .layer(Extension(audit_query))
         .layer(Extension(minio_mirror))
         .layer(Extension(mailer))
         .layer(Extension(mailer_swap))
