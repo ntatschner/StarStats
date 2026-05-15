@@ -9,7 +9,14 @@
 import Link from 'next/link';
 import type { Route } from 'next';
 
-type CurrentTab = 'dashboard' | 'submissions' | 'smtp' | 'audit';
+type CurrentTab =
+  | 'dashboard'
+  | 'submissions'
+  | 'users'
+  | 'orgs'
+  | 'reference'
+  | 'smtp'
+  | 'audit';
 
 const TABS: ReadonlyArray<{
   id: CurrentTab;
@@ -27,6 +34,9 @@ const TABS: ReadonlyArray<{
     // ("nothing to triage" lands you on the right bucket).
     href: '/admin/submissions?status=review' as Route,
   },
+  { id: 'users', label: 'Users', href: '/admin/users' as Route },
+  { id: 'orgs', label: 'Orgs', href: '/admin/orgs' as Route },
+  { id: 'reference', label: 'Reference', href: '/admin/reference' as Route },
   { id: 'smtp', label: 'SMTP', href: '/admin/smtp' as Route },
   {
     // Audit log viewer landed alongside the admin build-out — the

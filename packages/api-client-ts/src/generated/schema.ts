@@ -210,6 +210,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_users_admin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_user_admin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{id}/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["grant_role"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{id}/roles/{role}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_role"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/devices": {
         parameters: {
             query?: never;
@@ -1433,6 +1497,31 @@ export interface components {
             items: components["schemas"]["SubmissionDto"][];
         };
         /**
+         * @description Lightweight admin-side view of a user. Skips secrets (password
+         *     hash, TOTP secret) and verification tokens. Keeps only the bits
+         *     an admin needs to triage an account.
+         */
+        AdminUserDto: {
+            claimed_handle: string;
+            /** Format: date-time */
+            created_at: string;
+            email: string;
+            email_verified: boolean;
+            /** Format: uuid */
+            id: string;
+            rsi_verified: boolean;
+            /**
+             * @description Active staff roles (e.g. `["moderator"]`, `["admin"]`).
+             *     Always present; empty array for ordinary users.
+             */
+            staff_roles: string[];
+            totp_enabled: boolean;
+        };
+        AdminUserListResponse: {
+            has_more: boolean;
+            users: components["schemas"]["AdminUserDto"][];
+        };
+        /**
          * @description The single error envelope shape emitted by every API endpoint.
          *
          *     `detail` is omitted from the serialised output when `None` so
@@ -1694,6 +1783,15 @@ export interface components {
              *     nullable wire shape leaves space).
              */
             your_role?: string | null;
+        };
+        GrantRoleRequest: {
+            /**
+             * @description Optional free-text note for the audit trail (e.g.
+             *     "promoted at quarterly review"). Capped at 280 chars by the
+             *     handler; longer values rejected with 400.
+             */
+            reason?: string | null;
+            role: string;
         };
         HangarPushRequestSchema: {
             /** Format: int32 */
@@ -2138,6 +2236,19 @@ export interface components {
         };
         RevokeShareResponse: {
             revoked: boolean;
+        };
+        RoleTransitionResponse: {
+            /**
+             * @description Whether the call actually changed state. `false` for a grant
+             *     against an already-active role or a revoke against an
+             *     already-inactive role.
+             */
+            changed: boolean;
+            /**
+             * @description The user's active role set after the operation. Lets the UI
+             *     re-render without a follow-up GET.
+             */
+            staff_roles: string[];
         };
         /**
          * @description One organisation listing pulled from a citizen's
@@ -3189,6 +3300,197 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApiErrorBody"];
                 };
+            };
+        };
+    };
+    list_users_admin: {
+        parameters: {
+            query?: {
+                /** @description Substring search against `claimed_handle` OR `email`. */
+                q?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Users page (most recent first) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserListResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_user_admin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserDto"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description User not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    grant_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Target user UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description Role granted (idempotent) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleTransitionResponse"];
+                };
+            };
+            /** @description Invalid role or reason */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks admin role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Target user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Target user UUID */
+                id: string;
+                /** @description Role to revoke (moderator|admin) */
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Role revoked (idempotent) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleTransitionResponse"];
+                };
+            };
+            /** @description Invalid role */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks admin role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Target user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

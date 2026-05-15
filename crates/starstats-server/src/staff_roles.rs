@@ -131,6 +131,18 @@ pub trait StaffRoleStore: Send + Sync + 'static {
         granted_by: Option<Uuid>,
         reason: Option<&str>,
     ) -> Result<bool, StaffRoleError>;
+
+    /// Soft-revoke the active grant for (user, role). Returns `true`
+    /// if an active grant was found and stamped, `false` if no
+    /// active grant existed (idempotent). The historical row is
+    /// preserved with `revoked_at` + `revoked_by_user_id` so the
+    /// chain "who used to be a moderator" remains queryable.
+    async fn revoke(
+        &self,
+        user_id: Uuid,
+        role: StaffRole,
+        revoked_by: Option<Uuid>,
+    ) -> Result<bool, StaffRoleError>;
 }
 
 pub struct PostgresStaffRoleStore {
@@ -184,6 +196,31 @@ impl StaffRoleStore for PostgresStaffRoleStore {
         .await?;
 
         Ok(inserted.is_some())
+    }
+
+    async fn revoke(
+        &self,
+        user_id: Uuid,
+        role: StaffRole,
+        revoked_by: Option<Uuid>,
+    ) -> Result<bool, StaffRoleError> {
+        // UPDATE the single active row (per the partial unique
+        // index). RETURNING id lets us tell "we revoked something"
+        // apart from "no active grant existed" without a follow-up
+        // SELECT.
+        let updated: Option<(Uuid,)> = sqlx::query_as(
+            "UPDATE staff_roles
+             SET revoked_at = NOW(), revoked_by_user_id = $1
+             WHERE user_id = $2 AND role = $3 AND revoked_at IS NULL
+             RETURNING id",
+        )
+        .bind(revoked_by)
+        .bind(user_id)
+        .bind(role.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(updated.is_some())
     }
 }
 
@@ -357,6 +394,21 @@ pub mod test_support {
                 reason: reason.map(str::to_owned),
             });
             Ok(true)
+        }
+
+        async fn revoke(
+            &self,
+            user_id: Uuid,
+            role: StaffRole,
+            _revoked_by: Option<Uuid>,
+        ) -> Result<bool, StaffRoleError> {
+            // The memory store has no concept of "soft delete"; a
+            // revoke is a remove. Tests checking "is the role
+            // active after revoke?" still get the right answer.
+            let mut rows = self.rows.lock().unwrap();
+            let before = rows.len();
+            rows.retain(|g| !(g.user_id == user_id && g.role == role));
+            Ok(rows.len() < before)
         }
     }
 }

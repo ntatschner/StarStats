@@ -692,6 +692,12 @@ export type AdminQueueResponse =
   apiSchema['schemas']['AdminQueueResponse'];
 export type AuditEntryDto = apiSchema['schemas']['AuditEntryDto'];
 export type AuditListResponse = apiSchema['schemas']['AuditListResponse'];
+export type AdminUserDto = apiSchema['schemas']['AdminUserDto'];
+export type AdminUserListResponse =
+  apiSchema['schemas']['AdminUserListResponse'];
+export type GrantRoleRequest = apiSchema['schemas']['GrantRoleRequest'];
+export type RoleTransitionResponse =
+  apiSchema['schemas']['RoleTransitionResponse'];
 export type SubmissionTransitionResponse =
   apiSchema['schemas']['SubmissionTransitionResponse'];
 
@@ -810,6 +816,65 @@ export async function getAdminSubmissionQueue(
   return request<AdminQueueResponse>(
     'GET',
     `/v1/admin/submissions/queue?${qs.toString()}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Paginated users list for /admin/users. Substring search runs
+ *  server-side over claimed_handle OR email. */
+export async function getAdminUsers(
+  bearer: string,
+  params: { q?: string; limit?: number; offset?: number } = {},
+): Promise<AdminUserListResponse> {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set('q', params.q);
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<AdminUserListResponse>(
+    'GET',
+    `/v1/admin/users${suffix}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Detail fetch for a single user in /admin/users/[id]. */
+export async function getAdminUser(
+  bearer: string,
+  id: string,
+): Promise<AdminUserDto> {
+  return request<AdminUserDto>(
+    'GET',
+    `/v1/admin/users/${encodeURIComponent(id)}`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Grant a staff role to a user. Admin-only. Idempotent. */
+export async function grantAdminUserRole(
+  bearer: string,
+  id: string,
+  body: GrantRoleRequest,
+): Promise<RoleTransitionResponse> {
+  return postJson<RoleTransitionResponse>(
+    `/v1/admin/users/${encodeURIComponent(id)}/roles`,
+    body,
+    bearer,
+  );
+}
+
+/** Revoke a staff role from a user. Admin-only. Idempotent. */
+export async function revokeAdminUserRole(
+  bearer: string,
+  id: string,
+  role: 'moderator' | 'admin',
+): Promise<RoleTransitionResponse> {
+  return request<RoleTransitionResponse>(
+    'DELETE',
+    `/v1/admin/users/${encodeURIComponent(id)}/roles/${encodeURIComponent(role)}`,
     undefined,
     bearer,
   );

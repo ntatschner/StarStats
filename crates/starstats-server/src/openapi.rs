@@ -13,6 +13,7 @@
 
 use crate::admin_routes;
 use crate::admin_submission_routes;
+use crate::admin_user_routes;
 use crate::api_error;
 use crate::auth_routes;
 use crate::device_routes;
@@ -164,6 +165,10 @@ impl Modify for SecurityAddon {
         admin_submission_routes::reject,
         admin_submission_routes::dismiss_flag,
         admin_submission_routes::queue,
+        admin_user_routes::list_users_admin::<crate::users::PostgresUserStore>,
+        admin_user_routes::get_user_admin::<crate::users::PostgresUserStore>,
+        admin_user_routes::grant_role::<crate::users::PostgresUserStore>,
+        admin_user_routes::revoke_role::<crate::users::PostgresUserStore>,
         smtp_admin_routes::get_smtp,
         smtp_admin_routes::put_smtp,
         smtp_admin_routes::test_smtp,
@@ -226,6 +231,10 @@ impl Modify for SecurityAddon {
         // Admin submission moderation
         admin_routes::AuditEntryDto,
         admin_routes::AuditListResponse,
+        admin_user_routes::AdminUserDto,
+        admin_user_routes::AdminUserListResponse,
+        admin_user_routes::GrantRoleRequest,
+        admin_user_routes::RoleTransitionResponse,
         admin_submission_routes::SubmissionTransitionResponse,
         admin_submission_routes::RejectRequest,
         admin_submission_routes::AdminQueueResponse,

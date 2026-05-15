@@ -107,6 +107,21 @@ pub fn validate_handle(handle: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Filter shape for the admin `list_users` call. Empty filters
+/// return the most recently created users up to `limit`.
+#[derive(Debug, Clone, Default)]
+pub struct ListUsersFilters {
+    /// Case-insensitive substring match against `claimed_handle`
+    /// OR `email`. Admins reason about either depending on context
+    /// so a single field that matches both is more useful than
+    /// two separate filters.
+    pub q: Option<String>,
+    /// Page size, clamped by the handler to [1, 200].
+    pub limit: i64,
+    /// Offset for pagination.
+    pub offset: i64,
+}
+
 #[async_trait]
 pub trait UserStore: Send + Sync + 'static {
     async fn create(
@@ -121,6 +136,14 @@ pub trait UserStore: Send + Sync + 'static {
     /// Used by the sharing endpoints to validate that a recipient
     /// exists before mutating SpiceDB.
     async fn find_by_handle(&self, handle: &str) -> Result<Option<User>, UserError>;
+
+    /// Admin-only paginated list. Ordered by `created_at DESC` so
+    /// new signups surface first. Substring search runs over
+    /// `claimed_handle` OR `email` (case-insensitive).
+    async fn list_users(
+        &self,
+        filters: ListUsersFilters,
+    ) -> Result<Vec<User>, UserError>;
 
     // -- Email verification ------------------------------------------
     /// Stash a freshly-minted verification token + its expiry on the
@@ -431,6 +454,46 @@ impl UserStore for PostgresUserStore {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(user_from_row))
+    }
+
+    async fn list_users(
+        &self,
+        filters: ListUsersFilters,
+    ) -> Result<Vec<User>, UserError> {
+        let limit = filters.limit.clamp(1, 200);
+        let offset = filters.offset.max(0);
+        let q_norm = filters
+            .q
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let rows: Vec<UserRow> = if let Some(q) = q_norm.as_ref() {
+            let pattern = format!("%{q}%");
+            let sql = format!(
+                "SELECT {USER_SELECT} FROM users
+                 WHERE claimed_handle ILIKE $1 OR email ILIKE $1
+                 ORDER BY created_at DESC
+                 LIMIT $2 OFFSET $3"
+            );
+            sqlx::query_as(&sql)
+                .bind(pattern)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            let sql = format!(
+                "SELECT {USER_SELECT} FROM users
+                 ORDER BY created_at DESC
+                 LIMIT $1 OFFSET $2"
+            );
+            sqlx::query_as(&sql)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+        };
+        Ok(rows.into_iter().map(user_from_row).collect())
     }
 
     async fn set_verification_token(
@@ -929,6 +992,32 @@ pub mod test_support {
                 .values()
                 .find(|u| u.claimed_handle.eq_ignore_ascii_case(handle))
                 .cloned())
+        }
+
+        async fn list_users(
+            &self,
+            filters: ListUsersFilters,
+        ) -> Result<Vec<User>, UserError> {
+            let limit = filters.limit.clamp(1, 200) as usize;
+            let offset = filters.offset.max(0) as usize;
+            let q_lower = filters
+                .q
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty());
+            let rows = self.rows.lock().unwrap();
+            let mut filtered: Vec<User> = rows
+                .values()
+                .filter(|u| match q_lower.as_ref() {
+                    None => true,
+                    Some(q) => {
+                        u.claimed_handle.to_lowercase().contains(q)
+                            || u.email.to_lowercase().contains(q)
+                    }
+                })
+                .cloned()
+                .collect();
+            filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(filtered.into_iter().skip(offset).take(limit).collect())
         }
 
         async fn set_verification_token(

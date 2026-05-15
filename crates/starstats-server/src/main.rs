@@ -39,6 +39,7 @@ use std::time::Duration;
 
 mod admin_routes;
 mod admin_submission_routes;
+mod admin_user_routes;
 mod api_error;
 mod audit;
 mod audit_mirror;
@@ -352,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
     // moderation routes mount under it.
     let admin_router = admin_routes::router()
         .merge(admin_submission_routes::router(submissions_store))
+        .merge(admin_user_routes::router(users.clone()))
         .merge(smtp_admin_routes::router(
             smtp_config_store.clone(),
             users.clone(),

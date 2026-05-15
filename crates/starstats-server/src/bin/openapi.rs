@@ -24,6 +24,8 @@
 mod admin_routes;
 #[path = "../admin_submission_routes.rs"]
 mod admin_submission_routes;
+#[path = "../admin_user_routes.rs"]
+mod admin_user_routes;
 #[path = "../api_error.rs"]
 mod api_error;
 #[path = "../audit.rs"]
