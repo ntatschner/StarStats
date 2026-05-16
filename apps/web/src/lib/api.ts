@@ -688,11 +688,14 @@ export type IngestBatchDto = apiSchema['schemas']['IngestBatchDto'];
 
 export async function getIngestHistory(
   bearer: string,
-  params: { limit?: number; offset?: number } = {},
+  params: { limit?: number; offset?: number; deviceId?: string } = {},
 ): Promise<IngestHistoryResponse> {
   const qs = new URLSearchParams();
   if (params.limit !== undefined) qs.set('limit', String(params.limit));
   if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  // When deviceId is passed the server clamps to only that device's
+  // batches. Omitted → account-wide stream (current default).
+  if (params.deviceId) qs.set('device_id', params.deviceId);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return request<IngestHistoryResponse>(
     'GET',

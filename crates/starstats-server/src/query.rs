@@ -581,6 +581,12 @@ pub struct IngestHistoryParams {
     pub limit: u32,
     #[serde(default)]
     pub offset: u32,
+    /// Scope the result to a single paired device. Omit for the
+    /// account-wide stream (current default). Pre-0026 batches have
+    /// no device_id stamped and are correctly excluded from any
+    /// device-scoped filter.
+    #[serde(default)]
+    pub device_id: Option<uuid::Uuid>,
 }
 
 fn default_ingest_history_limit() -> u32 {
@@ -598,6 +604,12 @@ pub struct IngestBatchDto {
     pub occurred_at: DateTime<Utc>,
     pub batch_id: String,
     pub game_build: Option<String>,
+    /// Paired-device id, when the batch was posted by a tray client
+    /// holding a device JWT. `None` on legacy rows (pre-0026) and on
+    /// rows posted via user-scoped tokens. The Devices page reads
+    /// this to filter batches to the active device tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<uuid::Uuid>,
     pub total: i64,
     pub accepted: i64,
     pub duplicate: i64,
@@ -611,6 +623,7 @@ impl From<IngestBatchRow> for IngestBatchDto {
             occurred_at: r.occurred_at,
             batch_id: r.batch_id,
             game_build: r.game_build,
+            device_id: r.device_id,
             total: r.total,
             accepted: r.accepted,
             duplicate: r.duplicate,
@@ -642,7 +655,7 @@ pub async fn ingest_history<Q: EventQuery>(
     let offset = params.offset as i64;
 
     match query
-        .ingest_history_for_handle(&user.preferred_username, limit, offset)
+        .ingest_history_for_handle(&user.preferred_username, params.device_id, limit, offset)
         .await
     {
         Ok(rows) => (
@@ -2144,10 +2157,29 @@ mod tests {
             occurred_at,
             batch_id: format!("b{seq}"),
             game_build: Some("4.0-LIVE.test".into()),
+            device_id: None,
             total,
             accepted,
             duplicate: 0,
             rejected: total - accepted,
+        }
+    }
+
+    fn batch_with_device(
+        seq: i64,
+        occurred_at: DateTime<Utc>,
+        device_id: uuid::Uuid,
+    ) -> IngestBatchRow {
+        IngestBatchRow {
+            seq,
+            occurred_at,
+            batch_id: format!("b{seq}"),
+            game_build: Some("4.0-LIVE.test".into()),
+            device_id: Some(device_id),
+            total: 10,
+            accepted: 10,
+            duplicate: 0,
+            rejected: 0,
         }
     }
 
@@ -2178,6 +2210,64 @@ mod tests {
         assert_eq!(parsed.batches[1].seq, 10);
         assert_eq!(parsed.batches[0].total, 50);
         assert_eq!(parsed.batches[1].accepted, 198);
+    }
+
+    #[tokio::test]
+    async fn ingest_history_filters_by_device_id_when_passed() {
+        // Three batches under "Alice": two from device-A, one from
+        // device-B, one legacy (no device). Device-scoped query
+        // returns only the matching device's rows; absent query
+        // returns the whole account stream.
+        let now = Utc::now();
+        let dev_a = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let dev_b = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let mq = Arc::new(MemoryQuery::new(vec![]).with_ingest_history(vec![
+            (
+                "Alice".into(),
+                batch_with_device(1, now - Duration::hours(3), dev_a),
+            ),
+            ("Alice".into(), batch(2, now - Duration::hours(2), 5, 5)),
+            (
+                "Alice".into(),
+                batch_with_device(3, now - Duration::hours(1), dev_b),
+            ),
+            (
+                "Alice".into(),
+                batch_with_device(4, now - Duration::minutes(10), dev_a),
+            ),
+        ]));
+        let (issuer, verifier) = fresh_pair();
+        let app = router(mq, Arc::new(verifier));
+        let token = sign_token(&issuer, "Alice");
+
+        let (status, all) =
+            get_json::<IngestHistoryResponse>(app.clone(), "/v1/me/ingest-history", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(all.batches.len(), 4);
+
+        let (status, only_a) = get_json::<IngestHistoryResponse>(
+            app.clone(),
+            &format!("/v1/me/ingest-history?device_id={dev_a}"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(only_a.batches.len(), 2);
+        assert!(only_a.batches.iter().all(|b| b.device_id == Some(dev_a)));
+        // Newest first.
+        assert_eq!(only_a.batches[0].seq, 4);
+        assert_eq!(only_a.batches[1].seq, 1);
+
+        let (status, only_b) = get_json::<IngestHistoryResponse>(
+            app,
+            &format!("/v1/me/ingest-history?device_id={dev_b}"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(only_b.batches.len(), 1);
+        assert_eq!(only_b.batches[0].seq, 3);
+        assert_eq!(only_b.batches[0].device_id, Some(dev_b));
     }
 
     #[tokio::test]

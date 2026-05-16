@@ -177,6 +177,13 @@ pub async fn handle<S: EventStore>(
     // the request — the events themselves already landed. We trade
     // strict atomicity for availability; audit drift is detectable
     // out-of-band (and rare in practice).
+    //
+    // device_id is server-determined: read off the bearer token's
+    // device claim (populated for device-paired tokens by the auth
+    // extractor). User-tokens have None here — those rows show up in
+    // the account-wide stream and never match a `?device_id=` filter.
+    // Storing it inside the audit payload (rather than as a separate
+    // column) keeps the hash chain canonical — see migration 0026.
     let audit_entry = AuditEntry {
         actor_sub: Some(user.sub.clone()),
         actor_handle: Some(user.preferred_username.clone()),
@@ -185,6 +192,7 @@ pub async fn handle<S: EventStore>(
             "batch_id": batch.batch_id,
             "claimed_handle": batch.claimed_handle,
             "game_build": batch.game_build,
+            "device_id": user.device_id,
             "total": batch.events.len(),
             "accepted": accepted,
             "duplicate": duplicate,
@@ -420,5 +428,85 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event_type, "join_pu");
         assert!(rows[0].event_timestamp.is_some());
+    }
+
+    #[tokio::test]
+    async fn user_scoped_token_writes_audit_with_null_device_id() {
+        // User-scoped bearer tokens have no device claim; the audit
+        // payload's device_id must be JSON null so the per-device
+        // filter on /v1/me/ingest-history correctly excludes the row.
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+        let token = sign_token(&env.issuer, HANDLE);
+        let audit = Arc::new(MemoryAuditLog::default());
+        let app = router(store, env.verifier, audit.clone());
+
+        let body = batch(vec![sample_envelope("evt-u1")]);
+        let (status, _) = post_batch_with(&app, Some(&token), &body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let audited = audit.snapshot();
+        assert_eq!(audited.len(), 1);
+        // Payload contains the key, set to null.
+        assert!(
+            audited[0].payload.as_object().unwrap().contains_key("device_id"),
+            "device_id key must always be present in the audit payload"
+        );
+        assert!(audited[0].payload["device_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn device_scoped_token_writes_audit_with_device_id_string() {
+        // Device JWTs carry a `device_id` claim. The ingest handler
+        // copies it into the audit payload so the per-device Activity
+        // tab can filter on it later.
+        use crate::devices::test_support::MemoryDeviceStore;
+        use crate::devices::DeviceStore;
+        use chrono::Duration as ChronoDuration;
+
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+
+        // The auth extractor consults the DeviceStore for device
+        // tokens to enforce revocation, so we have to seed a real,
+        // active device row before signing the device JWT.
+        let device_store = Arc::new(MemoryDeviceStore::new());
+        let user_id = uuid::Uuid::new_v4();
+        let pairing = device_store
+            .create_pairing(user_id, HANDLE, ChronoDuration::minutes(5))
+            .await
+            .expect("create pairing");
+        let redeemed = device_store
+            .redeem(&pairing.code)
+            .await
+            .expect("redeem pairing");
+        let device_id = redeemed.device_id;
+
+        let token = env
+            .issuer
+            .sign_device(&format!("user-{HANDLE}"), HANDLE, device_id)
+            .expect("sign device token");
+
+        let audit = Arc::new(MemoryAuditLog::default());
+        let audit_dyn: Arc<dyn AuditLog> = audit.clone();
+        let device_dyn: Arc<dyn DeviceStore> = device_store;
+        let app: Router = Router::new()
+            .route("/v1/ingest", post(handle::<MemoryStore>))
+            .layer(Extension(env.verifier))
+            .layer(Extension(audit_dyn))
+            .layer(Extension(device_dyn))
+            .with_state(store);
+
+        let body = batch(vec![sample_envelope("evt-d1")]);
+        let (status, _) = post_batch_with(&app, Some(&token), &body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let audited = audit.snapshot();
+        assert_eq!(audited.len(), 1);
+        assert_eq!(audited[0].action, "ingest.batch_processed");
+        assert_eq!(
+            audited[0].payload["device_id"].as_str(),
+            Some(device_id.to_string().as_str())
+        );
     }
 }

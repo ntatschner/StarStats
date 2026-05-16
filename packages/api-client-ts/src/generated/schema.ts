@@ -1998,6 +1998,14 @@ export interface components {
             /** Format: int64 */
             accepted: number;
             batch_id: string;
+            /**
+             * Format: uuid
+             * @description Paired-device id, when the batch was posted by a tray client
+             *     holding a device JWT. `null`/absent on legacy rows (pre-0026)
+             *     and on rows posted via user-scoped tokens. The Devices page
+             *     reads this to filter batches to the active device tab.
+             */
+            device_id?: string | null;
             /** Format: int64 */
             duplicate: number;
             game_build?: string | null;
@@ -5671,6 +5679,14 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: number;
+                /**
+                 * Format: uuid
+                 * @description Scope the result to a single paired device. Omit for the
+                 *     account-wide stream (current default). Pre-0026 batches
+                 *     have no device_id stamped and are correctly excluded from
+                 *     any device-scoped filter.
+                 */
+                device_id?: string | null;
             };
             header?: never;
             path?: never;
