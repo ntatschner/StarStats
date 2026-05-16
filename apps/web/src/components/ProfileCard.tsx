@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import type { ProfileResponse } from '@/lib/api';
+import { refreshProfileAction } from '@/app/_actions/refresh-rsi';
+import { RefreshSubmitButton } from '@/components/cards/RefreshSubmitButton';
 
 const BIO_MAX_CHARS = 600;
 
@@ -108,17 +110,36 @@ export function ProfileCard({
       <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
         RSI citizen profile
       </div>
-      <h2
+      {/*
+        Audit v2 §08 promoted the refresh CTA to an inline button when
+        the user owns the snapshot. Public-profile callers omit
+        `showSettingsLink`, so strangers don't see it.
+      */}
+      <div
         style={{
-          margin: 0,
-          fontSize: 17,
-          fontWeight: 600,
-          letterSpacing: '-0.01em',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 12,
           marginBottom: 16,
         }}
       >
-        Identity card
-      </h2>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: 17,
+            fontWeight: 600,
+            letterSpacing: '-0.01em',
+          }}
+        >
+          Identity card
+        </h2>
+        {showSettingsLink && (
+          <form action={refreshProfileAction}>
+            <RefreshSubmitButton />
+          </form>
+        )}
+      </div>
 
       {rows.length > 0 && (
         <dl
