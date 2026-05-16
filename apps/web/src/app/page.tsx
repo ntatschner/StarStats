@@ -152,23 +152,12 @@ export default async function HomePage() {
           }}
         >
           <div>
-            <div
-              className="ss-eyebrow"
-              style={{ marginBottom: 24, color: 'var(--accent)' }}
-            >
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: 6,
-                  height: 6,
-                  borderRadius: 999,
-                  background: 'var(--accent)',
-                  marginRight: 8,
-                  verticalAlign: 'middle',
-                }}
-              />
-              v0.0.4-beta · Pyro patch ready
-            </div>
+            {/*
+              Per the design audit v2 (§07 — landing verdict): patch
+              announcements belong in release notes, not the hero.
+              The eyebrow that read "v0.0.X-beta · Pyro patch ready"
+              was removed for that reason — the h1 is the anchor.
+            */}
             <h1
               style={{
                 margin: 0,

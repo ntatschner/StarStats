@@ -79,7 +79,13 @@ export default async function RootLayout({
             <div className="ss-main">
               {!session.emailVerified && (
                 <div className="unverified-banner" role="status">
-                  <span>Verify your Comm-Link to keep your account secure.</span>{' '}
+                  {/*
+                    Voice polish from the design audit v2 (§08): the
+                    previous "Verify your Comm-Link to keep your
+                    account secure" was dry copy that broke from the
+                    in-universe register the rest of the product uses.
+                  */}
+                  <span>Comm-Link unverified — claim it before someone else can.</span>{' '}
                   <Link href="/settings#verification">Resend</Link>
                 </div>
               )}

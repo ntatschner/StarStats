@@ -388,21 +388,37 @@ async function CombatTab({
         : '∞'
       : (stats.kills / stats.deaths).toFixed(2);
 
+  // Design audit v2 §07: hide the K/D tile when the window is empty
+  // on both sides — "0 / 0 / —" is noise. A "Scope is clear" empty
+  // state matches the in-universe voice used elsewhere.
+  const hasCombatActivity = stats.kills > 0 || stats.deaths > 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <section
-        className="ss-card"
-        style={{
-          padding: '18px 20px',
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
-          gap: 16,
-        }}
-      >
-        <KdTile label="Kills" value={stats.kills} tone="var(--ok)" />
-        <KdTile label="Deaths" value={stats.deaths} tone="var(--err)" />
-        <KdTile label="K/D" value={kdRatio} tone="var(--accent)" />
-      </section>
+      {hasCombatActivity ? (
+        <section
+          className="ss-card"
+          style={{
+            padding: '18px 20px',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: 16,
+          }}
+        >
+          <KdTile label="Kills" value={stats.kills} tone="var(--ok)" />
+          <KdTile label="Deaths" value={stats.deaths} tone="var(--err)" />
+          <KdTile label="K/D" value={kdRatio} tone="var(--accent)" />
+        </section>
+      ) : (
+        <section className="ss-card" style={{ padding: '18px 20px' }}>
+          <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
+            Combat
+          </div>
+          <p style={{ margin: 0, color: 'var(--fg-muted)', fontSize: 13 }}>
+            Scope is clear. No kills or deaths in this window.
+          </p>
+        </section>
+      )}
       <p style={{ margin: 0, fontSize: 11, color: 'var(--fg-dim)' }}>
         Past {formatHoursWindow(stats.hours)}.
       </p>
