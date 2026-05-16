@@ -308,6 +308,71 @@ export interface Transaction {
   raw_response: string | null;
 }
 
+// === Health surface ===
+
+export type Severity = 'error' | 'warn' | 'info';
+
+export type HealthId =
+  | 'gamelog_missing'
+  | 'api_url_missing'
+  | 'pair_missing'
+  | 'auth_lost'
+  | 'cookie_missing'
+  | 'sync_failing'
+  | 'hangar_skip'
+  | 'email_unverified'
+  | 'game_log_stale'
+  | 'update_available'
+  | 'disk_free_low';
+
+export type SettingsField =
+  | 'gamelog_path'
+  | 'api_url'
+  | 'pairing_code'
+  | 'rsi_cookie'
+  | 'updates';
+
+export type HealthAction =
+  | { kind: 'go_to_settings'; field: SettingsField }
+  | { kind: 'retry_sync' }
+  | { kind: 'refresh_hangar' }
+  | { kind: 'open_url'; url: string };
+
+export type HealthParams =
+  | { id: 'gamelog_missing' }
+  | { id: 'api_url_missing' }
+  | { id: 'pair_missing' }
+  | { id: 'auth_lost' }
+  | { id: 'cookie_missing' }
+  | { id: 'sync_failing'; last_error: string; attempts_since_success: number }
+  | { id: 'hangar_skip'; reason: string; since: string }
+  | { id: 'email_unverified' }
+  | { id: 'game_log_stale'; last_event_at: string }
+  | { id: 'update_available'; version: string }
+  | { id: 'disk_free_low'; free_bytes: number };
+
+export interface HealthItem {
+  id: HealthId;
+  severity: Severity;
+  params: HealthParams;
+  action: HealthAction | null;
+  dismissible: boolean;
+  fingerprint: string;
+}
+
+export interface ApiUrlCheck {
+  ok: boolean;
+  status: number | null;
+  server_version: string | null;
+  error: string | null;
+}
+
+export interface CookieCheck {
+  ok: boolean;
+  handle: string | null;
+  error: string | null;
+}
+
 export const api = {
   getStatus: () => invoke<StatusResponse>('get_status'),
   getConfig: () => invoke<Config>('get_config'),
@@ -343,4 +408,9 @@ export const api = {
     invoke<RsiCookieStatus>('set_rsi_cookie', { cookieValue }),
   clearRsiCookie: () => invoke<RsiCookieStatus>('clear_rsi_cookie'),
   getRsiCookieStatus: () => invoke<RsiCookieStatus>('get_rsi_cookie_status'),
+  getHealth: () => invoke<HealthItem[]>('get_health'),
+  dismissHealth: (id: HealthId) => invoke<void>('dismiss_health', { id }),
+  checkApiUrl: (url: string) => invoke<ApiUrlCheck>('check_api_url', { url }),
+  checkRsiCookie: (cookie: string) => invoke<CookieCheck>('check_rsi_cookie', { cookie }),
+  setUpdateAvailable: (version: string) => invoke<void>('set_update_available', { version }),
 };
