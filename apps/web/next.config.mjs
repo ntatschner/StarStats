@@ -16,6 +16,17 @@ const otelExternals = [
   // GlitchTip) pulls native Node deps for source-map handling that
   // webpack can't resolve. Same treatment as the OTel stack.
   '@sentry/node',
+  // pino's transport mechanism (used by `lib/logger.ts` to wire
+  // pino-pretty in dev) spawns a worker thread that dynamically
+  // requires the target module at runtime. Next.js's bundler can't
+  // see that dynamic require, so without externalising pino +
+  // pino-pretty the worker tries to load
+  // `.next/server/vendor-chunks/lib/worker.js` which never gets
+  // emitted, and the dev server crashes on the first server-side
+  // log call (which Playwright trips immediately via TopBar's
+  // location fetch).
+  'pino',
+  'pino-pretty',
 ];
 
 // Baseline security headers applied to every response. Traefik in front
