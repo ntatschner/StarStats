@@ -249,6 +249,21 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
         ? `${visibleTimeline.length} of ${timeline.length} entries`
         : `${timeline.length} entries`;
 
+  // Player-value headline derivations. All three come from data
+  // already in scope so the new pills cost no extra fetch:
+  //   - events48h: how active the player has been recently
+  //   - topType:   what they're doing most of
+  //   - ships:     hangar fleet size (the closest single number to
+  //                "your account is worth this much in-game")
+  const events48h = useMemo(() => {
+    if (!timeline) return null;
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+    return timeline.filter(
+      (e) => new Date(e.timestamp).getTime() >= cutoff,
+    ).length;
+  }, [timeline]);
+  const topType = event_counts[0]?.event_type ?? '—';
+
   const copyLabel =
     copyState === 'copied'
       ? 'Copied!'
@@ -319,7 +334,10 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
         </GhostButton>
       </div>
 
-      {/* HEADLINE STAT STRIP */}
+      {/* HEADLINE STAT STRIP — reframed around what the player cares
+          about (recent activity, dominant event, fleet size) instead
+          of pipeline counters. Pipeline numbers (lines/batches/
+          coverage) live in the collapsed Pipeline section below. */}
       <div style={{ display: 'flex', gap: 8 }}>
         <StatPill
           label="Events"
@@ -327,139 +345,18 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
           tone="accent"
         />
         <StatPill
-          label="Lines"
-          value={tail.lines_processed.toLocaleString()}
+          label="48h"
+          value={events48h === null ? '—' : events48h.toLocaleString()}
         />
         <StatPill
-          label="Batches"
-          value={sync.batches_sent.toLocaleString()}
+          label="Top type"
+          value={topType}
         />
         <StatPill
-          label="Coverage"
-          value={
-            coverage
-              ? fmtCovPct(coverage.recognised, coverage.structural_only)
-              : '—'
-          }
+          label="Ships"
+          value={hangar.ships_pushed.toLocaleString()}
           tone="ok"
         />
-      </div>
-
-      {/* TAILING + SYNC, side-by-side */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 12,
-        }}
-      >
-        <TrayCard
-          title="Tailing"
-          kicker={tail.current_path ? 'LIVE' : 'IDLE'}
-        >
-          {tail.current_path ? (
-            <dl
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '90px 1fr',
-                gap: '6px 10px',
-                margin: 0,
-              }}
-            >
-              <KV label="Path" value={tail.current_path} mono />
-              <KV label="Read" value={fmtBytes(tail.bytes_read)} />
-              <KV
-                label="Last event"
-                value={
-                  tail.last_event_type ? (
-                    <>
-                      <code
-                        style={{ color: 'var(--accent)', fontSize: 12 }}
-                      >
-                        {tail.last_event_type}
-                      </code>{' '}
-                      <span style={{ color: 'var(--fg-dim)' }}>
-                        · {fmtTime(tail.last_event_at)}
-                      </span>
-                    </>
-                  ) : (
-                    <span style={{ color: 'var(--fg-dim)' }}>—</span>
-                  )
-                }
-              />
-            </dl>
-          ) : (
-            <p
-              style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}
-            >
-              Scope is clear. No Game.log discovered yet — set a custom
-              path in Settings.
-            </p>
-          )}
-        </TrayCard>
-
-        <TrayCard
-          title="Remote sync"
-          right={
-            <span
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 11,
-                color: sync.last_error ? 'var(--danger)' : 'var(--ok)',
-              }}
-            >
-              <StatusDot tone={sync.last_error ? 'danger' : 'ok'} />
-              <span
-                style={{
-                  fontFamily: 'var(--font-mono)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                }}
-              >
-                {sync.last_error ? 'ERR' : 'OK'}
-              </span>
-            </span>
-          }
-        >
-          {hasSyncActivity ? (
-            <dl
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '90px 1fr',
-                gap: '6px 10px',
-                margin: 0,
-              }}
-            >
-              <KV
-                label="Last sync"
-                value={
-                  sync.last_success_at ? fmtTime(sync.last_success_at) : '—'
-                }
-                mono
-              />
-              <KV
-                label="Accepted"
-                value={`${sync.events_accepted.toLocaleString()} / ${totalSyncEvents.toLocaleString()}`}
-                mono
-              />
-              <KV
-                label="Dup / rej"
-                value={`${sync.events_duplicate} · ${sync.events_rejected}`}
-                mono
-                dim
-              />
-            </dl>
-          ) : (
-            <p
-              style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}
-            >
-              Disabled. Configure remote sync in Settings to push events to
-              an API server.
-            </p>
-          )}
-        </TrayCard>
       </div>
 
       {/* 48-hour activity sparkline — buckets the in-memory timeline
@@ -647,8 +544,203 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
         )}
       </TrayCard>
 
-      {/* COVERAGE */}
-      <TrayCard title="Parser coverage">
+      {/* HANGAR (promoted — second-most-important card after Health
+          for a player view; "what's in my fleet?" deserves to live
+          above the pipeline diagnostics). */}
+      <HangarCard hangar={hangar} />
+
+      {/* PIPELINE — collapsed by default. Mechanical pipeline cards
+          (feed health, parser quality, source breakdowns); the
+          HealthCard above already surfaces anything broken, so these
+          are for curiosity and debugging rather than day-to-day use. */}
+      <PipelineSection
+        tail={tail}
+        sync={sync}
+        hasSyncActivity={hasSyncActivity}
+        totalSyncEvents={totalSyncEvents}
+        coverage={coverage}
+        discoveredLogs={discovered_logs}
+        sourceStats={sourceStats}
+        pendingNoise={pendingNoise}
+        noiseErrors={noiseErrors}
+        onMarkAsNoise={handleMarkAsNoise}
+      />
+    </div>
+  );
+}
+
+interface PipelineSectionProps {
+  tail: StatusResponse['tail'];
+  sync: StatusResponse['sync'];
+  hasSyncActivity: boolean;
+  totalSyncEvents: number;
+  coverage: ParseCoverageResponse | null;
+  discoveredLogs: StatusResponse['discovered_logs'];
+  sourceStats: SourceStats | null;
+  pendingNoise: Set<string>;
+  noiseErrors: Record<string, string>;
+  onMarkAsNoise: (eventName: string) => void;
+}
+
+/// Collapsible "Pipeline" diagnostics section — bundles the four
+/// mechanical-pipeline cards (Tailing + Remote sync grid, Parser
+/// coverage, Discovered logs, Sources) behind a single `<details>`
+/// disclosure so the day-to-day player view stays focused on what
+/// they did in-game rather than how the log scraper is feeling.
+function PipelineSection({
+  tail,
+  sync,
+  hasSyncActivity,
+  totalSyncEvents,
+  coverage,
+  discoveredLogs,
+  sourceStats,
+  pendingNoise,
+  noiseErrors,
+  onMarkAsNoise,
+}: PipelineSectionProps) {
+  return (
+    <details>
+      <summary
+        style={{
+          cursor: 'pointer',
+          padding: '4px 0',
+          fontSize: 11,
+          textTransform: 'uppercase',
+          letterSpacing: '0.12em',
+          color: 'var(--fg-muted)',
+          userSelect: 'none',
+        }}
+      >
+        Pipeline · feed and parser internals
+      </summary>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          marginTop: 8,
+        }}
+      >
+        {/* TAILING + SYNC, side-by-side */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 12,
+          }}
+        >
+          <TrayCard
+            title="Tailing"
+            kicker={tail.current_path ? 'LIVE' : 'IDLE'}
+          >
+            {tail.current_path ? (
+              <dl
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '90px 1fr',
+                  gap: '6px 10px',
+                  margin: 0,
+                }}
+              >
+                <KV label="Path" value={tail.current_path} mono />
+                <KV label="Read" value={fmtBytes(tail.bytes_read)} />
+                <KV
+                  label="Last event"
+                  value={
+                    tail.last_event_type ? (
+                      <>
+                        <code
+                          style={{ color: 'var(--accent)', fontSize: 12 }}
+                        >
+                          {tail.last_event_type}
+                        </code>{' '}
+                        <span style={{ color: 'var(--fg-dim)' }}>
+                          · {fmtTime(tail.last_event_at)}
+                        </span>
+                      </>
+                    ) : (
+                      <span style={{ color: 'var(--fg-dim)' }}>—</span>
+                    )
+                  }
+                />
+              </dl>
+            ) : (
+              <p
+                style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}
+              >
+                Scope is clear. No Game.log discovered yet — set a custom
+                path in Settings.
+              </p>
+            )}
+          </TrayCard>
+
+          <TrayCard
+            title="Remote sync"
+            right={
+              <span
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 11,
+                  color: sync.last_error ? 'var(--danger)' : 'var(--ok)',
+                }}
+              >
+                <StatusDot tone={sync.last_error ? 'danger' : 'ok'} />
+                <span
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.08em',
+                  }}
+                >
+                  {sync.last_error ? 'ERR' : 'OK'}
+                </span>
+              </span>
+            }
+          >
+            {hasSyncActivity ? (
+              <dl
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '90px 1fr',
+                  gap: '6px 10px',
+                  margin: 0,
+                }}
+              >
+                <KV
+                  label="Last sync"
+                  value={
+                    sync.last_success_at ? fmtTime(sync.last_success_at) : '—'
+                  }
+                  mono
+                />
+                <KV
+                  label="Accepted"
+                  value={`${sync.events_accepted.toLocaleString()} / ${totalSyncEvents.toLocaleString()}`}
+                  mono
+                />
+                <KV
+                  label="Dup / rej"
+                  value={`${sync.events_duplicate} · ${sync.events_rejected}`}
+                  mono
+                  dim
+                />
+              </dl>
+            ) : (
+              <p
+                style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}
+              >
+                Disabled. Configure remote sync in Settings to push events
+                to an API server.
+              </p>
+            )}
+          </TrayCard>
+        </div>
+
+        {/* PARSER COVERAGE */}
+        <TrayCard title="Parser coverage">
         {coverage === null ? (
           <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
             Loading parser coverage…
@@ -778,7 +870,7 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
                         <button
                           type="button"
                           disabled={pendingNoise.has(u.event_name)}
-                          onClick={() => handleMarkAsNoise(u.event_name)}
+                          onClick={() => onMarkAsNoise(u.event_name)}
                           title="Add to noise list — drops the existing sample and stops recording new ones"
                           style={{
                             background: 'transparent',
@@ -826,17 +918,17 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
       {/* DISCOVERED LOGS */}
       <TrayCard
         title="Discovered logs"
-        kicker={`${discovered_logs.length} found`}
+        kicker={`${discoveredLogs.length} found`}
       >
-        {discovered_logs.length === 0 ? (
+        {discoveredLogs.length === 0 ? (
           <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
             No Game.log files discovered.
           </p>
         ) : (
           <>
             <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
-              All {discovered_logs.length} discovered{' '}
-              {discovered_logs.length === 1 ? 'log is' : 'logs are'} being read;
+              All {discoveredLogs.length} discovered{' '}
+              {discoveredLogs.length === 1 ? 'log is' : 'logs are'} being read;
               events from each are included in the tray pipeline.
             </p>
             <div
@@ -847,7 +939,7 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
                 marginTop: 8,
               }}
             >
-              {kindBreakdown(discovered_logs).map(({ kind, count }) => {
+              {kindBreakdown(discoveredLogs).map(({ kind, count }) => {
                 const meta = KIND_META[kind];
                 return (
                   <span
@@ -875,9 +967,8 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
       {/* SOURCES */}
       <SourcesCard stats={sourceStats} />
 
-      {/* HANGAR */}
-      <HangarCard hangar={hangar} />
-    </div>
+      </div>
+    </details>
   );
 }
 
