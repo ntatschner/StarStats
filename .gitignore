@@ -9,6 +9,12 @@ Cargo.lock.bak
 # with a session cookie — must never be committed.
 .rsi-fetch/
 
+# --- Design handoff bundles fetched at development time. The Claude
+# Design tooling exports a tar.gz of HTML/JSX prototypes; we extract
+# locally as a reference but it's large (~1.4 MB) and regenerable on
+# demand, so it shouldn't live in the repo.
+design/**/_fetched/
+
 # --- Node / pnpm ---
 node_modules/
 .pnp
