@@ -410,10 +410,12 @@ pub mod test_support {
         }
     }
 
-    /// Test-only `AuditQuery` impl. Doesn't bother with predicate
-    /// composition — tests pin behaviour at the route layer where
-    /// the Postgres impl runs the real SQL, so this just surfaces
-    /// every entry seq'd by insertion order.
+    /// Test-only `AuditQuery` impl. Honours `action` (exact),
+    /// `actor_handle` (case-insensitive substring), and the
+    /// `since`/`until` window — enough for higher-level handler tests
+    /// that need to count or page filtered slices. Other filter combos
+    /// fall through unfiltered, matching the relaxed contract noted
+    /// in the trait doc.
     #[async_trait]
     impl AuditQuery for MemoryAuditLog {
         async fn list(&self, filters: AuditFilters) -> Result<Vec<AuditEntryRecord>, AuditError> {
@@ -421,9 +423,34 @@ pub mod test_support {
             let limit = filters.limit.clamp(1, 500) as usize;
             let offset = filters.offset.max(0) as usize;
             let now = Utc::now();
+            let actor_needle = filters
+                .actor_handle
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase());
             let records: Vec<AuditEntryRecord> = snap
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| match filters.action.as_deref() {
+                    Some(a) => e.action == a,
+                    None => true,
+                })
+                .filter(|(_, e)| match actor_needle.as_deref() {
+                    Some(needle) => e
+                        .actor_handle
+                        .as_deref()
+                        .map(|h| h.to_ascii_lowercase().contains(needle))
+                        .unwrap_or(false),
+                    None => true,
+                })
+                .filter(|_| {
+                    // The MemoryAuditLog stores no timestamps; treat
+                    // every entry as occurring "now". A since/until
+                    // window that includes `now` keeps the row; one
+                    // that doesn't drops it.
+                    let after_since = filters.since.map(|s| now >= s).unwrap_or(true);
+                    let before_until = filters.until.map(|u| now <= u).unwrap_or(true);
+                    after_since && before_until
+                })
                 .rev()
                 .skip(offset)
                 .take(limit)

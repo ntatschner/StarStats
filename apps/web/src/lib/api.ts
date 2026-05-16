@@ -748,6 +748,10 @@ export type AdminReferenceEntriesResponse =
   apiSchema['schemas']['AdminReferenceEntriesResponse'];
 export type SubmissionTransitionResponse =
   apiSchema['schemas']['SubmissionTransitionResponse'];
+export type AdminSharingOverview =
+  apiSchema['schemas']['AdminSharingOverview'];
+export type TopGranter = apiSchema['schemas']['TopGranter'];
+export type ScopeHistogram = apiSchema['schemas']['ScopeHistogram'];
 
 export type SubmissionStatus =
   | 'review'
@@ -1037,6 +1041,41 @@ export async function getAdminAuditLog(
   return request<AuditListResponse>(
     'GET',
     `/v1/admin/audit${suffix}`,
+    undefined,
+    bearer,
+  );
+}
+
+/**
+ * Headline counters + top-20 granters for the /admin/sharing
+ * overview page. Replaces the audit-log-window proxy the page used
+ * before the dedicated endpoint shipped.
+ *
+ * Gated server-side on moderator role; the page also redirects on 403
+ * for UX.
+ */
+export async function getAdminSharingOverview(
+  bearer: string,
+): Promise<AdminSharingOverview> {
+  return request<AdminSharingOverview>(
+    'GET',
+    '/v1/admin/sharing/overview',
+    undefined,
+    bearer,
+  );
+}
+
+/**
+ * Per-kind distribution of active `share_metadata` rows + per-tab
+ * usage for `kind = 'tabs'` rows. Powers the scope-histogram card on
+ * /admin/sharing.
+ */
+export async function getAdminSharingScopeHistogram(
+  bearer: string,
+): Promise<ScopeHistogram> {
+  return request<ScopeHistogram>(
+    'GET',
+    '/v1/admin/sharing/scope-histogram',
     undefined,
     bearer,
   );

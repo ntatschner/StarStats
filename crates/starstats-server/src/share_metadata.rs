@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 
 /// One metadata row. `expires_at`, `note`, and `scope` are nullable
 /// to model "share exists, no extras". `scope = None` means "full
@@ -44,6 +45,41 @@ pub enum ShareMetaError {
 /// Maximum length of the optional note. Validation lives in the
 /// HTTP handler before this trait is ever called.
 pub const NOTE_MAX_LEN: usize = 280;
+
+/// One (handle, count) row returned by [`ShareMetadataStore::top_active_granters`].
+/// "Active" = `expires_at IS NULL OR expires_at > NOW()`.
+#[derive(Debug, Clone)]
+pub struct GranterCount {
+    pub handle: String,
+    pub active_share_count: i64,
+}
+
+/// Aggregated active-share counters surfaced by
+/// [`ShareMetadataStore::active_share_counts`]. Drives the admin
+/// `/v1/admin/sharing/overview` headline cards.
+#[derive(Debug, Clone, Default)]
+pub struct ActiveShareCounts {
+    /// COUNT(*) of `share_metadata` rows where `expires_at IS NULL OR
+    /// expires_at > NOW()`.
+    pub total: i64,
+    /// Subset of `total` where `expires_at IS NOT NULL AND > NOW()`.
+    pub with_expiry: i64,
+}
+
+/// Distribution of `share_metadata.scope->>'kind'` across active
+/// shares. `NULL` scope counts as `full` (the legacy default preserved
+/// by migration 0025).
+#[derive(Debug, Clone, Default)]
+pub struct ScopeHistogramCounts {
+    pub full: i64,
+    pub timeline: i64,
+    pub aggregates: i64,
+    pub tabs: i64,
+    /// Per-tab usage tally drawn from the `scope->'tabs'` array on
+    /// active rows where `kind = 'tabs'`. Keyed on the tab string;
+    /// value = number of active shares listing that tab.
+    pub tab_usage: BTreeMap<String, i64>,
+}
 
 #[async_trait]
 pub trait ShareMetadataStore: Send + Sync + 'static {
@@ -86,6 +122,23 @@ pub trait ShareMetadataStore: Send + Sync + 'static {
         owner_handle: &str,
         recipient_handle: &str,
     ) -> Result<(), ShareMetaError>;
+
+    /// Headline counters for the admin sharing-overview card.
+    /// `expires_at IS NULL` counts as active because legacy rows
+    /// (pre-migration-0023 expiry) have no expiry and represent
+    /// "share until manually revoked".
+    async fn active_share_counts(&self) -> Result<ActiveShareCounts, ShareMetaError>;
+
+    /// Top `n` owner handles by active-share count. Ordered by count
+    /// DESC, then handle ASC (stable tie-breaker). "Active" matches
+    /// [`Self::active_share_counts`].
+    async fn top_active_granters(&self, limit: i64) -> Result<Vec<GranterCount>, ShareMetaError>;
+
+    /// Distribution of `scope->>'kind'` across active shares.
+    /// NULL scope counts under `full` (legacy default). For
+    /// `kind = 'tabs'` rows, also tallies per-tab usage off
+    /// `scope->'tabs'`.
+    async fn scope_histogram_active(&self) -> Result<ScopeHistogramCounts, ShareMetaError>;
 }
 
 pub struct PostgresShareMetadataStore {
@@ -259,6 +312,105 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         .await?;
         Ok(())
     }
+
+    async fn active_share_counts(&self) -> Result<ActiveShareCounts, ShareMetaError> {
+        // Single round-trip: two filtered COUNT()s. `with_expiry` is
+        // a strict subset of `total` so we can't sum afterwards.
+        let row: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE expires_at IS NULL OR expires_at > NOW()) AS total,
+                COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at > NOW()) AS with_expiry
+            FROM share_metadata
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ActiveShareCounts {
+            total: row.0,
+            with_expiry: row.1,
+        })
+    }
+
+    async fn top_active_granters(&self, limit: i64) -> Result<Vec<GranterCount>, ShareMetaError> {
+        let limit = limit.clamp(1, 200);
+        // Group by lower(owner_handle) so the case-preserved display
+        // copy in different rows collapses to one bucket; pick the
+        // MIN(owner_handle) as a stable representative.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT
+                MIN(owner_handle) AS handle,
+                COUNT(*)          AS active_share_count
+            FROM share_metadata
+            WHERE expires_at IS NULL OR expires_at > NOW()
+            GROUP BY lower(owner_handle)
+            ORDER BY active_share_count DESC, handle ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(handle, active_share_count)| GranterCount {
+                handle,
+                active_share_count,
+            })
+            .collect())
+    }
+
+    async fn scope_histogram_active(&self) -> Result<ScopeHistogramCounts, ShareMetaError> {
+        // Kind buckets: NULL scope folds into `full`, anything else
+        // reads `scope->>'kind'`. One query for the four buckets.
+        let kind_rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT
+                COALESCE(scope->>'kind', 'full') AS kind,
+                COUNT(*)                         AS n
+            FROM share_metadata
+            WHERE expires_at IS NULL OR expires_at > NOW()
+            GROUP BY COALESCE(scope->>'kind', 'full')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = ScopeHistogramCounts::default();
+        for (kind, n) in kind_rows {
+            match kind.as_str() {
+                "full" => out.full = n,
+                "timeline" => out.timeline = n,
+                "aggregates" => out.aggregates = n,
+                "tabs" => out.tabs = n,
+                // Forward-compat: unknown `kind` values surfaced in
+                // future migrations land in neither bucket. Logged at
+                // debug so we notice if the producer drifts.
+                other => tracing::debug!(kind = %other, "unrecognised share scope kind"),
+            }
+        }
+        // Tab-usage tally: explode the `scope->'tabs'` array on active
+        // tabs-scope rows. Guard with `jsonb_typeof` so malformed rows
+        // don't crash `jsonb_array_elements_text`.
+        let tab_rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT tab AS name, COUNT(*) AS n
+            FROM share_metadata,
+                 LATERAL jsonb_array_elements_text(scope->'tabs') AS tab
+            WHERE (expires_at IS NULL OR expires_at > NOW())
+              AND scope->>'kind' = 'tabs'
+              AND jsonb_typeof(scope->'tabs') = 'array'
+            GROUP BY tab
+            ORDER BY tab ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (name, n) in tab_rows {
+            out.tab_usage.insert(name, n);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +505,104 @@ pub mod test_support {
             let mut rows = self.rows.lock().unwrap();
             rows.remove(&key(owner_handle, recipient_handle));
             Ok(())
+        }
+
+        async fn active_share_counts(&self) -> Result<ActiveShareCounts, ShareMetaError> {
+            let rows = self.rows.lock().unwrap();
+            let now = Utc::now();
+            let mut total = 0i64;
+            let mut with_expiry = 0i64;
+            for m in rows.values() {
+                let is_active = match m.expires_at {
+                    None => true,
+                    Some(t) => t > now,
+                };
+                if is_active {
+                    total += 1;
+                    if m.expires_at.is_some() {
+                        with_expiry += 1;
+                    }
+                }
+            }
+            Ok(ActiveShareCounts { total, with_expiry })
+        }
+
+        async fn top_active_granters(
+            &self,
+            limit: i64,
+        ) -> Result<Vec<GranterCount>, ShareMetaError> {
+            let limit = limit.clamp(1, 200) as usize;
+            let rows = self.rows.lock().unwrap();
+            let now = Utc::now();
+            // Bucket by lower(owner_handle); keep the first-seen
+            // display copy as the representative (matches Postgres
+            // MIN tie-breaker closely enough for tests).
+            let mut counts: HashMap<String, (String, i64)> = HashMap::new();
+            for m in rows.values() {
+                let active = m.expires_at.map_or(true, |t| t > now);
+                if !active {
+                    continue;
+                }
+                let lower = m.owner_handle.to_ascii_lowercase();
+                let entry = counts
+                    .entry(lower)
+                    .or_insert_with(|| (m.owner_handle.clone(), 0));
+                entry.1 += 1;
+            }
+            let mut ranked: Vec<GranterCount> = counts
+                .into_values()
+                .map(|(handle, c)| GranterCount {
+                    handle,
+                    active_share_count: c,
+                })
+                .collect();
+            ranked.sort_by(|a, b| {
+                b.active_share_count
+                    .cmp(&a.active_share_count)
+                    .then_with(|| a.handle.cmp(&b.handle))
+            });
+            ranked.truncate(limit);
+            Ok(ranked)
+        }
+
+        async fn scope_histogram_active(&self) -> Result<ScopeHistogramCounts, ShareMetaError> {
+            let rows = self.rows.lock().unwrap();
+            let now = Utc::now();
+            let mut out = ScopeHistogramCounts::default();
+            for m in rows.values() {
+                let active = m.expires_at.map_or(true, |t| t > now);
+                if !active {
+                    continue;
+                }
+                let kind = m
+                    .scope
+                    .as_ref()
+                    .and_then(|s| s.get("kind"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("full");
+                match kind {
+                    "full" => out.full += 1,
+                    "timeline" => out.timeline += 1,
+                    "aggregates" => out.aggregates += 1,
+                    "tabs" => {
+                        out.tabs += 1;
+                        if let Some(arr) = m
+                            .scope
+                            .as_ref()
+                            .and_then(|s| s.get("tabs"))
+                            .and_then(Value::as_array)
+                        {
+                            for v in arr {
+                                if let Some(t) = v.as_str() {
+                                    *out.tab_usage.entry(t.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(out)
         }
     }
 }

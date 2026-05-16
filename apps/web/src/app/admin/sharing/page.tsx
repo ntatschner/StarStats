@@ -12,23 +12,20 @@
  *   - User detail sub-tab on /admin/users/[id]
  *   - Org detail sub-tab on /admin/orgs/[slug]
  *
- * Data source for v1:
- *   No admin-wide "active shares per user" endpoint exists today. The
- *   caller-scoped helpers (`listShares`, `listSharedWithMe`) only see
- *   the bearer's own grants, which is useless for an admin overview.
+ * Data source for v2 (post-W5):
+ *   Real `/v1/admin/sharing/overview` + `/v1/admin/sharing/scope-histogram`
+ *   endpoints. The overview returns:
+ *     - active-share inventory off `share_metadata` (total / outbound /
+ *       with-expiry / top-20 granters by active count),
+ *     - last-30d audit-log totals for `share.created`, `share.revoked`,
+ *       `share.viewed` (already aggregated server-side, so we use the
+ *       returned counts straight).
+ *   The histogram returns the kind-distribution + per-tab usage for
+ *   `kind = 'tabs'` rows.
  *
- *   As a workable proxy we tail the most recent N audit-log rows for
- *   the sharing-related actions and surface:
- *     - rolling-window grant / revoke / scope-change / report / view
- *       counters (last 500 rows)
- *     - the top-20 actors by share.created event count in that window
- *
- *   This is intentionally a "window" view, not a true active-share
- *   inventory. A future backend endpoint
- *   (e.g. GET /v1/admin/sharing/overview) should return real counts
- *   off the `share_with_user` / `share_with_org` tables. Until then
- *   the eyebrow on each card says "recent" so admins don't mistake
- *   the proxy for ground truth.
+ *   This replaces the W3 proxy that tailed the audit log — that proxy
+ *   could only ever see N recent rows, so the "active shares" card
+ *   silently lied as soon as activity crossed N.
  *
  * Auth: parent layout (`/admin/layout.tsx`) gates the whole subtree
  * on moderator/admin role. We still call `getSession()` here for type
@@ -40,76 +37,29 @@ import type { Route } from 'next';
 import { redirect } from 'next/navigation';
 import {
   ApiCallError,
-  getAdminAuditLog,
-  type AuditEntryDto,
+  getAdminSharingOverview,
+  getAdminSharingScopeHistogram,
+  type AdminSharingOverview,
+  type ScopeHistogram,
 } from '@/lib/api';
 import { getSession } from '@/lib/session';
 import { AdminNav } from '../_components/AdminNav';
-
-/**
- * Audit-log action names we treat as "sharing activity". The backend
- * (W3-S) is adding `share.viewed` + `share.scope_changed` + the
- * report variant during this wave; we list them up front so the
- * overview keeps working as soon as those rows start landing.
- *
- * Keep this list in sync with the audit page below.
- */
-const SHARING_ACTIONS = [
-  'share.created',
-  'share.revoked',
-  'share.scope_changed',
-  'share.viewed',
-  'share.reported',
-] as const;
-
-/**
- * How many recent rows we pull to compute the proxy stats. Keep
- * generous enough that low-traffic moments still show something, but
- * small enough that one server fetch round-trip stays snappy. The
- * limit is shared across all five action filters (five parallel
- * fetches — see TODO about a single overview endpoint).
- */
-const WINDOW_SIZE = 500;
-
-interface OverviewBuckets {
-  created: ReadonlyArray<AuditEntryDto>;
-  revoked: ReadonlyArray<AuditEntryDto>;
-  scopeChanged: ReadonlyArray<AuditEntryDto>;
-  viewed: ReadonlyArray<AuditEntryDto>;
-  reported: ReadonlyArray<AuditEntryDto>;
-}
 
 export default async function AdminSharingOverviewPage() {
   const session = await getSession();
   if (!session) redirect('/auth/login?next=/admin/sharing');
 
-  // The audit endpoint takes a single `action` filter — no IN-clause
-  // support today. Issue five parallel fetches so a busy actor on
-  // share.created doesn't crowd out share.revoked rows in the same
-  // window.
-  //
-  // TODO(backend): a dedicated GET /v1/admin/sharing/overview that
-  // returns precomputed counts off the underlying tables would
-  // replace these five round-trips with one and would give us *true*
-  // active-share counts (this view only sees the most recent
-  // WINDOW_SIZE events).
-  let buckets: OverviewBuckets;
+  // Two parallel fetches: the overview (active inventory + 30d audit
+  // totals) and the scope histogram. Both are read-only and gated on
+  // moderator server-side; we issue them concurrently so the page
+  // renders in one round-trip's wall-clock time.
+  let overview: AdminSharingOverview;
+  let histogram: ScopeHistogram;
   try {
-    const fetched = await Promise.all(
-      SHARING_ACTIONS.map((action) =>
-        getAdminAuditLog(session.token, {
-          action,
-          limit: WINDOW_SIZE,
-        }).then((r) => r.entries),
-      ),
-    );
-    buckets = {
-      created: fetched[0] ?? [],
-      revoked: fetched[1] ?? [],
-      scopeChanged: fetched[2] ?? [],
-      viewed: fetched[3] ?? [],
-      reported: fetched[4] ?? [],
-    };
+    [overview, histogram] = await Promise.all([
+      getAdminSharingOverview(session.token),
+      getAdminSharingScopeHistogram(session.token),
+    ]);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
       redirect('/auth/login?next=/admin/sharing');
@@ -120,23 +70,14 @@ export default async function AdminSharingOverviewPage() {
     throw e;
   }
 
-  const totalEvents =
-    buckets.created.length +
-    buckets.revoked.length +
-    buckets.scopeChanged.length +
-    buckets.viewed.length +
-    buckets.reported.length;
+  const netGrants30d =
+    overview.total_grants_30d - overview.total_revocations_30d;
 
-  // Net grants = created - revoked across the window. Negative when
-  // revoke storms outpace grants. Useful "is something on fire"
-  // signal even though it isn't a true active-share total.
-  const netGrants = buckets.created.length - buckets.revoked.length;
-
-  // "Top users by share.created" — only counts events in the window.
-  // A future endpoint should join against share_with_user for the
-  // *current* active count instead. Rendered in a compact table to
-  // match the rest of the admin surface.
-  const topGranters = rankByActor(buckets.created).slice(0, 20);
+  // Sum the four kind buckets so the histogram card can render a
+  // total + percentage; immutable derivation rather than mutating
+  // `histogram`.
+  const histogramTotal =
+    histogram.full + histogram.timeline + histogram.aggregates + histogram.tabs;
 
   return (
     <div
@@ -167,15 +108,14 @@ export default async function AdminSharingOverviewPage() {
             maxWidth: 640,
           }}
         >
-          Rolling window of the last {WINDOW_SIZE} events per action,
-          read off the audit log. Treat the numbers as recent activity,
-          not a live active-share inventory — that view is on the
-          backend backlog.
+          Live inventory of active shares plus the last 30 days of
+          sharing-related audit activity. Counters refresh on every
+          page load.
         </p>
       </header>
 
       <section
-        aria-label="Recent sharing activity"
+        aria-label="Active share inventory"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
@@ -183,41 +123,46 @@ export default async function AdminSharingOverviewPage() {
         }}
       >
         <StatCard
-          eyebrow="Outbound grants"
+          eyebrow="Active shares"
+          label="share_metadata"
+          value={overview.active_shares_total}
+          hint="No expiry, or expiry in the future"
+        />
+        <StatCard
+          eyebrow="Outbound"
+          label="user → user"
+          value={overview.active_shares_outbound}
+          hint="Org-direction grants don't have side-table rows yet"
+        />
+        <StatCard
+          eyebrow="With expiry"
+          label="explicit expires_at"
+          value={overview.active_shares_with_expiry}
+          hint="Excludes legacy no-expiry rows"
+        />
+        <StatCard
+          eyebrow="Grants · 30d"
           label="share.created"
-          value={buckets.created.length}
-          hint={`Net grants: ${netGrants >= 0 ? '+' : ''}${netGrants}`}
-          tone={netGrants >= 0 ? 'ok' : 'danger'}
+          value={overview.total_grants_30d}
+          hint={`Net: ${netGrants30d >= 0 ? '+' : ''}${netGrants30d}`}
+          tone={netGrants30d >= 0 ? 'ok' : 'danger'}
         />
         <StatCard
-          eyebrow="Revocations"
+          eyebrow="Revocations · 30d"
           label="share.revoked"
-          value={buckets.revoked.length}
+          value={overview.total_revocations_30d}
         />
         <StatCard
-          eyebrow="Scope changes"
-          label="share.scope_changed"
-          value={buckets.scopeChanged.length}
-          hint="Per-share scope edits (W3-S backend)"
-        />
-        <StatCard
-          eyebrow="Views"
+          eyebrow="Views · 30d"
           label="share.viewed"
-          value={buckets.viewed.length}
-          hint="Recipient reads (W3-S backend)"
-        />
-        <StatCard
-          eyebrow="Reports"
-          label="share.reported"
-          value={buckets.reported.length}
-          tone={buckets.reported.length > 0 ? 'danger' : undefined}
-          hint="Triage queue lives at /admin/sharing/reports"
+          value={overview.total_views_30d}
+          hint="Recipient reads in the last 30 days"
         />
       </section>
 
       <section className="ss-card" style={{ padding: '20px 24px' }}>
         <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-          Top granters (recent window)
+          Top granters
         </div>
         <h2
           style={{
@@ -227,7 +172,7 @@ export default async function AdminSharingOverviewPage() {
             letterSpacing: '-0.01em',
           }}
         >
-          Most-active sharers
+          Most active sharers (live)
         </h2>
         <p
           style={{
@@ -237,12 +182,10 @@ export default async function AdminSharingOverviewPage() {
             lineHeight: 1.5,
           }}
         >
-          Counts share.created events per actor across the last{' '}
-          {WINDOW_SIZE} rows. A user who shared then revoked still
-          counts here — this is a proxy for &ldquo;who&rsquo;s most
-          active&rdquo;, not &ldquo;who currently shares the most&rdquo;.
+          Owners ranked by the number of currently-active shares they
+          hold in `share_metadata`. Capped at the top 20.
         </p>
-        {topGranters.length === 0 ? (
+        {overview.top_granters.length === 0 ? (
           <p
             style={{
               margin: 0,
@@ -251,8 +194,7 @@ export default async function AdminSharingOverviewPage() {
               fontSize: 13,
             }}
           >
-            Scope is clear — no share.created events in the recent
-            window.
+            No active shares right now.
           </p>
         ) : (
           <table
@@ -266,11 +208,11 @@ export default async function AdminSharingOverviewPage() {
               <tr style={{ background: 'var(--bg-elev)' }}>
                 <Th width="48px">#</Th>
                 <Th>Handle</Th>
-                <Th width="120px">Grants</Th>
+                <Th width="120px">Active</Th>
               </tr>
             </thead>
             <tbody>
-              {topGranters.map((row, i) => (
+              {overview.top_granters.map((row, i) => (
                 <tr
                   key={row.handle}
                   style={{ borderBottom: '1px solid var(--border)' }}
@@ -295,7 +237,7 @@ export default async function AdminSharingOverviewPage() {
                     </Link>
                   </Td>
                   <Td>
-                    <span className="mono">{row.count}</span>
+                    <span className="mono">{row.active_share_count}</span>
                   </Td>
                 </tr>
               ))}
@@ -306,7 +248,7 @@ export default async function AdminSharingOverviewPage() {
 
       <section className="ss-card" style={{ padding: '20px 24px' }}>
         <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-          Scope distributions
+          Scope distribution
         </div>
         <h2
           style={{
@@ -316,33 +258,102 @@ export default async function AdminSharingOverviewPage() {
             letterSpacing: '-0.01em',
           }}
         >
-          Common share scopes
+          Active-share scope kinds
         </h2>
         <p
           style={{
-            margin: '8px 0 0',
+            margin: '8px 0 16px',
             color: 'var(--fg-muted)',
             fontSize: 13,
             lineHeight: 1.5,
           }}
         >
-          Placeholder. Once the per-share scope columns land on the
-          backend (W3-S), this card will surface a histogram of which
-          scope masks are in use across active grants. Today the audit
-          payload carries the scope, but aggregating across
-          share.created vs share.scope_changed (with revoke
-          subtraction) for an accurate &ldquo;active scope&rdquo; tally
-          requires a dedicated query that doesn&rsquo;t exist yet.
+          Distribution of <code>scope-&gt;&gt;&apos;kind&apos;</code>{' '}
+          across the {histogramTotal.toLocaleString()} currently-active
+          shares. Legacy rows (NULL scope) count under <code>full</code>.
         </p>
-        <p
-          style={{
-            margin: '12px 0 0',
-            color: 'var(--fg-dim)',
-            fontSize: 12,
-          }}
-        >
-          TODO(backend): GET /v1/admin/sharing/scope-histogram.
-        </p>
+        {histogramTotal === 0 ? (
+          <p
+            style={{
+              margin: 0,
+              padding: '20px 0',
+              color: 'var(--fg-muted)',
+              fontSize: 13,
+            }}
+          >
+            No active shares to chart.
+          </p>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns:
+                'repeat(auto-fit, minmax(140px, 1fr))',
+              gap: 12,
+            }}
+          >
+            <ScopeBucket
+              label="full"
+              value={histogram.full}
+              total={histogramTotal}
+            />
+            <ScopeBucket
+              label="timeline"
+              value={histogram.timeline}
+              total={histogramTotal}
+            />
+            <ScopeBucket
+              label="aggregates"
+              value={histogram.aggregates}
+              total={histogramTotal}
+            />
+            <ScopeBucket
+              label="tabs"
+              value={histogram.tabs}
+              total={histogramTotal}
+            />
+          </div>
+        )}
+        {Object.keys(histogram.tab_usage).length > 0 && (
+          <div style={{ marginTop: 20 }}>
+            <div className="ss-eyebrow" style={{ marginBottom: 8 }}>
+              Tab usage (kind = tabs)
+            </div>
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: 13,
+              }}
+            >
+              <thead>
+                <tr style={{ background: 'var(--bg-elev)' }}>
+                  <Th>Tab</Th>
+                  <Th width="120px">Shares</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(histogram.tab_usage)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([tab, count]) => (
+                    <tr
+                      key={tab}
+                      style={{
+                        borderBottom: '1px solid var(--border)',
+                      }}
+                    >
+                      <Td>
+                        <span className="mono">{tab}</span>
+                      </Td>
+                      <Td>
+                        <span className="mono">{count}</span>
+                      </Td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <nav
@@ -361,43 +372,8 @@ export default async function AdminSharingOverviewPage() {
           Sharing audit log →
         </Link>
       </nav>
-
-      <p
-        style={{
-          margin: 0,
-          color: 'var(--fg-dim)',
-          fontSize: 11,
-          lineHeight: 1.5,
-        }}
-      >
-        Window stats above are computed from{' '}
-        {totalEvents.toLocaleString()} recent audit rows. Older
-        activity is not surfaced — use the audit log view for
-        time-bounded queries.
-      </p>
     </div>
   );
-}
-
-/**
- * Group entries by `actor_handle` and return descending counts.
- * Entries without an actor (system actions) are dropped — only real
- * users belong on a "top granters" leaderboard.
- *
- * Built immutably: we accumulate into a fresh `Map` rather than
- * mutating an existing structure.
- */
-function rankByActor(
-  entries: ReadonlyArray<AuditEntryDto>,
-): ReadonlyArray<{ handle: string; count: number }> {
-  const counts = new Map<string, number>();
-  for (const e of entries) {
-    if (!e.actor_handle) continue;
-    counts.set(e.actor_handle, (counts.get(e.actor_handle) ?? 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .map(([handle, count]) => ({ handle, count }))
-    .sort((a, b) => b.count - a.count);
 }
 
 function StatCard({
@@ -462,6 +438,54 @@ function StatCard({
   );
 }
 
+/**
+ * One bucket card in the scope-kind histogram. Renders the raw count
+ * plus a percentage of the (non-zero) total so the four buckets are
+ * directly comparable at a glance.
+ */
+function ScopeBucket({
+  label,
+  value,
+  total,
+}: {
+  label: string;
+  value: number;
+  total: number;
+}) {
+  const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '14px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+      }}
+    >
+      <div
+        className="mono"
+        style={{ color: 'var(--fg-dim)', fontSize: 11 }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: 22,
+          fontWeight: 600,
+          letterSpacing: '-0.02em',
+        }}
+      >
+        {value.toLocaleString()}
+      </div>
+      <div style={{ color: 'var(--fg-muted)', fontSize: 11 }}>
+        {pct}% of active
+      </div>
+    </div>
+  );
+}
+
 function Th({
   children,
   width,
@@ -520,6 +544,7 @@ function Td({ children }: { children: React.ReactNode }) {
 //   See the report for cross-references to the exact files where
 //   the sub-tabs should slot in.
 
-// Force dynamic render: the audit log changes on every state-
-// changing API call, so a static cache would lie within seconds.
+// Force dynamic render: the underlying counters change on every
+// state-changing API call, so a static cache would lie within
+// seconds.
 export const dynamic = 'force-dynamic';

@@ -178,6 +178,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/sharing/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/admin/sharing/overview — real-time active-share
+         *     counters + 30-day audit-log totals + top-20 granters.
+         *     Gated on moderator; admins inherit.
+         */
+        get: operations["get_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/sharing/scope-histogram": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/admin/sharing/scope-histogram — distribution of
+         *     `scope->>'kind'` across active shares + per-tab usage on
+         *     `kind = 'tabs'` rows. Gated on moderator.
+         */
+        get: operations["get_scope_histogram"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/smtp": {
         parameters: {
             query?: never;
@@ -1643,6 +1685,49 @@ export interface components {
             metadata: Record<string, never>;
         };
         /**
+         * @description Response body for `GET /v1/admin/sharing/overview`. The
+         *     `active_shares_*` counters come from a snapshot of `share_metadata`;
+         *     the `total_*_30d` counters come from a `WHERE occurred_at >
+         *     NOW() - INTERVAL '30 days'` filter on `audit_log`.
+         */
+        AdminSharingOverview: {
+            /**
+             * Format: int64
+             * @description User-to-user (outbound) active shares.
+             */
+            active_shares_outbound: number;
+            /**
+             * Format: int64
+             * @description COUNT(*) from `share_metadata` WHERE `expires_at IS NULL OR expires_at > NOW()`.
+             */
+            active_shares_total: number;
+            /**
+             * Format: int64
+             * @description Subset of `active_shares_total` with explicit future expiry.
+             */
+            active_shares_with_expiry: number;
+            /**
+             * Format: int64
+             * @description `share.created` audit rows in the last 30 days.
+             */
+            total_grants_30d: number;
+            /**
+             * Format: int64
+             * @description `share.revoked` audit rows in the last 30 days.
+             */
+            total_revocations_30d: number;
+            /**
+             * Format: int64
+             * @description `share.viewed` audit rows in the last 30 days.
+             */
+            total_views_30d: number;
+            /**
+             * @description Top owner handles by active-share count, sorted DESC, capped
+             *     at 20.
+             */
+            top_granters: components["schemas"]["TopGranter"][];
+        };
+        /**
          * @description Lightweight admin-side view of a user. Skips secrets (password
          *     hash, TOTP secret) and verification tokens. Keeps only the bits
          *     an admin needs to triage an account.
@@ -2508,6 +2593,28 @@ export interface components {
             /** @description `true` when the handle is now (or was already) proven. */
             verified: boolean;
         };
+        /**
+         * @description Response body for `GET /v1/admin/sharing/scope-histogram`. NULL
+         *     scope rows fold into `full`. `tab_usage` is per-tab counts for
+         *     `kind = 'tabs'` rows.
+         */
+        ScopeHistogram: {
+            /** Format: int64 */
+            aggregates: number;
+            /** Format: int64 */
+            full: number;
+            /**
+             * @description Per-tab usage on `kind = 'tabs'` rows. Always present;
+             *     empty `{}` when no tabs-scope rows exist.
+             */
+            tab_usage: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            tabs: number;
+            /** Format: int64 */
+            timeline: number;
+        };
         SessionDto: {
             /** Format: date-time */
             end_at: string;
@@ -2786,6 +2893,23 @@ export interface components {
             buckets: components["schemas"]["TimelineBucket"][];
             /** Format: int32 */
             days: number;
+        };
+        /**
+         * @description One row of the admin "top granters" leaderboard. Counts come
+         *     off `share_metadata` active rows; "active" means
+         *     `expires_at IS NULL OR expires_at > NOW()`.
+         */
+        TopGranter: {
+            /**
+             * Format: int64
+             * @description Number of active share_metadata rows owned by this handle.
+             */
+            active_share_count: number;
+            /**
+             * @description Owner handle as stored on the row (case-preserved display
+             *     copy).
+             */
+            handle: string;
         };
         TotpConfirmRequest: {
             code: string;
@@ -3114,6 +3238,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditListResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sharing overview snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSharingOverview"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_scope_histogram: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scope-kind distribution across active shares */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScopeHistogram"];
                 };
             };
             /** @description Missing or invalid bearer token */

@@ -14,6 +14,7 @@
 use crate::admin_org_routes;
 use crate::admin_reference_routes;
 use crate::admin_routes;
+use crate::admin_sharing_routes;
 use crate::admin_submission_routes;
 use crate::admin_user_routes;
 use crate::api_error;
@@ -165,6 +166,8 @@ impl Modify for SecurityAddon {
         submission_routes::flag,
         submission_routes::withdraw,
         admin_routes::list_audit,
+        admin_sharing_routes::get_overview,
+        admin_sharing_routes::get_scope_histogram,
         admin_submission_routes::accept,
         admin_submission_routes::reject,
         admin_submission_routes::dismiss_flag,
@@ -241,6 +244,10 @@ impl Modify for SecurityAddon {
         // Admin submission moderation
         admin_routes::AuditEntryDto,
         admin_routes::AuditListResponse,
+        // Admin sharing overview
+        admin_sharing_routes::AdminSharingOverview,
+        admin_sharing_routes::TopGranter,
+        admin_sharing_routes::ScopeHistogram,
         admin_user_routes::AdminUserDto,
         admin_user_routes::AdminUserListResponse,
         admin_user_routes::GrantRoleRequest,
