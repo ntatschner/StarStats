@@ -239,8 +239,8 @@ export default async function AdminSharingOverviewPage() {
         >
           Counts share.created events per actor across the last{' '}
           {WINDOW_SIZE} rows. A user who shared then revoked still
-          counts here — this is a proxy for "who's most active", not
-          "who currently shares the most".
+          counts here — this is a proxy for &ldquo;who&rsquo;s most
+          active&rdquo;, not &ldquo;who currently shares the most&rdquo;.
         </p>
         {topGranters.length === 0 ? (
           <p
@@ -331,8 +331,8 @@ export default async function AdminSharingOverviewPage() {
           scope masks are in use across active grants. Today the audit
           payload carries the scope, but aggregating across
           share.created vs share.scope_changed (with revoke
-          subtraction) for an accurate "active scope" tally requires
-          a dedicated query that doesn't exist yet.
+          subtraction) for an accurate &ldquo;active scope&rdquo; tally
+          requires a dedicated query that doesn&rsquo;t exist yet.
         </p>
         <p
           style={{
