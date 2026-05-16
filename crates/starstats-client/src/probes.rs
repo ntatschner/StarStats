@@ -7,6 +7,8 @@
 //! it. Neither persists state; they're pure probes.
 
 use serde::Serialize;
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +28,57 @@ pub struct CookieCheck {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Best-effort string-based SSRF guard. Returns `true` if `host` is a
+/// literal private/loopback/link-local IP, or the literal name
+/// `localhost`. This is intentionally NOT a DNS-resolution defense —
+/// DNS rebinding remains possible but is well outside the threat
+/// model. The case we're closing is a user pasting a hostile or typo'd
+/// URL that points at an internal service.
+///
+/// Covered ranges:
+/// - IPv4 loopback `127.0.0.0/8`
+/// - IPv4 RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+/// - IPv4 link-local `169.254.0.0/16`
+/// - IPv6 loopback `::1`
+/// - IPv6 link-local `fe80::/10` and ULA `fc00::/7`
+fn host_is_private_or_loopback(host: &str) -> bool {
+    // Strip an optional bracket pair from IPv6 literals so callers can
+    // pass either the raw URL host or a bare address.
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Ok(ip) = IpAddr::from_str(trimmed) else {
+        // Not an IP literal — caller has already filtered the
+        // `localhost` name above; let DNS-based hosts through.
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            // Loopback, RFC1918, link-local.
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                // Belt-and-braces: is_private covers 10/8, 172.16/12,
+                // and 192.168/16, but `is_link_local` covers 169.254/16
+                // separately. Spell out 169.254 anyway for clarity.
+                || (a == 169 && b == 254)
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            let seg = v6.segments()[0];
+            // fe80::/10 → top 10 bits 1111 1110 10
+            let is_link_local = (seg & 0xffc0) == 0xfe80;
+            // fc00::/7 → top 7 bits 1111 110
+            let is_ula = (seg & 0xfe00) == 0xfc00;
+            is_link_local || is_ula
+        }
+    }
+}
+
 /// Probe the configured StarStats server. `/healthz` is exposed by
 /// `crates/starstats-server/src/main.rs:371`; we GET it with a 5s
 /// timeout. Success means the URL resolves AND a StarStats server is
@@ -40,6 +93,45 @@ pub async fn check_api_url(url: String) -> ApiUrlCheck {
             server_version: None,
             error: Some("Invalid URL — must start with http:// or https://".into()),
         };
+    }
+    // SSRF guard: refuse to probe URLs that name a literal private,
+    // loopback, or link-local host. A failed `Url::parse` is also a
+    // hard reject — we cannot extract a host to vet.
+    match reqwest::Url::parse(&url) {
+        Ok(parsed) => match parsed.host_str() {
+            None => {
+                return ApiUrlCheck {
+                    ok: false,
+                    status: None,
+                    server_version: None,
+                    error: Some(
+                        "URL targets a private/loopback host — not allowed for the public API probe"
+                            .into(),
+                    ),
+                };
+            }
+            Some(host) => {
+                if host_is_private_or_loopback(host) {
+                    return ApiUrlCheck {
+                        ok: false,
+                        status: None,
+                        server_version: None,
+                        error: Some(
+                            "URL targets a private/loopback host — not allowed for the public API probe"
+                                .into(),
+                        ),
+                    };
+                }
+            }
+        },
+        Err(e) => {
+            return ApiUrlCheck {
+                ok: false,
+                status: None,
+                server_version: None,
+                error: Some(format!("Couldn't parse URL: {e}")),
+            };
+        }
     }
     let probe_url = format!("{}/healthz", url.trim_end_matches('/'));
     let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
@@ -149,5 +241,38 @@ mod tests {
         let r = check_rsi_cookie("".into()).await;
         assert!(!r.ok);
         assert!(r.error.unwrap().contains("Paste"));
+    }
+
+    #[tokio::test]
+    async fn check_api_url_rejects_loopback_v4() {
+        let r = check_api_url("http://127.0.0.1:8080".into()).await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("private/loopback"));
+    }
+
+    #[tokio::test]
+    async fn check_api_url_rejects_localhost_name() {
+        let r = check_api_url("http://localhost:8080".into()).await;
+        assert!(!r.ok);
+    }
+
+    #[tokio::test]
+    async fn check_api_url_rejects_rfc1918_v4() {
+        for host in ["http://10.0.0.1", "http://192.168.1.1", "http://172.16.0.5"] {
+            let r = check_api_url(host.into()).await;
+            assert!(!r.ok, "expected reject for {host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn check_api_url_rejects_link_local_v4() {
+        let r = check_api_url("http://169.254.169.254".into()).await;
+        assert!(!r.ok);
+    }
+
+    #[tokio::test]
+    async fn check_api_url_rejects_loopback_v6() {
+        let r = check_api_url("http://[::1]/".into()).await;
+        assert!(!r.ok);
     }
 }
