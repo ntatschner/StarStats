@@ -1314,6 +1314,12 @@ export type RevokeShareResponse =
   apiSchema['schemas']['RevokeShareResponse'];
 export type ListSharesResponse = apiSchema['schemas']['ListSharesResponse'];
 export type ShareEntry = apiSchema['schemas']['ShareEntry'];
+/**
+ * Per-share scope clamp — wire-level shape generated from
+ * `sharing_routes::ShareScope`. `null` (or omitted) means "full
+ * manifest", the legacy default every pre-W3 share already has.
+ */
+export type ShareScope = apiSchema['schemas']['ShareScope'];
 export type ListSharedWithMeResponse =
   apiSchema['schemas']['ListSharedWithMeResponse'];
 export type SharedWithMeEntry =
@@ -1375,7 +1381,17 @@ export async function listSharedWithMe(
 export async function addShare(
   bearer: string,
   recipientHandle: string,
-  options: { expiresAt?: string | null; note?: string | null } = {},
+  options: {
+    expiresAt?: string | null;
+    note?: string | null;
+    /**
+     * Per-share scope clamp. `null` or omitted is the legacy
+     * "full manifest" default. The server normalises `kind="full"`
+     * back to NULL so re-grants from a UI that always sends a scope
+     * can still clear it.
+     */
+    scope?: ShareScope | null;
+  } = {},
 ): Promise<ShareResponse> {
   const body: ShareRequest = {
     recipient_handle: recipientHandle,
@@ -1386,6 +1402,7 @@ export async function addShare(
   // shape that round-trips cleanly with #[serde(default)].
   if (options.expiresAt) body.expires_at = options.expiresAt;
   if (options.note) body.note = options.note;
+  if (options.scope) body.scope = options.scope;
   return postJson<ShareResponse>('/v1/me/share', body, bearer);
 }
 

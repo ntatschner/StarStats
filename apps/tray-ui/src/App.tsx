@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type Config } from './api';
+import { api, type Config, type SettingsField } from './api';
 import { StatusPane } from './components/StatusPane';
 import { SettingsPane } from './components/SettingsPane';
 import { LogsPane } from './components/LogsPane';
 import { TrayHeader, type TrayView } from './components/TrayHeader';
 import { useStatusPolling } from './hooks/useStatusPolling';
+import { FieldFocusProvider, useFieldFocus } from './hooks/useFieldFocus';
 import './styles.css';
 
-export default function App() {
+function AppInner() {
   const [view, setView] = useState<TrayView>('status');
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const fieldFocus = useFieldFocus();
 
   // Apply the persisted theme to the document root. `index.html` ships
   // with `data-theme="stanton"` so the unstyled-flash before config
@@ -68,6 +70,18 @@ export default function App() {
     void refreshStatus();
   };
 
+  // HealthCard CTAs land here: switch the view to Settings and focus
+  // the targeted field via the ref registry. SettingsPane registers
+  // its field refs in an effect; useFieldFocus.focus retries on
+  // animation frames until the ref shows up (bounded).
+  const onGoToSettings = useCallback(
+    (field: SettingsField) => {
+      setView('settings');
+      fieldFocus.focus(field);
+    },
+    [fieldFocus]
+  );
+
   const isTailing = status?.tail.current_path != null;
 
   return (
@@ -94,7 +108,7 @@ export default function App() {
                 webOrigin={
                   config?.web_origin ?? config?.remote_sync.api_url ?? null
                 }
-                onGoToSettings={() => setView('settings')}
+                onGoToSettings={onGoToSettings}
               />
             ) : (
               <div className="loading">Loading…</div>
@@ -109,5 +123,13 @@ export default function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <FieldFocusProvider>
+      <AppInner />
+    </FieldFocusProvider>
   );
 }

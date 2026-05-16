@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Route } from 'next';
 import Link from 'next/link';
 import {
   getCurrentLocation,
@@ -91,6 +91,34 @@ export default async function RootLayout({
               )}
               {children}
             </div>
+            {/*
+              Audit v2 §07 polish: Lore moved out of the left rail into
+              a calm footer — users hit it once after signup, so the
+              rail entry was noise. Fine-print + privacy live here too.
+            */}
+            <footer
+              style={{
+                textAlign: 'center',
+                fontSize: 'var(--fs-xs)',
+                color: 'var(--fg-dim)',
+                padding: 'var(--s4) var(--s5)',
+              }}
+            >
+              <Link href={'/lore' as Route} style={{ color: 'inherit' }}>
+                Lore
+              </Link>
+              <span aria-hidden="true"> · </span>
+              <Link href="/privacy" style={{ color: 'inherit' }}>
+                Privacy
+              </Link>
+              <span aria-hidden="true"> · </span>
+              <a
+                href="mailto:dojo@thecodesaiyan.io"
+                style={{ color: 'inherit' }}
+              >
+                Contact
+              </a>
+            </footer>
           </div>
         ) : (
           <div

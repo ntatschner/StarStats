@@ -82,6 +82,17 @@ pub trait AuditLog: Send + Sync + 'static {
     async fn append(&self, entry: AuditEntry) -> Result<(), AuditError>;
 }
 
+/// Aggregated `share.viewed` stats for one (owner, recipient) pair.
+/// Surfaced by [`AuditQuery::share_views_for_owner`] so the outbound
+/// shares list can annotate each pill with a "viewed N times · last Xh
+/// ago" line without the caller having to know the audit-log schema.
+#[derive(Debug, Clone)]
+pub struct ShareViewStat {
+    pub recipient_handle: String,
+    pub view_count: i64,
+    pub last_viewed_at: Option<DateTime<Utc>>,
+}
+
 /// Read-side trait — separate from [`AuditLog`] so the existing
 /// `Arc<dyn AuditLog>` plumbing stays focused on writes. Admin
 /// surfaces inject `Arc<dyn AuditQuery>` independently.
@@ -96,6 +107,18 @@ pub trait AuditQuery: Send + Sync + 'static {
         &self,
         filters: AuditFilters,
     ) -> Result<Vec<AuditEntryRecord>, AuditError>;
+
+    /// Aggregate `share.viewed` rows for one owner, grouping by
+    /// `payload->>'recipient_handle'`. Returns one stat row per
+    /// recipient that has ever viewed. Dedicated method (instead of
+    /// extending `AuditFilters` with a JSONB predicate) because the
+    /// only consumer today is the `/v1/me/shares` enrichment path —
+    /// keeping the SQL local lets it run a single `GROUP BY` instead
+    /// of fetch-all + bin-in-memory.
+    async fn share_views_for_owner(
+        &self,
+        owner_handle: &str,
+    ) -> Result<Vec<ShareViewStat>, AuditError>;
 }
 
 pub struct PostgresAuditLog {
@@ -295,6 +318,40 @@ impl AuditQuery for PostgresAuditLog {
             })
             .collect())
     }
+
+    async fn share_views_for_owner(
+        &self,
+        owner_handle: &str,
+    ) -> Result<Vec<ShareViewStat>, AuditError> {
+        // `payload->>'owner_handle'` matches the canonical key the
+        // `share.viewed` audit writer uses. We `lower(...)` both sides
+        // to match the rest of the sharing surface, which is
+        // case-insensitive on handles.
+        let rows = sqlx::query_as::<_, (String, i64, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT
+                payload->>'recipient_handle'        AS recipient_handle,
+                COUNT(*)                            AS view_count,
+                MAX(occurred_at)                    AS last_viewed_at
+            FROM audit_log
+            WHERE action = 'share.viewed'
+              AND lower(payload->>'owner_handle') = lower($1)
+              AND payload->>'recipient_handle' IS NOT NULL
+            GROUP BY payload->>'recipient_handle'
+            "#,
+        )
+        .bind(owner_handle)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(recipient_handle, view_count, last_viewed_at)| ShareViewStat {
+                recipient_handle,
+                view_count,
+                last_viewed_at,
+            })
+            .collect())
+    }
 }
 
 /// Build canonical bytes for a JSON value: object keys in
@@ -388,6 +445,49 @@ pub mod test_support {
                 })
                 .collect();
             Ok(records)
+        }
+
+        async fn share_views_for_owner(
+            &self,
+            owner_handle: &str,
+        ) -> Result<Vec<ShareViewStat>, AuditError> {
+            let snap = self.entries.lock().expect("audit memlog poisoned");
+            let owner_lower = owner_handle.to_ascii_lowercase();
+            let now = Utc::now();
+            let mut by_recipient: std::collections::HashMap<String, (i64, DateTime<Utc>)> =
+                std::collections::HashMap::new();
+            for e in snap.iter() {
+                if e.action != "share.viewed" {
+                    continue;
+                }
+                let payload_owner = e
+                    .payload
+                    .get("owner_handle")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if payload_owner != owner_lower {
+                    continue;
+                }
+                let Some(recipient) =
+                    e.payload.get("recipient_handle").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let entry = by_recipient
+                    .entry(recipient.to_string())
+                    .or_insert((0, now));
+                entry.0 += 1;
+                entry.1 = now;
+            }
+            Ok(by_recipient
+                .into_iter()
+                .map(|(recipient_handle, (view_count, last))| ShareViewStat {
+                    recipient_handle,
+                    view_count,
+                    last_viewed_at: Some(last),
+                })
+                .collect())
         }
     }
 }

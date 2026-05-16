@@ -53,6 +53,15 @@ const nextConfig = {
       },
     ];
   },
+  // Route renames from the design audit v2 (§07). Redirects keep
+  // existing bookmarks / outbound links from this project's release
+  // notes / Revolut webhook return URLs working after the move.
+  async redirects() {
+    return [
+      { source: '/donate', destination: '/support', permanent: true },
+      { source: '/donate/return', destination: '/support/return', permanent: true },
+    ];
+  },
   webpack: (config, { isServer }) => {
     if (isServer) {
       const externals = config.externals;

@@ -33,16 +33,21 @@ import {
 } from '@/lib/api';
 import { getSession } from '@/lib/session';
 
+// Route renamed /donate → /support per design audit v2 §07 ("rename to
+// Support"). The Server Action and lib/api endpoints still hit
+// `/v1/donate/...` — that's the backend product path, deliberately
+// kept stable so the API contract doesn't break alongside the URL
+// move. Future cleanup may align the API path too.
 export default async function DonatePage() {
   const session = await getSession();
-  if (!session) redirect('/auth/login?next=/donate');
+  if (!session) redirect('/auth/login?next=/support');
 
   let supporter: SupporterStatusDto;
   try {
     supporter = await getSupporterStatus(session.token);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
-      redirect('/auth/login?next=/donate');
+      redirect('/auth/login?next=/support');
     }
     throw e;
   }
@@ -396,12 +401,12 @@ function formatMinor(amountMinor: number, currency: string): string {
 async function createCheckout(formData: FormData) {
   'use server';
   const session = await getSession();
-  if (!session) redirect('/auth/login?next=/donate');
+  if (!session) redirect('/auth/login?next=/support');
 
   const tierKey = formData.get('tier_key');
   const namePlate = formData.get('name_plate');
   if (typeof tierKey !== 'string' || tierKey.length === 0) {
-    redirect('/donate?error=invalid_tier');
+    redirect('/support?error=invalid_tier');
   }
 
   const plateRaw = typeof namePlate === 'string' ? namePlate.trim() : '';
@@ -415,8 +420,8 @@ async function createCheckout(formData: FormData) {
     });
   } catch (e) {
     if (e instanceof ApiCallError) {
-      if (e.status === 401) redirect('/auth/login?next=/donate');
-      redirect(`/donate?error=${encodeURIComponent(e.body.error)}`);
+      if (e.status === 401) redirect('/auth/login?next=/support');
+      redirect(`/support?error=${encodeURIComponent(e.body.error)}`);
     }
     throw e;
   }

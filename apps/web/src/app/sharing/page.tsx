@@ -40,6 +40,7 @@ import {
   type ListOrgsResponse,
   type ListSharedWithMeResponse,
   type ListSharesResponse,
+  type ShareScope,
   type SharedWithMeEntry,
   type VisibilityResponse,
 } from '@/lib/api';
@@ -125,10 +126,44 @@ const ERROR_MESSAGES: Record<string, string> = {
   cannot_share_with_self: "You can't share your stats with yourself.",
   expires_at_in_past: 'Expiry must be in the future.',
   note_too_long: 'Note is too long (max 280 characters).',
+  invalid_scope_kind: 'Pick a valid scope kind.',
+  invalid_scope_window: 'Scope window must be between 1 and 90 days.',
+  invalid_scope_tabs: 'One of the selected tabs is unknown.',
+  invalid_scope_types: 'Event-type filter contains invalid entries.',
   spicedb_unavailable:
     'The authorisation service is offline. Try again shortly.',
   unexpected: 'Something went wrong. Try again.',
 };
+
+/** Closed vocabulary mirroring `ALLOWED_SCOPE_TABS` in the Rust
+ *  validator. Centralising both lists in the page makes it cheap to
+ *  add a new tab — bump both sides and the picker just works. */
+const SCOPE_TAB_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'location', label: 'Location' },
+  { value: 'travel', label: 'Travel' },
+  { value: 'combat', label: 'Combat' },
+  { value: 'loadout', label: 'Loadout' },
+  { value: 'stability', label: 'Stability' },
+  { value: 'commerce', label: 'Commerce' },
+];
+
+/** Format a timestamp as a short relative string like "3d ago" or
+ *  "just now". Returns null for missing input so the caller can
+ *  conditionally render. */
+function formatRelativePast(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const ts = new Date(iso);
+  if (Number.isNaN(ts.getTime())) return null;
+  const diffMs = Date.now() - ts.getTime();
+  if (diffMs < 0) return 'just now';
+  const min = Math.round(diffMs / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  return `${day}d ago`;
+}
 
 /**
  * Build the per-pill "Edit" URL. Round-trips the share's current
@@ -265,8 +300,39 @@ export default async function SharingPage(props: {
     }
     const noteRaw = String(formData.get('note') ?? '').trim();
     const note = noteRaw === '' ? null : noteRaw;
+    // Build the scope payload from the picker. `kind="full"` (or
+    // absent) is the legacy default and skips the wire field — the
+    // server normalises kind=full back to NULL anyway, but keeping
+    // the body minimal makes the audit-log payload easier to read.
+    const scopeKind = String(formData.get('scope_kind') ?? 'full').trim();
+    let scope: ShareScope | null = null;
+    if (scopeKind && scopeKind !== 'full') {
+      const tabs = formData.getAll('scope_tabs').map(String).filter(Boolean);
+      const windowDaysRaw = String(formData.get('scope_window_days') ?? '').trim();
+      const windowDays = windowDaysRaw === '' ? null : Number(windowDaysRaw);
+      const denyRaw = String(formData.get('scope_deny_event_types') ?? '').trim();
+      const allowRaw = String(formData.get('scope_allow_event_types') ?? '').trim();
+      // Comma-separated, lowercased, deduped. Empty list -> null so
+      // we don't ship `[]` and trigger a "list too long" code-path
+      // false positive on the server.
+      const parseTypeList = (raw: string): string[] | null => {
+        const parts = raw
+          .split(',')
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => s.length > 0);
+        return parts.length === 0 ? null : Array.from(new Set(parts));
+      };
+      scope = {
+        kind: scopeKind,
+        tabs: scopeKind === 'tabs' && tabs.length > 0 ? tabs : null,
+        window_days:
+          windowDays !== null && Number.isFinite(windowDays) ? windowDays : null,
+        allow_event_types: parseTypeList(allowRaw),
+        deny_event_types: parseTypeList(denyRaw),
+      };
+    }
     try {
-      await addShare(s.token, recipient, { expiresAt, note });
+      await addShare(s.token, recipient, { expiresAt, note, scope });
     } catch (e) {
       if (e instanceof ApiCallError) {
         if (e.status === 401) redirect('/auth/login?next=/sharing');
@@ -418,65 +484,106 @@ export default async function SharingPage(props: {
         </section>
       ) : (
         <>
-          {/* Visibility toggle ------------------------------------------ */}
-          <section className="ss-card">
-            <header style={cardHeaderStyle}>
-              <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-                Visibility
+          {/* Visibility — audit §05.7 calls for this to read as a top-
+              level section header with the toggle inline, not as a buried
+              card body row. Public state additionally surfaces the
+              shareable URL inline so the user can copy it without
+              hopping to the profile page. */}
+          <section
+            className="ss-card"
+            aria-labelledby="ss-visibility-heading"
+          >
+            <header
+              style={{
+                ...cardHeaderStyle,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 16,
+                flexWrap: 'wrap',
+                paddingBottom: 14,
+              }}
+            >
+              <div style={{ minWidth: 240, flex: 1 }}>
+                <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
+                  Visibility
+                </div>
+                <h2 id="ss-visibility-heading" style={cardTitleStyle}>
+                  {visibility?.public
+                    ? 'Profile is public'
+                    : 'Profile is private'}
+                </h2>
               </div>
-              <h2 style={cardTitleStyle}>Public profile</h2>
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: 10 }}
+              >
+                <span
+                  className={`ss-badge ${visibility?.public ? 'ss-badge--ok' : ''}`}
+                >
+                  {visibility?.public ? (
+                    <>
+                      <span className="ss-badge-dot" />
+                      Public
+                    </>
+                  ) : (
+                    'Private'
+                  )}
+                </span>
+                <form action={visibilityAction} style={{ margin: 0 }}>
+                  <input
+                    type="hidden"
+                    name="public"
+                    value={visibility?.public ? 'false' : 'true'}
+                  />
+                  <button
+                    type="submit"
+                    className={`ss-btn ${visibility?.public ? 'ss-btn--ghost' : 'ss-btn--primary'}`}
+                  >
+                    {visibility?.public ? 'Make private' : 'Make public'}
+                  </button>
+                </form>
+              </div>
             </header>
             <div style={cardBodyStyle}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  gap: 16,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <p style={{ ...mutedStyle, flex: 1, minWidth: 240 }}>
-                  When public, anyone can view your summary and timeline
-                  at{' '}
+              <p style={mutedStyle}>
+                When public, anyone can view your summary and timeline at
+                the URL below.
+              </p>
+              {visibility?.public ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <input
+                    readOnly
+                    value={`/u/${session.claimedHandle}`}
+                    aria-label="Shareable public URL"
+                    className="mono"
+                    style={{
+                      flex: '1 1 280px',
+                      padding: '8px 12px',
+                      background: 'var(--bg-elev)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--r-sm)',
+                      color: 'var(--fg)',
+                      fontSize: 13,
+                    }}
+                  />
                   <Link
                     href={
                       (`/u/${encodeURIComponent(session.claimedHandle)}`) as Route
                     }
-                    className="mono"
-                    style={{ color: 'var(--fg)' }}
+                    className="ss-btn ss-btn--ghost"
+                    style={{ textDecoration: 'none' }}
                   >
-                    /u/{session.claimedHandle}
+                    Open
                   </Link>
-                  .
-                </p>
-                <div
-                  style={{ display: 'flex', alignItems: 'center', gap: 10 }}
-                >
-                  <span
-                    className={`ss-badge ${visibility?.public ? 'ss-badge--ok' : ''}`}
-                  >
-                    {visibility?.public ? (
-                      <>
-                        <span className="ss-badge-dot" />
-                        Public
-                      </>
-                    ) : (
-                      'Private'
-                    )}
-                  </span>
-                  <form action={visibilityAction} style={{ margin: 0 }}>
-                    <input
-                      type="hidden"
-                      name="public"
-                      value={visibility?.public ? 'false' : 'true'}
-                    />
-                    <button type="submit" className="ss-btn ss-btn--ghost">
-                      {visibility?.public ? 'Make private' : 'Make public'}
-                    </button>
-                  </form>
                 </div>
-              </div>
+              ) : null}
             </div>
           </section>
 
@@ -495,6 +602,24 @@ export default async function SharingPage(props: {
                 >
                   {shares.shares.map((entry) => {
                     const expiryLabel = formatExpiry(entry.expires_at);
+                    // Audit v2 §05.2 — owner-visible activity hint
+                    // beneath each pill. View_count + last_viewed_at
+                    // come from the audit-log GROUP BY done server-
+                    // side; we just render them.
+                    const lastViewed = formatRelativePast(entry.last_viewed_at);
+                    const viewCount = entry.view_count ?? 0;
+                    const activityBits: string[] = [];
+                    if (viewCount === 0) {
+                      activityBits.push('not yet viewed');
+                    } else {
+                      activityBits.push(
+                        `viewed ${viewCount} ${viewCount === 1 ? 'time' : 'times'}`,
+                      );
+                      if (lastViewed) activityBits.push(`last ${lastViewed}`);
+                    }
+                    if (entry.scope?.kind && entry.scope.kind !== 'full') {
+                      activityBits.push(`scope: ${entry.scope.kind}`);
+                    }
                     return (
                       <div
                         key={entry.recipient_handle}
@@ -528,6 +653,16 @@ export default async function SharingPage(props: {
                               {entry.note}
                             </span>
                           )}
+                          <span
+                            style={{
+                              fontSize: 11,
+                              color: 'var(--fg-muted)',
+                              letterSpacing: '0.01em',
+                            }}
+                            title={entry.last_viewed_at ?? undefined}
+                          >
+                            {activityBits.join(' · ')}
+                          </span>
                         </div>
                         {expiryLabel && (
                           <span
@@ -663,6 +798,176 @@ export default async function SharingPage(props: {
                     color: 'var(--fg)',
                   }}
                 />
+                {/* Scope picker (audit §05.1) — hidden behind a
+                    `<details>` so the existing two-line grant form
+                    stays the default. Pure native HTML so the page
+                    can remain a server component; the server action
+                    above reads the values straight off FormData. */}
+                <details style={{ marginTop: 4 }}>
+                  <summary
+                    style={{
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      color: 'var(--fg-muted)',
+                      padding: '4px 0',
+                    }}
+                  >
+                    Customise scope — default is full manifest
+                  </summary>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      padding: '10px 0 4px',
+                    }}
+                  >
+                    <label
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12,
+                        color: 'var(--fg-muted)',
+                      }}
+                    >
+                      Scope kind
+                      <select
+                        name="scope_kind"
+                        defaultValue="full"
+                        style={{
+                          padding: '8px 12px',
+                          background: 'var(--bg-elev)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--r-sm)',
+                          color: 'var(--fg)',
+                        }}
+                      >
+                        <option value="full">Full manifest (default)</option>
+                        <option value="timeline">Timeline only</option>
+                        <option value="aggregates">Aggregates only</option>
+                        <option value="tabs">Specific tabs…</option>
+                      </select>
+                    </label>
+                    <fieldset
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--r-sm)',
+                        padding: '8px 12px',
+                        margin: 0,
+                      }}
+                    >
+                      <legend
+                        style={{
+                          fontSize: 12,
+                          color: 'var(--fg-muted)',
+                          padding: '0 4px',
+                        }}
+                      >
+                        Tabs (used when scope kind = tabs)
+                      </legend>
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: 12,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        {SCOPE_TAB_OPTIONS.map((t) => (
+                          <label
+                            key={t.value}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              fontSize: 13,
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              name="scope_tabs"
+                              value={t.value}
+                            />
+                            {t.label}
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                    <label
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12,
+                        color: 'var(--fg-muted)',
+                      }}
+                    >
+                      Window (days, 1–90 — blank = no clamp)
+                      <input
+                        type="number"
+                        name="scope_window_days"
+                        min={1}
+                        max={90}
+                        placeholder="e.g. 7"
+                        style={{
+                          padding: '8px 12px',
+                          background: 'var(--bg-elev)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--r-sm)',
+                          color: 'var(--fg)',
+                        }}
+                      />
+                    </label>
+                    <label
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12,
+                        color: 'var(--fg-muted)',
+                      }}
+                    >
+                      Allow event types (comma-separated, blank = all)
+                      <input
+                        type="text"
+                        name="scope_allow_event_types"
+                        placeholder="quantum_target_selected, jump_completed"
+                        className="mono"
+                        style={{
+                          padding: '8px 12px',
+                          background: 'var(--bg-elev)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--r-sm)',
+                          color: 'var(--fg)',
+                        }}
+                      />
+                    </label>
+                    <label
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4,
+                        fontSize: 12,
+                        color: 'var(--fg-muted)',
+                      }}
+                    >
+                      Deny event types (comma-separated)
+                      <input
+                        type="text"
+                        name="scope_deny_event_types"
+                        placeholder="actor_death"
+                        className="mono"
+                        style={{
+                          padding: '8px 12px',
+                          background: 'var(--bg-elev)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--r-sm)',
+                          color: 'var(--fg)',
+                        }}
+                      />
+                    </label>
+                  </div>
+                </details>
               </form>
             </div>
           </section>

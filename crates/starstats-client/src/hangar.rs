@@ -332,6 +332,38 @@ fn field_too_long(s: &str) -> bool {
     s.chars().count() > MAX_FIELD_CHARS
 }
 
+/// One-shot cookie validation probe. Issues a single GET to the
+/// pledges page with the supplied cookie and returns `Ok(())` if RSI
+/// accepts it (HTTP 200). Returns an `Err` with a human-readable
+/// reason for 401/403/network/non-2xx outcomes. Used by
+/// `probes::check_rsi_cookie` from the Settings pane's "Test cookie"
+/// button.
+///
+/// Does NOT persist the cookie — the caller is responsible for
+/// explicitly saving once the probe succeeds.
+pub async fn probe_with_cookie(cookie_value: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .cookie_store(true)
+        .build()
+        .context("build probe client")?;
+    let cookie_header = format!("{}={}", RSI_SESSION_COOKIE_NAME, cookie_value);
+    let resp = client
+        .get(PLEDGES_URL)
+        .header(reqwest::header::COOKIE, cookie_header)
+        .send()
+        .await
+        .context("GET RSI pledges")?;
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        anyhow::bail!("RSI rejected the cookie (HTTP {status})");
+    }
+    if !status.is_success() {
+        anyhow::bail!("RSI returned HTTP {status}");
+    }
+    Ok(())
+}
+
 // -- HTML parser ----------------------------------------------------
 //
 // Real `/account/pledges` markup (verified 2026-05-09 against a live

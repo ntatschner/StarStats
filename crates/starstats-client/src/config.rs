@@ -46,6 +46,13 @@ pub struct Config {
     /// dark theme.
     #[serde(default)]
     pub theme: Theme,
+    /// Per-user dismissal log for Health items. Permanent (no
+    /// expiry); items re-emerge when the underlying params change
+    /// (the fingerprint is over (id, params), not (id) alone).
+    /// Only `Severity::Warn` and `Severity::Info` items are
+    /// dismissible — the rule is enforced Rust-side in `health.rs`.
+    #[serde(default)]
+    pub dismissed_health: Vec<crate::health::DismissedHealth>,
 }
 
 impl Default for Config {
@@ -58,6 +65,7 @@ impl Default for Config {
             release_channel: ReleaseChannel::default(),
             debug_logging: false,
             theme: Theme::default(),
+            dismissed_health: Vec::new(),
         }
     }
 }
@@ -231,6 +239,46 @@ mod tests {
         assert_eq!(
             ReleaseChannel::default(),
             ReleaseChannel::from_version(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn missing_dismissed_health_defaults_empty() {
+        // Simulate a TOML written before the field existed.
+        let toml_str = r#"
+            gamelog_path = "/tmp/Game.log"
+            auto_update_check = false
+            release_channel = "alpha"
+            debug_logging = false
+            theme = "stanton"
+
+            [remote_sync]
+            enabled = false
+            api_url = "https://api.example"
+            claimed_handle = "test"
+            access_token = "tok"
+            interval_secs = 60
+            batch_size = 200
+        "#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse legacy config");
+        assert!(cfg.dismissed_health.is_empty());
+    }
+
+    #[test]
+    fn dismissed_health_round_trips() {
+        let mut cfg = Config::default();
+        cfg.dismissed_health.push(crate::health::DismissedHealth {
+            id: crate::health::HealthId::UpdateAvailable,
+            fingerprint:
+                "[\"update_available\",{\"id\":\"update_available\",\"version\":\"0.4.1\"}]".into(),
+            dismissed_at: chrono::Utc::now(),
+        });
+        let s = toml::to_string_pretty(&cfg).expect("serialise");
+        let round: Config = toml::from_str(&s).expect("deserialise");
+        assert_eq!(round.dismissed_health.len(), 1);
+        assert_eq!(
+            round.dismissed_health[0].id,
+            crate::health::HealthId::UpdateAvailable
         );
     }
 

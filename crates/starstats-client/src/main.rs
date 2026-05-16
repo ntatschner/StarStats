@@ -20,6 +20,7 @@ mod config;
 mod crashes;
 mod discovery;
 mod gamelog;
+mod health;
 mod launcher;
 // Tray-side hangar fetcher (Wave 5b). Spawned from the Tauri setup
 // closure below when an api_url + access_token are configured.
@@ -30,6 +31,7 @@ mod hangar;
 // `secret` is consumed by both `hangar` and the cookie-management
 // commands.
 mod parser_defs;
+mod probes;
 #[allow(dead_code)]
 mod process_guard;
 mod secret;
@@ -296,6 +298,7 @@ fn main() {
                 sync_handle,
                 _tail_handle: parking_lot::Mutex::new(watcher),
                 _launcher_handle: parking_lot::Mutex::new(launcher_watcher),
+                update_available: Arc::new(parking_lot::Mutex::new(None)),
             });
 
             // 4. Tray icon + menu
@@ -331,6 +334,11 @@ fn main() {
             commands::set_rsi_cookie,
             commands::clear_rsi_cookie,
             commands::get_rsi_cookie_status,
+            commands::get_health,
+            commands::dismiss_health,
+            commands::check_api_url,
+            commands::check_rsi_cookie,
+            commands::set_update_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

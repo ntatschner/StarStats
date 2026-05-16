@@ -339,6 +339,15 @@ function SubmissionRow({
     submission.submitter_id === viewerUserId ||
     submission.submitter_handle === viewerHandle;
 
+  // Row redesign per v1 audit §05: "status as a left-edge accent
+  // strip, pattern inline with metrics, flag as soft text, single
+  // clear CTA on the right." The previous row had four competing
+  // visual zones (vote tile, badges row, body, footer); this version
+  // routes status through a 3px coloured strip, drops the StatusPill
+  // chip, demotes flag count to muted inline text, and adds an
+  // explicit "Open →" affordance on the right.
+  const statusAccent = accentForStatus(submission.status);
+
   return (
     <Link
       href={
@@ -347,37 +356,41 @@ function SubmissionRow({
       className="ss-card"
       style={{
         display: 'grid',
-        gridTemplateColumns: 'auto 1fr',
-        gap: 18,
+        gridTemplateColumns: '3px auto 1fr auto',
+        gap: 14,
         alignItems: 'center',
-        padding: '16px 18px',
+        padding: '14px 16px 14px 0',
         textDecoration: 'none',
         color: 'inherit',
       }}
     >
+      {/* Left-edge status strip — replaces the StatusPill chip. */}
+      <span
+        aria-hidden="true"
+        style={{
+          alignSelf: 'stretch',
+          background: statusAccent,
+          borderRadius: '0 2px 2px 0',
+        }}
+      />
+
+      {/* Vote tile — kept (the row's primary action affordance) but
+          softened so it doesn't compete with the rest of the card. */}
       <div
         style={{
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
           gap: 2,
-          background: submission.viewer_voted
-            ? 'var(--accent-soft)'
-            : 'var(--bg)',
-          border: '1px solid',
-          borderColor: submission.viewer_voted
-            ? 'var(--accent)'
-            : 'var(--border)',
           color: submission.viewer_voted
             ? 'var(--accent)'
             : 'var(--fg-muted)',
-          borderRadius: 'var(--r-md)',
-          padding: '8px 12px',
-          minWidth: 56,
+          padding: '4px 10px',
+          minWidth: 48,
         }}
         aria-label={`${submission.vote_count} ${submission.vote_count === 1 ? 'vote' : 'votes'}`}
       >
-        <span style={{ fontSize: 11, letterSpacing: '0.05em' }}>
+        <span style={{ fontSize: 13, letterSpacing: '0.05em' }}>
           {submission.viewer_voted ? '▲' : '△'}
         </span>
         <span
@@ -390,62 +403,37 @@ function SubmissionRow({
 
       <div style={{ minWidth: 0 }}>
         <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            marginBottom: 6,
-            flexWrap: 'wrap',
-          }}
-        >
-          <span
-            className="mono"
-            style={{ fontSize: 11, color: 'var(--fg-dim)' }}
-          >
-            {shortId(submission.id)}
-          </span>
-          {isMine && (
-            <span className="ss-badge ss-badge--accent">Mine</span>
-          )}
-          <StatusPill status={submission.status} />
-          {submission.flag_count > 0 && (
-            <span className="ss-badge ss-badge--warn">
-              {submission.flag_count}{' '}
-              {submission.flag_count === 1 ? 'flag' : 'flags'}
-            </span>
-          )}
-        </div>
-        <div
           className="mono"
           style={{
             fontSize: 13,
             color: 'var(--accent)',
-            marginBottom: 4,
+            marginBottom: 2,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
         >
           {submission.proposed_label}
-        </div>
-        <div
-          className="mono"
-          style={{
-            fontSize: 11,
-            color: 'var(--fg-muted)',
-            marginBottom: 6,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {submission.pattern}
+          {isMine && (
+            <span
+              style={{
+                marginLeft: 8,
+                fontSize: 10,
+                color: 'var(--fg-muted)',
+                fontFamily: 'inherit',
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+              }}
+            >
+              · mine
+            </span>
+          )}
         </div>
         <div
           style={{
             fontSize: 13,
             color: 'var(--fg-muted)',
-            marginBottom: 6,
+            marginBottom: 4,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             display: '-webkit-box',
@@ -455,29 +443,100 @@ function SubmissionRow({
         >
           {submission.description}
         </div>
+        {/* Pattern inline with metrics — the row's metadata line. */}
         <div
           style={{
             display: 'flex',
-            gap: 14,
+            alignItems: 'baseline',
+            gap: 10,
             fontSize: 11,
             color: 'var(--fg-dim)',
             flexWrap: 'wrap',
           }}
         >
+          <code
+            className="mono"
+            style={{
+              color: 'var(--fg-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: '40ch',
+            }}
+            title={submission.pattern}
+          >
+            {submission.pattern}
+          </code>
+          <span aria-hidden="true">·</span>
+          <span className="mono">{shortId(submission.id)}</span>
+          <span aria-hidden="true">·</span>
           <span>
             by{' '}
-            <span
-              className="mono"
-              style={{ color: 'var(--fg-muted)' }}
-            >
+            <span className="mono" style={{ color: 'var(--fg-muted)' }}>
               {submission.submitter_handle}
             </span>
           </span>
+          <span aria-hidden="true">·</span>
           <span>{formatRelativeTime(submission.created_at)}</span>
+          {submission.flag_count > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span style={{ color: 'var(--warn)' }}>
+                {submission.flag_count}{' '}
+                {submission.flag_count === 1 ? 'flag' : 'flags'}
+              </span>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Single clear CTA on the right (replaces the implicit
+          whole-row link affordance with an explicit one). */}
+      <span
+        aria-hidden="true"
+        className="mono"
+        style={{
+          color: 'var(--fg-dim)',
+          fontSize: 11,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          padding: '0 4px',
+        }}
+      >
+        Open →
+      </span>
     </Link>
   );
+}
+
+/// Maps each submission status to the row's left-edge accent colour.
+/// Keeps the lifecycle visible at a glance without needing the chip
+/// the previous row had — the same colour signals the StatusPill used,
+/// in a less competing form-factor.
+///
+/// Parameter is widened to `string` because `SubmissionDto.status`
+/// comes from the OpenAPI schema where the field is a free-form
+/// string, not the narrowed `SubmissionStatus` union we use in
+/// request params. The default branch handles forward-compat with
+/// any new lifecycle state the server starts emitting before the
+/// client schema regenerates.
+function accentForStatus(status: string): string {
+  switch (status) {
+    case 'review':
+      return 'var(--warn)';
+    case 'accepted':
+      return 'var(--ok)';
+    case 'shipped':
+      return 'var(--accent)';
+    case 'rejected':
+      return 'var(--danger)';
+    case 'flagged':
+      return 'var(--danger)';
+    case 'withdrawn':
+      return 'var(--fg-dim)';
+    default:
+      return 'var(--border-strong)';
+  }
 }
 
 // -- Helpers --------------------------------------------------------

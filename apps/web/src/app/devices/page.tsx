@@ -1,9 +1,36 @@
+/**
+ * Devices — per-client identity surface. Each paired desktop client gets
+ * its own tab; inside the tab we show pairing info plus an Activity
+ * section listing recent ingest batches for the account.
+ *
+ * The "no raw retention" stance is hard: we show per-batch metadata
+ * (counts, build, timestamp) and nothing else. There is no per-line
+ * drilldown affordance by design.
+ *
+ * Historical context: this surface used to be split between /devices
+ * (identity) and /uploads (batches). The audit (v2 §03/§07) folded the
+ * latter into a per-device Activity tab here so users see a single
+ * device's pipeline rather than two parallel global lists. /uploads
+ * now redirects here.
+ *
+ * NB: the ingest-history API does not yet expose device_id, so the
+ * Activity section currently shows the account-level batch stream
+ * scoped under whichever device tab is active. When the API gains a
+ * device_id field on IngestBatchDto we filter here.
+ */
+
+import Link from 'next/link';
+import type { Route } from 'next';
 import { redirect } from 'next/navigation';
 import {
   ApiCallError,
+  getIngestHistory,
   listDevices,
   revokeDevice,
   startPairing,
+  type DeviceDto,
+  type IngestBatchDto,
+  type IngestHistoryResponse,
 } from '@/lib/api';
 import { getSession } from '@/lib/session';
 
@@ -11,7 +38,10 @@ interface SearchParams {
   code?: string;
   expires?: string;
   error?: string;
+  device?: string;
 }
+
+const ACTIVITY_LIMIT = 25;
 
 const mainStyle: React.CSSProperties = {
   maxWidth: 'none',
@@ -95,12 +125,6 @@ const pairCodeFootnoteStyle: React.CSSProperties = {
   fontSize: 12,
 };
 
-const tableLabelCellStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-};
-
 const emptyStyle: React.CSSProperties = {
   textAlign: 'center',
   padding: '40px 20px',
@@ -120,13 +144,41 @@ const sessionFootStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
+const tabStripStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: 4,
+  flexWrap: 'wrap',
+  borderBottom: '1px solid var(--border)',
+};
+
+const factGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+  gap: 16,
+  marginBottom: 20,
+};
+
+const factLabelStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: 'var(--fg-dim)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.06em',
+  marginBottom: 4,
+};
+
+const factValueStyle: React.CSSProperties = {
+  fontSize: 14,
+  color: 'var(--fg)',
+};
+
 export default async function DevicesPage(props: {
   searchParams: Promise<SearchParams>;
 }) {
   const session = await getSession();
   if (!session) redirect('/auth/login?next=/devices');
 
-  const { code, expires, error } = await props.searchParams;
+  const { code, expires, error, device: selectedParam } =
+    await props.searchParams;
 
   // Pull the current device list. If the token has expired (401),
   // bounce to login rather than rendering a half-broken page.
@@ -180,7 +232,28 @@ export default async function DevicesPage(props: {
     redirect('/devices');
   }
 
-  const pairedCount = devices.devices.length;
+  const deviceList = devices.devices;
+  const pairedCount = deviceList.length;
+  // Default tab = first device unless the URL pinned a specific one.
+  const activeDevice =
+    deviceList.find((d) => d.id === selectedParam) ?? deviceList[0] ?? null;
+
+  // Activity feed is account-level today; we only fetch when at least
+  // one device exists (otherwise the section is moot).
+  let activity: IngestHistoryResponse | null = null;
+  if (activeDevice) {
+    try {
+      activity = await getIngestHistory(session.token, {
+        limit: ACTIVITY_LIMIT,
+      });
+    } catch (e) {
+      if (e instanceof ApiCallError && e.status === 401) {
+        redirect('/auth/login?next=/devices');
+      }
+      // Non-fatal — render the tab without activity.
+      activity = { batches: [] };
+    }
+  }
 
   return (
     <main className="ss-screen-enter" style={mainStyle}>
@@ -288,7 +361,8 @@ export default async function DevicesPage(props: {
             Paired devices ({pairedCount})
           </h2>
         </div>
-        {pairedCount === 0 ? (
+
+        {pairedCount === 0 || !activeDevice ? (
           <div style={emptyStyle}>
             <div style={emptyTitleStyle}>Scope is clear.</div>
             <div>
@@ -296,68 +370,13 @@ export default async function DevicesPage(props: {
             </div>
           </div>
         ) : (
-          <div className="ss-table-wrap">
-            <table className="ss-table">
-              <thead>
-                <tr>
-                  <th>Label</th>
-                  <th>Paired</th>
-                  <th>Last seen</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {devices.devices.map((d) => {
-                  const isOnline =
-                    !!d.last_seen_at &&
-                    Date.now() - Date.parse(d.last_seen_at) < 5 * 60 * 1000;
-                  return (
-                    <tr key={d.id}>
-                      <td>
-                        <div style={tableLabelCellStyle}>
-                          <span className="mono">{d.label}</span>
-                          {isOnline && (
-                            <span className="ss-badge ss-badge--ok">
-                              <span className="ss-badge-dot" />
-                              Online
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td style={{ color: 'var(--fg-muted)' }}>
-                        <RelativeTime iso={d.created_at} />
-                      </td>
-                      <td style={{ color: 'var(--fg-muted)' }}>
-                        {d.last_seen_at ? (
-                          <RelativeTime iso={d.last_seen_at} />
-                        ) : (
-                          <span style={{ color: 'var(--fg-dim)' }}>never</span>
-                        )}
-                      </td>
-                      <td className="ss-num">
-                        <form
-                          action={revokeAction}
-                          style={{ display: 'inline' }}
-                        >
-                          <input
-                            type="hidden"
-                            name="device_id"
-                            value={d.id}
-                          />
-                          <button
-                            type="submit"
-                            className="ss-btn ss-btn--danger"
-                            style={{ padding: '6px 12px', fontSize: 12 }}
-                          >
-                            Revoke
-                          </button>
-                        </form>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <DeviceTabStrip devices={deviceList} activeId={activeDevice.id} />
+            <DeviceFacts device={activeDevice} revokeAction={revokeAction} />
+            <DeviceActivity
+              device={activeDevice}
+              batches={activity?.batches ?? []}
+            />
           </div>
         )}
       </section>
@@ -367,6 +386,284 @@ export default async function DevicesPage(props: {
       </p>
     </main>
   );
+}
+
+// -- Tab strip ------------------------------------------------------
+
+function DeviceTabStrip({
+  devices,
+  activeId,
+}: {
+  devices: DeviceDto[];
+  activeId: string;
+}) {
+  return (
+    <nav style={tabStripStyle} aria-label="Paired devices">
+      {devices.map((d) => {
+        const isActive = d.id === activeId;
+        const href = (`/devices?device=${encodeURIComponent(d.id)}`) as Route;
+        const isOnline = isDeviceOnline(d);
+        return (
+          <Link
+            key={d.id}
+            href={href}
+            style={{
+              padding: '10px 14px',
+              fontSize: 13,
+              fontWeight: 500,
+              color: isActive ? 'var(--fg)' : 'var(--fg-muted)',
+              borderBottom: isActive
+                ? '2px solid var(--accent)'
+                : '2px solid transparent',
+              textDecoration: 'none',
+              marginBottom: -1,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            <span className="mono">{d.label || 'unlabeled'}</span>
+            {isOnline && (
+              <span
+                style={{
+                  background: 'var(--ok)',
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  display: 'inline-block',
+                }}
+                aria-label="online"
+              />
+            )}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+// -- Device facts (pairing info) -----------------------------------
+
+function DeviceFacts({
+  device,
+  revokeAction,
+}: {
+  device: DeviceDto;
+  revokeAction: (formData: FormData) => Promise<void>;
+}) {
+  const online = isDeviceOnline(device);
+  return (
+    <div>
+      <div style={factGridStyle}>
+        <Fact label="Label">
+          <span className="mono">{device.label || 'unlabeled'}</span>
+        </Fact>
+        <Fact label="Status">
+          {online ? (
+            <span className="ss-badge ss-badge--ok">
+              <span className="ss-badge-dot" />
+              Online
+            </span>
+          ) : (
+            <span style={{ color: 'var(--fg-muted)' }}>Offline</span>
+          )}
+        </Fact>
+        <Fact label="Paired">
+          <span style={{ color: 'var(--fg-muted)' }}>
+            <RelativeTime iso={device.created_at} />
+          </span>
+        </Fact>
+        <Fact label="Last seen">
+          {device.last_seen_at ? (
+            <span style={{ color: 'var(--fg-muted)' }}>
+              <RelativeTime iso={device.last_seen_at} />
+            </span>
+          ) : (
+            <span style={{ color: 'var(--fg-dim)' }}>never</span>
+          )}
+        </Fact>
+        <Fact label="Device ID">
+          <span
+            className="mono"
+            style={{ fontSize: 12, color: 'var(--fg-dim)' }}
+            title={device.id}
+          >
+            {shortenId(device.id)}
+          </span>
+        </Fact>
+      </div>
+      <form action={revokeAction} style={{ margin: 0 }}>
+        <input type="hidden" name="device_id" value={device.id} />
+        <button
+          type="submit"
+          className="ss-btn ss-btn--danger"
+          style={{ padding: '6px 14px', fontSize: 12 }}
+        >
+          Revoke this device
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function Fact({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div style={factLabelStyle}>{label}</div>
+      <div style={factValueStyle}>{children}</div>
+    </div>
+  );
+}
+
+// -- Activity (batches) --------------------------------------------
+
+function DeviceActivity({
+  device,
+  batches,
+}: {
+  device: DeviceDto;
+  batches: IngestBatchDto[];
+}) {
+  return (
+    <section
+      style={{
+        borderTop: '1px solid var(--border)',
+        paddingTop: 20,
+      }}
+    >
+      <div style={cardHeaderStyle}>
+        <span className="ss-eyebrow">Activity</span>
+        <h3 style={{ ...cardTitleStyle, fontSize: 16 }}>
+          Recent ingest batches
+        </h3>
+        <p style={{ margin: '4px 0 0', color: 'var(--fg-dim)', fontSize: 12 }}>
+          Per-batch metadata only — raw lines are not retained. Showing the
+          most recent {ACTIVITY_LIMIT} batches for this account.
+        </p>
+      </div>
+      {batches.length === 0 ? (
+        <div style={emptyStyle}>
+          <div style={emptyTitleStyle}>Scope is clear.</div>
+          <div>
+            No batches yet. Once{' '}
+            <span className="mono">{device.label || 'this device'}</span>{' '}
+            posts an ingest batch it will appear here.
+          </div>
+        </div>
+      ) : (
+        <div className="ss-table-wrap">
+          <table className="ss-table" style={{ fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left' }}>When</th>
+                <th style={{ textAlign: 'left' }}>Batch</th>
+                <th style={{ textAlign: 'left' }}>Build</th>
+                <th style={{ textAlign: 'right' }}>Total</th>
+                <th style={{ textAlign: 'right' }}>Accepted</th>
+                <th style={{ textAlign: 'right' }}>Duplicate</th>
+                <th style={{ textAlign: 'right' }}>Rejected</th>
+              </tr>
+            </thead>
+            <tbody>
+              {batches.map((b) => (
+                <BatchRow key={b.seq} batch={b} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BatchRow({ batch }: { batch: IngestBatchDto }) {
+  const rejectionPct =
+    batch.total > 0 ? (batch.rejected / batch.total) * 100 : 0;
+  return (
+    <tr>
+      <td style={{ color: 'var(--fg-muted)' }}>
+        {formatRelativeTime(batch.occurred_at)}
+      </td>
+      <td>
+        <span
+          className="mono"
+          style={{ fontSize: 12, color: 'var(--fg-dim)' }}
+          title={batch.batch_id}
+        >
+          {shortenBatchId(batch.batch_id)}
+        </span>
+      </td>
+      <td className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+        {batch.game_build ?? '—'}
+      </td>
+      <td className="mono" style={{ textAlign: 'right' }}>
+        {batch.total.toLocaleString()}
+      </td>
+      <td
+        className="mono"
+        style={{ textAlign: 'right', color: 'var(--ok)' }}
+      >
+        {batch.accepted.toLocaleString()}
+      </td>
+      <td
+        className="mono"
+        style={{ textAlign: 'right', color: 'var(--fg-dim)' }}
+      >
+        {batch.duplicate.toLocaleString()}
+      </td>
+      <td
+        className="mono"
+        style={{
+          textAlign: 'right',
+          color:
+            batch.rejected > 0
+              ? rejectionPct > 5
+                ? 'var(--danger)'
+                : 'var(--warn)'
+              : 'var(--fg-dim)',
+        }}
+      >
+        {batch.rejected.toLocaleString()}
+      </td>
+    </tr>
+  );
+}
+
+// -- Time / id helpers ---------------------------------------------
+
+function isDeviceOnline(d: DeviceDto): boolean {
+  if (!d.last_seen_at) return false;
+  return Date.now() - Date.parse(d.last_seen_at) < 5 * 60 * 1000;
+}
+
+function shortenId(id: string): string {
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 8)}…${id.slice(-3)}`;
+}
+
+function shortenBatchId(id: string): string {
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 8)}…${id.slice(-3)}`;
+}
+
+function formatRelativeTime(iso: string): string {
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return iso;
+  const diffMs = Date.now() - ts;
+  if (diffMs < 60_000) return 'just now';
+  if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`;
+  if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}h ago`;
+  if (diffMs < 7 * 86_400_000) return `${Math.floor(diffMs / 86_400_000)}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function ExpiryRelative({ iso }: { iso: string }) {

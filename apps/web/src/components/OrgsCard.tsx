@@ -1,4 +1,6 @@
 import type { RsiOrgsSnapshot } from '@/lib/api';
+import { refreshOrgsAction } from '@/app/_actions/refresh-rsi';
+import { RefreshSubmitButton } from '@/components/cards/RefreshSubmitButton';
 
 /**
  * RSI org-membership card. Shared between:
@@ -90,17 +92,36 @@ export function OrgsCard({
       <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
         RSI organisations
       </div>
-      <h2
+      {/*
+        Audit v2 §08 — promote refresh to an inline ghost button for the
+        owner-side render. Public callers omit `showSettingsLink`, so
+        strangers don't see it.
+      */}
+      <div
         style={{
-          margin: 0,
-          fontSize: 17,
-          fontWeight: 600,
-          letterSpacing: '-0.01em',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 12,
           marginBottom: 4,
         }}
       >
-        {sorted.length === 0 ? 'No public memberships' : 'Memberships'}
-      </h2>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: 17,
+            fontWeight: 600,
+            letterSpacing: '-0.01em',
+          }}
+        >
+          {sorted.length === 0 ? 'No public memberships' : 'Memberships'}
+        </h2>
+        {showSettingsLink && (
+          <form action={refreshOrgsAction}>
+            <RefreshSubmitButton />
+          </form>
+        )}
+      </div>
       <p
         style={{
           margin: 0,

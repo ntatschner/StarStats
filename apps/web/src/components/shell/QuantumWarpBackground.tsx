@@ -42,7 +42,7 @@ const FIXED: Readonly<Record<string, number>> = {
   '/uploads': 200,
   '/settings': 195,
   '/settings/2fa': 155,
-  '/donate': 245,
+  '/support': 245,
   '/privacy': 215,
 };
 

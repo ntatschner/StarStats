@@ -8,6 +8,16 @@ import type { HangarSnapshot } from '@/lib/api';
  * a snapshot to `/v1/me/hangar`; this card renders the most recent one
  * without launching the tray. The empty state nudges users who haven't
  * paired the tray yet, since that's the only writer.
+ *
+ * TODO(audit-v2 §08): ProfileCard + OrgsCard got promoted to inline
+ * "Refresh now" buttons backed by server actions. Hangar can't follow
+ * suit yet — there's no `refreshHangar()` in `apps/web/src/lib/api.ts`
+ * because the tray client is the only writer of `/v1/me/hangar`. Once
+ * a server-side refresh endpoint exists, mirror the ProfileCard
+ * pattern: import a `refreshHangarAction` from
+ * `@/app/_actions/refresh-rsi`, gate on owner-side state, and render
+ * `<RefreshSubmitButton />` in the card header. Until then, the empty
+ * state's "Pair a device" link is the only refresh affordance.
  */
 
 const SHIP_PREVIEW_LIMIT = 6;
