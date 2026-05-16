@@ -89,20 +89,27 @@ export function SettingsPane({ config, onSave }: Props) {
   // Field-focus registration for cross-pane HealthCard CTAs. Each
   // outer wrapper registers its DOM element; useFieldFocus.focus
   // scrolls + focuses the first interactive child.
+  //
+  // Stable-position fields use refs + a one-shot effect. Fields
+  // inside conditional branches (e.g. pairing input, which is only
+  // mounted when !isPaired) use ref callbacks so the registration
+  // follows the mount/unmount of the branch.
   const fieldFocus = useFieldFocus();
   const gamelogPathRef = useRef<HTMLDivElement>(null);
   const apiUrlRef = useRef<HTMLDivElement>(null);
-  const pairingCodeRef = useRef<HTMLDivElement>(null);
   const rsiCookieRef = useRef<HTMLDivElement>(null);
   const updatesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fieldFocus.register('gamelog_path', gamelogPathRef.current);
     fieldFocus.register('api_url', apiUrlRef.current);
-    fieldFocus.register('pairing_code', pairingCodeRef.current);
     fieldFocus.register('rsi_cookie', rsiCookieRef.current);
     fieldFocus.register('updates', updatesRef.current);
   }, [fieldFocus]);
+
+  const setPairingCodeNode = (el: HTMLDivElement | null) => {
+    fieldFocus.register('pairing_code', el);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -632,10 +639,10 @@ export function SettingsPane({ config, onSave }: Props) {
             />
           </div>
 
-          <div ref={pairingCodeRef}>
           <Field label="Hangar">
             {isPaired ? (
               <div
+                ref={setPairingCodeNode}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -690,6 +697,7 @@ export function SettingsPane({ config, onSave }: Props) {
               </div>
             ) : (
               <div
+                ref={setPairingCodeNode}
                 style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
               >
                 <small
@@ -742,7 +750,6 @@ export function SettingsPane({ config, onSave }: Props) {
               </div>
             )}
           </Field>
-          </div>
 
           <div
             style={{

@@ -46,7 +46,13 @@ export function healthStrings(p: HealthParams): HealthStrings {
     case 'sync_failing':
       return {
         summary: 'Remote sync is failing.',
-        detail: `${p.last_error} (${p.attempts_since_success} attempts since last success)`,
+        // attempts_since_success is plumbed but not yet populated by
+        // the snapshot path; render the bare error until that lands
+        // so we don't display a misleading "(0 attempts since…)".
+        detail:
+          p.attempts_since_success > 0
+            ? `${p.last_error} (${p.attempts_since_success} attempts since last success)`
+            : p.last_error,
       };
     case 'hangar_skip':
       return {

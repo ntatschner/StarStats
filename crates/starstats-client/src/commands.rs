@@ -1460,15 +1460,31 @@ fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInput
         .ok()
         .and_then(|d| free_bytes_for_path(&d));
 
-    // Parse hangar timestamps from RFC3339 strings into DateTime<Utc>.
-    let parse_dt = |s: &Option<String>| -> Option<chrono::DateTime<chrono::Utc>> {
-        s.as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc))
+    // Parse RFC3339 timestamps into DateTime<Utc>. A malformed value
+    // disables the dependent check (e.g. GameLogStale), so log on
+    // failure rather than silently swallow — without the warn, a
+    // regression in the upstream timestamp shape would mask the
+    // staleness signal indefinitely.
+    let parse_dt = |label: &str,
+                    s: &Option<String>|
+     -> Option<chrono::DateTime<chrono::Utc>> {
+        let raw = s.as_deref()?;
+        match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(d) => Some(d.with_timezone(&chrono::Utc)),
+            Err(e) => {
+                tracing::warn!(
+                    field = label,
+                    raw = raw,
+                    error = %e,
+                    "health snapshot: dropping malformed RFC3339 timestamp"
+                );
+                None
+            }
+        }
     };
-    let tail_last_event_at = parse_dt(&tail.last_event_at);
-    let hangar_last_attempt_at = parse_dt(&hangar.last_attempt_at);
-    let hangar_last_success_at = parse_dt(&hangar.last_success_at);
+    let tail_last_event_at = parse_dt("tail.last_event_at", &tail.last_event_at);
+    let hangar_last_attempt_at = parse_dt("hangar.last_attempt_at", &hangar.last_attempt_at);
+    let hangar_last_success_at = parse_dt("hangar.last_success_at", &hangar.last_success_at);
 
     Ok(crate::health::HealthInputs {
         now,
@@ -1521,6 +1537,14 @@ pub async fn get_health(
     Ok(crate::health::current_health(&inputs))
 }
 
+/// Process-wide lock taken by `dismiss_health` (and any future
+/// command that does load-mutate-save on `config.toml`) to prevent
+/// the load+save race: two concurrent dismissals would otherwise
+/// each load the pre-dismissal config, push their own item, then
+/// the second write would clobber the first. The lock is module-
+/// private; callers reach it only via the command surface.
+static CONFIG_MUTATION_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 #[tauri::command]
 pub async fn dismiss_health(
     id: crate::health::HealthId,
@@ -1535,6 +1559,7 @@ pub async fn dismiss_health(
     if !target.dismissible {
         return Err(format!("HealthItem {:?} is not dismissible", id));
     }
+    let _guard = CONFIG_MUTATION_LOCK.lock();
     let mut config = crate::config::load().map_err(|e| e.to_string())?;
     config
         .dismissed_health
@@ -1560,13 +1585,29 @@ pub async fn check_rsi_cookie(cookie: String) -> Result<crate::probes::CookieChe
 /// Set by `apps/tray-ui/src/updater.ts` after a successful auto-update
 /// or manual update check that found a newer version. Feeds the
 /// `HealthId::UpdateAvailable` item in the health surface.
+///
+/// Validates the version string: must look like semver-ish (digits,
+/// dots, dashes, plus, ascii alphanumerics) and be at most 64 chars.
+/// Renderer-controllable surface, so any compromise/bug in the JS
+/// layer can't inject arbitrary text into the Health card via this
+/// path.
 #[tauri::command]
 pub async fn set_update_available(
     version: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let version = version.trim();
+    if version.is_empty() || version.len() > 64 {
+        return Err("invalid version: must be 1-64 chars".into());
+    }
+    if !version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+    {
+        return Err("invalid version: only alphanumerics, '.', '-', '+', '_' allowed".into());
+    }
     *state.update_available.lock() = Some(crate::state::UpdateInfo {
-        version,
+        version: version.to_string(),
         checked_at: chrono::Utc::now(),
     });
     Ok(())

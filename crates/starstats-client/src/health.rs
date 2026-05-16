@@ -301,10 +301,14 @@ fn dismissible_for(severity: Severity) -> bool {
     matches!(severity, Severity::Warn | Severity::Info)
 }
 
-fn fingerprint(id: HealthId, params: &HealthParams) -> String {
-    // Canonical JSON serialisation of (id, params) — stable across runs
-    // and human-readable in the persisted config.
-    serde_json::to_string(&(id, params)).unwrap_or_else(|_| String::from("invalid"))
+fn fingerprint(_id: HealthId, params: &HealthParams) -> String {
+    // Canonical JSON serialisation of params — stable across runs
+    // and human-readable in the persisted config. The id is already
+    // carried by the surrounding DismissedHealth.id, and HealthParams
+    // is `#[serde(tag = "id")]` so the id is also present in the
+    // serialised string itself — including a separate copy in the
+    // tuple would double-encode it in every persisted entry forever.
+    serde_json::to_string(params).unwrap_or_else(|_| String::from("invalid"))
 }
 
 fn is_dismissed(item: &HealthItem, dismissed: &[DismissedHealth]) -> bool {
