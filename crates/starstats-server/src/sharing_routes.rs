@@ -505,22 +505,22 @@ pub async fn add_share<U: UserStore>(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "spicedb_error");
     }
 
-    // Metadata is best-effort — the SpiceDB grant is already
-    // committed, so a Postgres failure here is logged and surfaced
-    // as a partial success rather than rolling back. The next
-    // grant or list will repopulate the row (upsert).
-    if req.expires_at.is_some() || note_owned.is_some() {
-        if let Err(e) = meta
-            .upsert(
-                &auth.preferred_username,
-                &recipient_user.claimed_handle,
-                req.expires_at,
-                note_owned.as_deref(),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "share_metadata upsert failed");
-        }
+    // Always upsert metadata, even when both fields are None — this
+    // makes re-POST behave as a true upsert that can both set AND
+    // clear an expiry or note. Without this, the /sharing edit flow
+    // can set metadata via re-POST but can't remove it. Metadata is
+    // best-effort: a Postgres failure here is logged but doesn't
+    // roll back the already-committed SpiceDB grant.
+    if let Err(e) = meta
+        .upsert(
+            &auth.preferred_username,
+            &recipient_user.claimed_handle,
+            req.expires_at,
+            note_owned.as_deref(),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "share_metadata upsert failed");
     }
 
     if let Err(e) = audit

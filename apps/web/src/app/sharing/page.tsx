@@ -50,6 +50,15 @@ interface SearchParams {
   error?: string;
   /** Pre-populate the add-handle field — set by per-profile "Share back" CTA. */
   handle?: string;
+  /**
+   * Pre-populate the optional expiry field for in-place edit. Format
+   * is the `<input type="datetime-local">` shape (`YYYY-MM-DDTHH:MM`
+   * in local time) — what the browser already submits, and what the
+   * edit-Link writes back into the URL.
+   */
+  expires?: string;
+  /** Pre-populate the note field for in-place edit. */
+  note?: string;
 }
 
 const pageStyle: React.CSSProperties = {
@@ -120,6 +129,36 @@ const ERROR_MESSAGES: Record<string, string> = {
   unexpected: 'Something went wrong. Try again.',
 };
 
+/**
+ * Build the per-pill "Edit" URL. Round-trips the share's current
+ * expiry + note through the URL so the existing add-share form can
+ * pre-fill them; submitting that form re-POSTs to /v1/me/share which
+ * upserts the metadata (set + clear are both supported now). The
+ * expiry is serialised as the `<input type="datetime-local">` shape
+ * (`YYYY-MM-DDTHH:MM`, no timezone) — that's what the input expects
+ * and what the server-action already converts back via `new Date()`.
+ */
+function buildEditHref(
+  recipientHandle: string,
+  expiresAt: string | null | undefined,
+  note: string | null | undefined,
+): string {
+  const qs = new URLSearchParams();
+  qs.set('handle', recipientHandle);
+  if (expiresAt) {
+    const dt = new Date(expiresAt);
+    if (!Number.isNaN(dt.getTime())) {
+      // toISOString → UTC `YYYY-MM-DDTHH:MM:SS.sssZ`; slice down to
+      // the datetime-local shape. Matches what the form already
+      // submits, so the round-trip is symmetrical even if the user
+      // doesn't touch the field.
+      qs.set('expires', dt.toISOString().slice(0, 16));
+    }
+  }
+  if (note) qs.set('note', note);
+  return `/sharing?${qs.toString()}#share-editor`;
+}
+
 /** Format an ISO timestamp as "in 3d" / "expired" / "in 2h" for the
  *  share pills. Returns null when no expiry was set. */
 function formatExpiry(iso: string | null | undefined): string | null {
@@ -147,6 +186,12 @@ export default async function SharingPage(props: {
   const status = params.status;
   const errorCode = params.error;
   const prefilledHandle = (params.handle ?? '').trim();
+  const prefilledExpires = (params.expires ?? '').trim();
+  const prefilledNote = (params.note ?? '').trim();
+  // "Edit mode" = any of the prefill fields are set. Switches the
+  // form's title/button copy from "grant" to "save changes" so the
+  // user understands they're updating an existing row.
+  const isEditing = prefilledHandle !== '';
 
   // Load the four parallel data sources. SpiceDB outages map to
   // `degraded` so the page still renders with a clear banner instead
@@ -496,6 +541,18 @@ export default async function SharingPage(props: {
                             {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
                           </span>
                         )}
+                        <Link
+                          href={
+                            buildEditHref(
+                              entry.recipient_handle,
+                              entry.expires_at,
+                              entry.note,
+                            ) as Route
+                          }
+                          className="ss-btn ss-btn--link"
+                        >
+                          Edit
+                        </Link>
                         <form action={revokeShareAction} style={{ margin: 0 }}>
                           <input
                             type="hidden"
@@ -520,6 +577,7 @@ export default async function SharingPage(props: {
                 </p>
               )}
               <form
+                id="share-editor"
                 action={addShareAction}
                 style={{
                   display: 'flex',
@@ -527,6 +585,18 @@ export default async function SharingPage(props: {
                   gap: 8,
                 }}
               >
+                {isEditing && (
+                  <p
+                    style={{
+                      ...mutedStyle,
+                      fontSize: 12,
+                      color: 'var(--accent)',
+                    }}
+                  >
+                    Editing share with <span className="mono">{prefilledHandle}</span>
+                    {' '}— blank out a field and save to clear it.
+                  </p>
+                )}
                 <div style={formRowStyle}>
                   <input
                     type="text"
@@ -538,6 +608,7 @@ export default async function SharingPage(props: {
                     className="mono"
                     required
                     maxLength={64}
+                    readOnly={isEditing}
                     style={{
                       flex: '1 1 220px',
                       padding: '8px 12px',
@@ -545,11 +616,13 @@ export default async function SharingPage(props: {
                       border: '1px solid var(--border)',
                       borderRadius: 'var(--r-sm)',
                       color: 'var(--fg)',
+                      opacity: isEditing ? 0.7 : 1,
                     }}
                   />
                   <input
                     type="datetime-local"
                     name="expires_at_local"
+                    defaultValue={prefilledExpires}
                     aria-label="Auto-expiry (optional)"
                     title="Leave blank for no expiry"
                     style={{
@@ -562,13 +635,23 @@ export default async function SharingPage(props: {
                     }}
                   />
                   <button type="submit" className="ss-btn ss-btn--primary">
-                    Grant access
+                    {isEditing ? 'Save changes' : 'Grant access'}
                   </button>
+                  {isEditing && (
+                    <Link
+                      href={'/sharing' as Route}
+                      className="ss-btn ss-btn--ghost"
+                      style={{ textDecoration: 'none' }}
+                    >
+                      Cancel
+                    </Link>
+                  )}
                 </div>
                 <input
                   type="text"
                   name="note"
                   placeholder="Note (optional, max 280 chars)"
+                  defaultValue={prefilledNote}
                   maxLength={280}
                   aria-label="Note (optional)"
                   style={{
