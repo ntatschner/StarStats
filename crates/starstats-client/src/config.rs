@@ -95,6 +95,11 @@ impl Default for Theme {
 impl Theme {
     /// Lowercase token serialised into config.toml and matched by the
     /// `[data-theme="..."]` selectors in `starstats-tokens.css`.
+    /// Currently unused (serde's `rename_all = "snake_case"` produces
+    /// the same string for the persistence path), but kept on the
+    /// public API for callers that need the literal token without a
+    /// `serde_json::to_value` round-trip.
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Theme::Stanton => "stanton",
