@@ -103,10 +103,7 @@ pub trait AuditQuery: Send + Sync + 'static {
     /// `filters.offset` rows. The returned `Vec` length plus
     /// whatever the caller knows about `offset` is enough to drive
     /// "has more" — explicit count queries are deferred.
-    async fn list(
-        &self,
-        filters: AuditFilters,
-    ) -> Result<Vec<AuditEntryRecord>, AuditError>;
+    async fn list(&self, filters: AuditFilters) -> Result<Vec<AuditEntryRecord>, AuditError>;
 
     /// Aggregate `share.viewed` rows for one owner, grouping by
     /// `payload->>'recipient_handle'`. Returns one stat row per
@@ -228,10 +225,7 @@ impl AuditLog for PostgresAuditLog {
 
 #[async_trait]
 impl AuditQuery for PostgresAuditLog {
-    async fn list(
-        &self,
-        filters: AuditFilters,
-    ) -> Result<Vec<AuditEntryRecord>, AuditError> {
+    async fn list(&self, filters: AuditFilters) -> Result<Vec<AuditEntryRecord>, AuditError> {
         // The handler clamps these into a safe range before calling;
         // defence-in-depth here keeps a misuse from issuing an
         // unbounded scan.
@@ -261,9 +255,8 @@ impl AuditQuery for PostgresAuditLog {
         // since/until use bind indices that depend on whether the
         // earlier filters are present, so build the placeholders
         // dynamically.
-        let mut next_idx = 1
-            + filters.actor_handle.is_some() as usize
-            + filters.action.is_some() as usize;
+        let mut next_idx =
+            1 + filters.actor_handle.is_some() as usize + filters.action.is_some() as usize;
         if filters.since.is_some() {
             sql.push_str(&format!(" AND occurred_at >= ${next_idx}"));
             next_idx += 1;
@@ -306,16 +299,16 @@ impl AuditQuery for PostgresAuditLog {
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
-            .map(|(seq, occurred_at, actor_sub, actor_handle, action, payload)| {
-                AuditEntryRecord {
+            .map(
+                |(seq, occurred_at, actor_sub, actor_handle, action, payload)| AuditEntryRecord {
                     seq,
                     occurred_at,
                     actor_sub,
                     actor_handle,
                     action,
                     payload,
-                }
-            })
+                },
+            )
             .collect())
     }
 
@@ -345,11 +338,13 @@ impl AuditQuery for PostgresAuditLog {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(recipient_handle, view_count, last_viewed_at)| ShareViewStat {
-                recipient_handle,
-                view_count,
-                last_viewed_at,
-            })
+            .map(
+                |(recipient_handle, view_count, last_viewed_at)| ShareViewStat {
+                    recipient_handle,
+                    view_count,
+                    last_viewed_at,
+                },
+            )
             .collect())
     }
 }
@@ -421,10 +416,7 @@ pub mod test_support {
     /// every entry seq'd by insertion order.
     #[async_trait]
     impl AuditQuery for MemoryAuditLog {
-        async fn list(
-            &self,
-            filters: AuditFilters,
-        ) -> Result<Vec<AuditEntryRecord>, AuditError> {
+        async fn list(&self, filters: AuditFilters) -> Result<Vec<AuditEntryRecord>, AuditError> {
             let snap = self.entries.lock().expect("audit memlog poisoned");
             let limit = filters.limit.clamp(1, 500) as usize;
             let offset = filters.offset.max(0) as usize;
@@ -469,8 +461,7 @@ pub mod test_support {
                 if payload_owner != owner_lower {
                     continue;
                 }
-                let Some(recipient) =
-                    e.payload.get("recipient_handle").and_then(Value::as_str)
+                let Some(recipient) = e.payload.get("recipient_handle").and_then(Value::as_str)
                 else {
                     continue;
                 };

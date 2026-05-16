@@ -106,10 +106,7 @@ fn err_response(status: StatusCode, error: &str) -> Response {
 
 /// Materialise an `AdminUserDto` from a `User` plus its active
 /// staff-role set.
-async fn to_dto(
-    user: User,
-    staff: &Arc<dyn StaffRoleStore>,
-) -> Result<AdminUserDto, Response> {
+async fn to_dto(user: User, staff: &Arc<dyn StaffRoleStore>) -> Result<AdminUserDto, Response> {
     let roles = match staff.list_active_for_user(user.id).await {
         Ok(r) => r.as_strings(),
         Err(e) => {
@@ -159,7 +156,10 @@ pub async fn list_users_admin<U: UserStore>(
     let offset = params.offset.unwrap_or(0).max(0);
 
     let filters = ListUsersFilters {
-        q: params.q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        q: params
+            .q
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         limit,
         offset,
     };
@@ -424,9 +424,6 @@ pub fn router<U: UserStore>(users: Arc<U>) -> Router {
         .route("/v1/admin/users", get(list_users_admin::<U>))
         .route("/v1/admin/users/:id", get(get_user_admin::<U>))
         .route("/v1/admin/users/:id/roles", post(grant_role::<U>))
-        .route(
-            "/v1/admin/users/:id/roles/:role",
-            delete(revoke_role::<U>),
-        )
+        .route("/v1/admin/users/:id/roles/:role", delete(revoke_role::<U>))
         .with_state(users)
 }

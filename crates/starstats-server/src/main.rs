@@ -208,9 +208,7 @@ async fn main() -> anyhow::Result<()> {
     // is cheap and keeps the two trait views in sync without
     // duplicating connection management.
     let mirror_for_audit: Option<Arc<MinioMirror>> = minio_mirror.as_ref().clone().map(Arc::new);
-    let pg_audit = Arc::new(
-        PostgresAuditLog::new(pool.clone()).with_mirror(mirror_for_audit),
-    );
+    let pg_audit = Arc::new(PostgresAuditLog::new(pool.clone()).with_mirror(mirror_for_audit));
     let audit: Arc<dyn AuditLog> = pg_audit.clone();
     let audit_query: Arc<dyn crate::audit::AuditQuery> = pg_audit;
 
@@ -388,8 +386,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/me/events", get(query::list_events::<PostgresStore>))
         .route(
             "/v1/me/events/:seq/hide",
-            post(query::hide_event::<PostgresStore>)
-                .delete(query::unhide_event::<PostgresStore>),
+            post(query::hide_event::<PostgresStore>).delete(query::unhide_event::<PostgresStore>),
         )
         .route("/v1/me/summary", get(query::summary::<PostgresStore>))
         .route("/v1/me/timeline", get(query::timeline::<PostgresStore>))

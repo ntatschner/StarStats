@@ -244,8 +244,7 @@ impl ReferenceClient for WikiReferenceClient {
                 return ReferenceFetchOutcome::UpstreamUnavailable;
             }
 
-            let url =
-                format!("{WIKI_VEHICLES_BASE}?page={page}&limit={WIKI_PAGE_LIMIT}");
+            let url = format!("{WIKI_VEHICLES_BASE}?page={page}&limit={WIKI_PAGE_LIMIT}");
             let resp = match self.inner.get(&url).send().await {
                 Ok(r) => r,
                 Err(err) => {

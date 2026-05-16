@@ -349,10 +349,7 @@ impl SpicedbClient {
     /// fields, so we build the `RelationshipFilter` by hand here to
     /// populate the subject-id slot (matches the pattern in
     /// `delete_org_member_all_roles`).
-    pub async fn list_shared_with_me(
-        &self,
-        recipient_handle: &str,
-    ) -> Result<Vec<String>> {
+    pub async fn list_shared_with_me(&self, recipient_handle: &str) -> Result<Vec<String>> {
         let filter = RelationshipFilter {
             resource_type: "stats_record".to_string(),
             // Empty = no resource_id filter; we want every owner who

@@ -1474,9 +1474,7 @@ pub async fn commerce_recent<Q: EventQuery>(
     // Optional time-window filter. Bounds match `parse_stats_window`
     // so the same range chips drive every page.
     let since = match params.hours {
-        Some(h) if h > 0 && h <= STATS_MAX_HOURS => {
-            Some(Utc::now() - chrono::Duration::hours(h))
-        }
+        Some(h) if h > 0 && h <= STATS_MAX_HOURS => Some(Utc::now() - chrono::Duration::hours(h)),
         Some(_) => return err(StatusCode::BAD_REQUEST, "invalid_hours"),
         None => None,
     };

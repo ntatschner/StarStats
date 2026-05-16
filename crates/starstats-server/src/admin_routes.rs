@@ -241,7 +241,10 @@ pub async fn list_audit(
     Extension(audit_query): Extension<Arc<dyn AuditQuery>>,
     Query(params): Query<AuditListParams>,
 ) -> Response {
-    let limit = params.limit.unwrap_or(AUDIT_PAGE_DEFAULT).clamp(1, AUDIT_PAGE_MAX);
+    let limit = params
+        .limit
+        .unwrap_or(AUDIT_PAGE_DEFAULT)
+        .clamp(1, AUDIT_PAGE_MAX);
     let offset = params.offset.unwrap_or(0).max(0);
 
     // Trim/normalize before handing to the store so blank inputs
@@ -290,7 +293,11 @@ pub async fn list_audit(
         })
         .collect();
 
-    (StatusCode::OK, Json(AuditListResponse { entries, has_more })).into_response()
+    (
+        StatusCode::OK,
+        Json(AuditListResponse { entries, has_more }),
+    )
+        .into_response()
 }
 
 /// Builds the admin sub-router rooted at `/v1/admin`. Each handler

@@ -20,12 +20,12 @@
 // the main bin's: utoipa's derive macros walk these modules to
 // emit the schema.
 
-#[path = "../admin_routes.rs"]
-mod admin_routes;
 #[path = "../admin_org_routes.rs"]
 mod admin_org_routes;
 #[path = "../admin_reference_routes.rs"]
 mod admin_reference_routes;
+#[path = "../admin_routes.rs"]
+mod admin_routes;
 #[path = "../admin_submission_routes.rs"]
 mod admin_submission_routes;
 #[path = "../admin_user_routes.rs"]

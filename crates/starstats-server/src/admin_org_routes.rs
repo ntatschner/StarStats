@@ -126,10 +126,7 @@ pub async fn list_orgs_admin<O: OrgStore>(
         .clamp(1, ORGS_PAGE_MAX);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows = match orgs
-        .list_all(params.q.as_deref(), limit, offset)
-        .await
-    {
+    let rows = match orgs.list_all(params.q.as_deref(), limit, offset).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "list_all orgs failed");

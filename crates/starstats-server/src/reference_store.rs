@@ -76,9 +76,7 @@ pub trait ReferenceStore: Send + Sync + 'static {
     /// Admin-only: row counts + latest update timestamp per category.
     /// Cheap aggregate over the registry; the admin dashboard uses
     /// this to surface stale categories at a glance.
-    async fn category_summaries(
-        &self,
-    ) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
+    async fn category_summaries(&self) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
         // Default impl: walk each category via list_category. Slow
         // but correct for the in-memory test store; the Postgres
         // impl overrides with a single GROUP BY aggregate.
@@ -284,9 +282,7 @@ impl ReferenceStore for PostgresReferenceStore {
             .collect())
     }
 
-    async fn category_summaries(
-        &self,
-    ) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
+    async fn category_summaries(&self) -> Result<Vec<CategorySummary>, ReferenceStoreError> {
         // Single GROUP BY beats 4 list_category round-trips. Outer
         // LEFT JOIN against the static category list keeps every
         // category present even when it has no rows yet, which
