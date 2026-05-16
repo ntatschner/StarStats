@@ -20,6 +20,7 @@ mod config;
 mod crashes;
 mod discovery;
 mod gamelog;
+mod health;
 mod launcher;
 // Tray-side hangar fetcher (Wave 5b). Spawned from the Tauri setup
 // closure below when an api_url + access_token are configured.
