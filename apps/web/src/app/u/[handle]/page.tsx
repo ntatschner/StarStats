@@ -391,7 +391,7 @@ export default async function PublicProfilePage(props: PageProps) {
         </div>
       </section>
 
-      {view.kind !== 'self' && (
+      {view.kind === 'public' && (
         <div
           style={{
             padding: '14px 18px',
@@ -403,9 +403,36 @@ export default async function PublicProfilePage(props: PageProps) {
             lineHeight: 1.5,
           }}
         >
-          Public profiles show summary + top types only. The detailed
-          timeline is only visible to handles or orgs the owner has
-          explicitly shared with.
+          This is the public view — summary, top types, and a coarse
+          activity heatmap only. The detailed timeline is only visible
+          to handles or orgs the owner has explicitly shared with.
+        </div>
+      )}
+      {view.kind === 'shared' && (
+        <div
+          style={{
+            padding: '14px 18px',
+            background: 'var(--bg-elev)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm)',
+            color: 'var(--fg-dim)',
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          <span className="mono" style={{ color: 'var(--fg)' }}>
+            {data.claimed_handle}
+          </span>{' '}
+          has shared their manifest with you, so you see the full
+          summary + timeline that public viewers don&apos;t.{' '}
+          <Link
+            href={
+              (`/sharing?handle=${encodeURIComponent(data.claimed_handle)}`) as Route
+            }
+            style={{ color: 'var(--accent)' }}
+          >
+            Share back →
+          </Link>
         </div>
       )}
     </div>

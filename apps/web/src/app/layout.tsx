@@ -42,7 +42,16 @@ export default async function RootLayout({
       logger.warn({ err: locResult.reason }, 'topbar location fetch failed');
     }
     if (sharedResult.status === 'fulfilled') {
-      inboundShareCount = sharedResult.value.shared_with_me.length;
+      // Count active shares only — expired entries still appear in
+      // the inbound list (recipients should know who used to share)
+      // but the nav badge should reflect "things to look at now". An
+      // expired badge would be noise and would never clear.
+      const now = Date.now();
+      inboundShareCount = sharedResult.value.shared_with_me.filter(
+        (entry) =>
+          !entry.expires_at ||
+          new Date(entry.expires_at).getTime() > now,
+      ).length;
     } else {
       logger.warn(
         { err: sharedResult.reason },

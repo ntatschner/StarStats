@@ -40,6 +40,7 @@ import {
   type ListOrgsResponse,
   type ListSharedWithMeResponse,
   type ListSharesResponse,
+  type SharedWithMeEntry,
   type VisibilityResponse,
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
@@ -679,33 +680,69 @@ export default async function SharingPage(props: {
                 <div
                   style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
                 >
-                  {(shares.org_shares ?? []).map((entry) => (
-                    <div key={entry.org_slug} style={sharePillStyle}>
-                      <Link
-                        href={
-                          (`/orgs/${encodeURIComponent(entry.org_slug)}`) as Route
-                        }
-                        className="mono"
-                        style={{ color: 'var(--fg)' }}
-                      >
-                        {entry.org_slug}
-                      </Link>
-                      <form action={revokeOrgShareAction} style={{ margin: 0 }}>
-                        <input
-                          type="hidden"
-                          name="org_slug"
-                          value={entry.org_slug}
-                        />
-                        <button
-                          type="submit"
-                          className="ss-btn ss-btn--link"
-                          style={{ color: 'var(--danger)' }}
-                        >
-                          Revoke
-                        </button>
-                      </form>
-                    </div>
-                  ))}
+                  {/* Resolve org name from the user's own org list so the
+                      pill is readable ("Aurora Wing", not just
+                      "aurora-wing"). When the user has shared with an
+                      org they're no longer a member of, the lookup
+                      misses and the slug stands in — clear enough that
+                      the row is still actionable. */}
+                  {(() => {
+                    const orgNameBySlug = new Map(
+                      (myOrgs?.orgs ?? []).map((o) => [o.slug, o.name]),
+                    );
+                    return (shares.org_shares ?? []).map((entry) => {
+                      const name = orgNameBySlug.get(entry.org_slug);
+                      return (
+                        <div key={entry.org_slug} style={sharePillStyle}>
+                          <Link
+                            href={
+                              (`/orgs/${encodeURIComponent(entry.org_slug)}`) as Route
+                            }
+                            style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 2,
+                              color: 'var(--fg)',
+                              textDecoration: 'none',
+                              minWidth: 0,
+                            }}
+                          >
+                            <span style={{ fontWeight: 500 }}>
+                              {name ?? entry.org_slug}
+                            </span>
+                            {name && (
+                              <span
+                                className="mono"
+                                style={{
+                                  fontSize: 11,
+                                  color: 'var(--fg-muted)',
+                                }}
+                              >
+                                {entry.org_slug}
+                              </span>
+                            )}
+                          </Link>
+                          <form
+                            action={revokeOrgShareAction}
+                            style={{ margin: 0 }}
+                          >
+                            <input
+                              type="hidden"
+                              name="org_slug"
+                              value={entry.org_slug}
+                            />
+                            <button
+                              type="submit"
+                              className="ss-btn ss-btn--link"
+                              style={{ color: 'var(--danger)' }}
+                            >
+                              Revoke
+                            </button>
+                          </form>
+                        </div>
+                      );
+                    });
+                  })()}
                 </div>
               ) : (
                 <p style={mutedStyle}>
@@ -764,80 +801,141 @@ export default async function SharingPage(props: {
                 Org-mediated shares (via shared orgs) aren&apos;t listed here —
                 check the org&apos;s detail page for those.
               </p>
-              {inbound && inbound.shared_with_me.length > 0 ? (
-                <div
-                  style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
-                >
-                  {inbound.shared_with_me.map((entry) => {
-                    const expiryLabel = formatExpiry(entry.expires_at);
-                    return (
+              {(() => {
+                const entries = inbound?.shared_with_me ?? [];
+                const now = Date.now();
+                const isExpired = (e: typeof entries[number]) =>
+                  e.expires_at !== null &&
+                  e.expires_at !== undefined &&
+                  new Date(e.expires_at).getTime() <= now;
+                const active = entries.filter((e) => !isExpired(e));
+                const expired = entries.filter(isExpired);
+
+                if (entries.length === 0) {
+                  return (
+                    <p style={mutedStyle}>
+                      Nobody has shared their manifest with you yet.
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    {active.length > 0 && (
                       <div
-                        key={entry.owner_handle}
-                        style={{ ...sharePillStyle, flexWrap: 'wrap' }}
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
                       >
+                        {active.map((entry) => (
+                          <InboundPill key={entry.owner_handle} entry={entry} />
+                        ))}
+                      </div>
+                    )}
+                    {expired.length > 0 && (
+                      <details
+                        style={{ marginTop: active.length > 0 ? 10 : 0 }}
+                      >
+                        <summary
+                          style={{
+                            cursor: 'pointer',
+                            fontSize: 12,
+                            color: 'var(--fg-muted)',
+                            padding: '4px 0',
+                          }}
+                        >
+                          {expired.length} expired{' '}
+                          {expired.length === 1 ? 'share' : 'shares'} — owner
+                          set an expiry that has now passed
+                        </summary>
                         <div
                           style={{
                             display: 'flex',
                             flexDirection: 'column',
-                            gap: 2,
-                            flex: 1,
-                            minWidth: 0,
+                            gap: 8,
+                            marginTop: 8,
+                            opacity: 0.55,
                           }}
                         >
-                          <Link
-                            href={
-                              (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
-                            }
-                            className="mono"
-                            style={{ color: 'var(--fg)' }}
-                          >
-                            @{entry.owner_handle}
-                          </Link>
-                          {entry.note && (
-                            <span
-                              style={{
-                                fontSize: 12,
-                                color: 'var(--fg-muted)',
-                              }}
-                            >
-                              {entry.note}
-                            </span>
-                          )}
+                          {expired.map((entry) => (
+                            <InboundPill
+                              key={entry.owner_handle}
+                              entry={entry}
+                            />
+                          ))}
                         </div>
-                        {expiryLabel && (
-                          <span
-                            className="ss-badge"
-                            title={entry.expires_at ?? undefined}
-                            style={
-                              expiryLabel === 'expired'
-                                ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
-                                : { color: 'var(--fg-muted)' }
-                            }
-                          >
-                            {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
-                          </span>
-                        )}
-                        <Link
-                          href={
-                            (`/u/${encodeURIComponent(entry.owner_handle)}`) as Route
-                          }
-                          className="ss-btn ss-btn--link"
-                        >
-                          View profile
-                        </Link>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p style={mutedStyle}>
-                  Nobody has shared their manifest with you yet.
-                </p>
-              )}
+                      </details>
+                    )}
+                    {active.length === 0 && expired.length > 0 && (
+                      <p style={mutedStyle}>
+                        Every share you have has expired. Nothing new right
+                        now.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </section>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Inbound share row. Extracted because both the active list and the
+ * collapsed expired-shares group render the same pill — keeping the
+ * markup in one place is the only way the two sub-lists stay visually
+ * aligned as styling evolves.
+ */
+function InboundPill({ entry }: { entry: SharedWithMeEntry }) {
+  const expiryLabel = formatExpiry(entry.expires_at);
+  return (
+    <div style={{ ...sharePillStyle, flexWrap: 'wrap' }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+          flex: 1,
+          minWidth: 0,
+        }}
+      >
+        <Link
+          href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
+          className="mono"
+          style={{ color: 'var(--fg)' }}
+        >
+          @{entry.owner_handle}
+        </Link>
+        {entry.note && (
+          <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+            {entry.note}
+          </span>
+        )}
+      </div>
+      {expiryLabel && (
+        <span
+          className="ss-badge"
+          title={entry.expires_at ?? undefined}
+          style={
+            expiryLabel === 'expired'
+              ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
+              : { color: 'var(--fg-muted)' }
+          }
+        >
+          {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
+        </span>
+      )}
+      <Link
+        href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
+        className="ss-btn ss-btn--link"
+      >
+        View profile
+      </Link>
     </div>
   );
 }
