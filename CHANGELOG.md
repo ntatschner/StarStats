@@ -32,6 +32,35 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.0.4-beta] — 2026-05-16
+
+Tray design-language polish. The tray UI's tokens and primitives
+already mirrored the design system, but the user-visible identity
+layer — fonts, theme switching, entrance motion — wasn't wired up.
+This release closes those gaps from the design handoff audit.
+
+### Added
+
+- **Tray:** Geist + Geist Mono bundled via `@fontsource-variable`
+  so the `--font-sans` / `--font-mono` tokens resolve to the design
+  system's signature typeface. Bundled (not CDN) because the Tauri
+  CSP is `default-src 'self'`.
+- **Tray:** `Theme` enum (Stanton / Pyro / Terra / Nyx) added to
+  `Config` with serde defaults and backward-compat parsing (old
+  config.toml files without the field load as Stanton).
+- **Tray:** Settings → Appearance card with four-swatch picker.
+  Eager preview flips `data-theme` on click; Save persists.
+- **Tray:** `.ss-screen-enter` wrapper on the active pane fires
+  the design system's card-stagger motion on every tab switch;
+  `TrayCard` adopts `className="ss-card"` so the mount/hover
+  animations engage.
+
+### Changed
+
+- **Tray:** Unverified-Comm-Link banner copy tightened to match
+  the audit's in-universe voice ("Comm-Link unverified — claim
+  it before someone else can").
+
 ## [0.0.3-beta] — 2026-05-12
 
 Tray-UI half of the metrics-display redesign. v0.0.2-beta shipped the

@@ -167,7 +167,7 @@ export default async function HomePage() {
                   verticalAlign: 'middle',
                 }}
               />
-              v0.0.3-beta · Pyro patch ready
+              v0.0.4-beta · Pyro patch ready
             </div>
             <h1
               style={{
