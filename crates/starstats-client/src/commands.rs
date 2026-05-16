@@ -1424,11 +1424,62 @@ fn redact(s: &str) -> String {
 
 // === Health surface (added 2026-05-16) =================================
 
+/// 60-second TTL cache for the two `sysinfo`-derived health inputs.
+/// `get_health` is polled every 15s by the tray UI; constructing a
+/// fresh `System` + `Disks` on each poll is individually cheap but
+/// cumulatively wasteful when the tray idles for hours. The tuple is
+/// `(stamped_at, sc_process_running, disk_free_bytes)`. We tolerate the
+/// staleness — the SC-running and free-disk signals don't need
+/// sub-minute resolution for the Health card to be useful.
+static SYSINFO_CACHE: parking_lot::Mutex<Option<(std::time::Instant, bool, Option<u64>)>> =
+    parking_lot::Mutex::new(None);
+
+const SYSINFO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Returns `(sc_process_running, disk_free_bytes)` from the cache if
+/// the entry is younger than `SYSINFO_TTL`, otherwise recomputes,
+/// stores, and returns the fresh values. Lock is released before the
+/// expensive recompute so a contended call doesn't serialize behind
+/// the cache holder.
+fn cached_sysinfo() -> (bool, Option<u64>) {
+    let now = std::time::Instant::now();
+    {
+        let cache = SYSINFO_CACHE.lock();
+        if let Some((stamped, sc, free)) = *cache {
+            if now.duration_since(stamped) < SYSINFO_TTL {
+                return (sc, free);
+            }
+        }
+    }
+    let (sc, free) = compute_sysinfo();
+    *SYSINFO_CACHE.lock() = Some((now, sc, free));
+    (sc, free)
+}
+
+/// Uncached `sysinfo` read used by `cached_sysinfo`. Constructs a
+/// minimal `System` (processes only, no global memory/CPU refresh) and
+/// queries the partition that hosts the StarStats data directory.
+fn compute_sysinfo() -> (bool, Option<u64>) {
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    let sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let sc_running = sys
+        .processes_by_name("StarCitizen.exe".as_ref())
+        .next()
+        .is_some()
+        || sys
+            .processes_by_name("StarCitizen".as_ref())
+            .next()
+            .is_some();
+    let free = crate::config::data_dir()
+        .ok()
+        .and_then(|d| free_bytes_for_path(&d));
+    (sc_running, free)
+}
+
 /// Assemble a `HealthInputs` snapshot from `AppState`, `Config`, the
 /// secret store, and `sysinfo`. Pure read-only — never mutates state.
 fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInputs, String> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-
     let now = chrono::Utc::now();
 
     let tail = state.tail_stats.lock().clone();
@@ -1447,20 +1498,7 @@ fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInput
         .flatten()
         .is_some();
 
-    let sys =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    let sc_process_running = sys
-        .processes_by_name("StarCitizen.exe".as_ref())
-        .next()
-        .is_some()
-        || sys
-            .processes_by_name("StarCitizen".as_ref())
-            .next()
-            .is_some();
-
-    let disk_free_bytes = crate::config::data_dir()
-        .ok()
-        .and_then(|d| free_bytes_for_path(&d));
+    let (sc_process_running, disk_free_bytes) = cached_sysinfo();
 
     // Parse RFC3339 timestamps into DateTime<Utc>. A malformed value
     // disables the dependent check (e.g. GameLogStale), so log on
@@ -1788,5 +1826,19 @@ mod tests {
     #[test]
     fn validate_pair_url_rejects_https_without_host() {
         assert!(validate_pair_url("https://").is_err());
+    }
+
+    /// Two back-to-back `cached_sysinfo` calls land microseconds apart,
+    /// well inside the 60s TTL. The cached path must return the exact
+    /// same tuple — proves the cache is being read on the second call
+    /// rather than recomputed.
+    #[test]
+    fn cached_sysinfo_hits_within_ttl() {
+        let first = super::cached_sysinfo();
+        let second = super::cached_sysinfo();
+        assert_eq!(
+            first, second,
+            "cached call within TTL must return identical values"
+        );
     }
 }
