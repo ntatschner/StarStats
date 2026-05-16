@@ -326,6 +326,7 @@ impl Modify for SecurityAddon {
         // Sharing
         sharing_routes::VisibilityRequest,
         sharing_routes::VisibilityResponse,
+        sharing_routes::ShareScope,
         sharing_routes::ShareRequest,
         sharing_routes::ShareResponse,
         sharing_routes::RevokeShareResponse,

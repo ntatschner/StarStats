@@ -2518,9 +2518,24 @@ export interface components {
              *     "no expiry recorded" — historically all shares look like this.
              */
             expires_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Wall-clock timestamp of the most recent `share.viewed` row, if
+             *     any. Missing = never viewed.
+             */
+            last_viewed_at?: string | null;
             /** @description Owner-supplied note from `share_metadata`. */
             note?: string | null;
             recipient_handle: string;
+            scope?: null | components["schemas"]["ShareScope"];
+            /**
+             * Format: int64
+             * @description Count of recorded `share.viewed` audit rows where this owner is
+             *     the payload `owner_handle` and this recipient is the payload
+             *     `recipient_handle`. Always present (zero for never-viewed) so
+             *     the client can render `viewed N times` without nullish checks.
+             */
+            view_count?: number;
         };
         ShareOrgRequest: {
             org_slug: string;
@@ -2544,9 +2559,50 @@ export interface components {
              */
             note?: string | null;
             recipient_handle: string;
+            scope?: null | components["schemas"]["ShareScope"];
         };
         ShareResponse: {
             shared_with: string;
+        };
+        /**
+         * @description Per-share scope clamp — audit v2 §05.1+§05.5. `None` (= column
+         *     `NULL`) means "full manifest" which is the legacy behaviour every
+         *     pre-0025 share already has. Fields are intentionally permissive
+         *     so the front-end can ship new clamp combos without a wire break;
+         *     the handler validates kind + bounds.
+         */
+        ShareScope: {
+            /**
+             * @description Allowlist of event types (e.g. `quantum_target_selected`). When
+             *     set, the friend summary/timeline drops any other type before
+             *     returning. Mutually composable with `deny_event_types` — the
+             *     allowlist is applied first.
+             */
+            allow_event_types?: string[] | null;
+            /**
+             * @description Denylist of event types (e.g. `actor_death`). When set, the
+             *     friend summary/timeline drops these types from the response.
+             */
+            deny_event_types?: string[] | null;
+            /**
+             * @description One of `full`, `timeline`, `aggregates`, `tabs`. `full` = no
+             *     clamp; equivalent to `scope = null` but written explicitly.
+             */
+            kind: string;
+            /**
+             * @description Only relevant when `kind = "tabs"` — which named profile tabs
+             *     the recipient may load. Validated against the same allowlist
+             *     the frontend renders so a stale client can't smuggle a tab.
+             */
+            tabs?: string[] | null;
+            /**
+             * Format: int32
+             * @description Clamp timeline / aggregate windows. `null` = no clamp (defer
+             *     to the request's `?days=`). Capped at the same max the
+             *     timeline endpoint enforces (90) so a scope can't extend access
+             *     beyond what the owner could request themselves.
+             */
+            window_days?: number | null;
         };
         /**
          * @description One inbound share: an owner who has granted the caller view
@@ -2562,6 +2618,7 @@ export interface components {
             /** @description Owner-supplied note explaining the grant. */
             note?: string | null;
             owner_handle: string;
+            scope?: null | components["schemas"]["ShareScope"];
         };
         SignupRequest: {
             claimed_handle: string;

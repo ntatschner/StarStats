@@ -16,6 +16,7 @@ type CurrentTab =
   | 'orgs'
   | 'reference'
   | 'smtp'
+  | 'sharing'
   | 'audit';
 
 const TABS: ReadonlyArray<{
@@ -38,6 +39,14 @@ const TABS: ReadonlyArray<{
   { id: 'orgs', label: 'Orgs', href: '/admin/orgs' as Route },
   { id: 'reference', label: 'Reference', href: '/admin/reference' as Route },
   { id: 'smtp', label: 'SMTP', href: '/admin/smtp' as Route },
+  {
+    // Sharing surface (W3): admin-side view of per-share scopes,
+    // active grants, and sharing-related audit-log activity. Backend
+    // counterpart in `crates/starstats-server/src/sharing_routes.rs`.
+    id: 'sharing',
+    label: 'Sharing',
+    href: '/admin/sharing' as Route,
+  },
   {
     // Audit log viewer landed alongside the admin build-out — the
     // tab is live now.

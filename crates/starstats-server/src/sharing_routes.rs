@@ -19,7 +19,7 @@
 //!    user existence).
 
 use crate::api_error::ApiErrorBody;
-use crate::audit::{AuditEntry, AuditLog};
+use crate::audit::{AuditEntry, AuditLog, AuditQuery};
 use crate::auth::AuthenticatedUser;
 use crate::orgs::{OrgStore, PostgresOrgStore};
 use crate::repo::{EventQuery, PostgresStore};
@@ -115,6 +115,39 @@ pub struct VisibilityResponse {
     pub public: bool,
 }
 
+/// Per-share scope clamp — audit v2 §05.1+§05.5. `None` (= column
+/// `NULL`) means "full manifest" which is the legacy behaviour every
+/// pre-0025 share already has. Fields are intentionally permissive
+/// so the front-end can ship new clamp combos without a wire break;
+/// the handler validates kind + bounds.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ShareScope {
+    /// One of `full`, `timeline`, `aggregates`, `tabs`. `full` = no
+    /// clamp; equivalent to `scope = null` but written explicitly.
+    pub kind: String,
+    /// Only relevant when `kind = "tabs"` — which named profile tabs
+    /// the recipient may load. Validated against the same allowlist
+    /// the frontend renders so a stale client can't smuggle a tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Vec<String>>,
+    /// Clamp timeline / aggregate windows. `null` = no clamp (defer
+    /// to the request's `?days=`). Capped at the same max the
+    /// timeline endpoint enforces (90) so a scope can't extend access
+    /// beyond what the owner could request themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_days: Option<u32>,
+    /// Allowlist of event types (e.g. `quantum_target_selected`). When
+    /// set, the friend summary/timeline drops any other type before
+    /// returning. Mutually composable with `deny_event_types` — the
+    /// allowlist is applied first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_event_types: Option<Vec<String>>,
+    /// Denylist of event types (e.g. `actor_death`). When set, the
+    /// friend summary/timeline drops these types from the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_event_types: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ShareRequest {
     pub recipient_handle: String,
@@ -129,6 +162,10 @@ pub struct ShareRequest {
     /// stores `""`.
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional per-share scope clamp. Missing/null = "full manifest"
+    /// (the pre-0025 default that every existing share already has).
+    #[serde(default)]
+    pub scope: Option<ShareScope>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -151,6 +188,20 @@ pub struct ShareEntry {
     /// Owner-supplied note from `share_metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Per-share scope clamp. `None` (= `null` on the wire) means
+    /// "full manifest", the legacy default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ShareScope>,
+    /// Count of recorded `share.viewed` audit rows where this owner is
+    /// the payload `owner_handle` and this recipient is the payload
+    /// `recipient_handle`. Always present (zero for never-viewed) so
+    /// the client can render `viewed N times` without nullish checks.
+    #[serde(default)]
+    pub view_count: i64,
+    /// Wall-clock timestamp of the most recent `share.viewed` row, if
+    /// any. Missing = never viewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_viewed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -181,6 +232,10 @@ pub struct SharedWithMeEntry {
     /// Owner-supplied note explaining the grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Per-share scope clamp surfaced so the recipient understands
+    /// which tabs they can actually load. Missing = full manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ShareScope>,
 }
 
 /// Response for `GET /v1/me/shared-with-me` — the inbound side of
@@ -260,6 +315,155 @@ fn err(status: StatusCode, code: &str) -> Response {
 
 fn no_store() -> [(header::HeaderName, &'static str); 1] {
     [(header::CACHE_CONTROL, "no-store")]
+}
+
+/// Allowlist of tab names the scope picker can reference. Kept in
+/// lockstep with the profile-detail page tabs; smuggling an unknown
+/// tab is rejected so a stale client can't lie about a "tabs" scope.
+const ALLOWED_SCOPE_TABS: &[&str] = &[
+    "location",
+    "travel",
+    "combat",
+    "loadout",
+    "stability",
+    "commerce",
+];
+
+/// Hard cap on `scope.window_days`. Matches the timeline endpoint
+/// limit so a scope can't grant access wider than the owner could
+/// request themselves.
+const SCOPE_MAX_WINDOW_DAYS: u32 = 90;
+
+/// Bound the per-list event-type allow/deny vectors to keep payload
+/// JSONB sizes predictable. The audit/UI surfaces today don't go
+/// anywhere near this number — it's a defence-in-depth cap.
+const SCOPE_MAX_TYPES: usize = 32;
+
+/// Validate a ShareScope from a client request. Returns `Ok(())` for
+/// `None` (= "full manifest") or for a well-formed scope; returns
+/// `Err(error_code)` for anything we'd want the client to fix and
+/// resubmit. Validation is intentionally strict on `kind` (closed
+/// vocabulary) but tolerant on optional vectors (presence is enough,
+/// invalid items get rejected one-by-one).
+fn validate_scope(scope: &ShareScope) -> Result<(), &'static str> {
+    match scope.kind.as_str() {
+        "full" | "timeline" | "aggregates" | "tabs" => {}
+        _ => return Err("invalid_scope_kind"),
+    }
+    if let Some(days) = scope.window_days {
+        if days == 0 || days > SCOPE_MAX_WINDOW_DAYS {
+            return Err("invalid_scope_window");
+        }
+    }
+    if let Some(tabs) = scope.tabs.as_ref() {
+        if tabs.len() > SCOPE_MAX_TYPES {
+            return Err("invalid_scope_tabs");
+        }
+        for t in tabs {
+            if !ALLOWED_SCOPE_TABS.contains(&t.as_str()) {
+                return Err("invalid_scope_tabs");
+            }
+        }
+    }
+    for list in [&scope.allow_event_types, &scope.deny_event_types] {
+        if let Some(types) = list.as_ref() {
+            if types.len() > SCOPE_MAX_TYPES {
+                return Err("invalid_scope_types");
+            }
+            for t in types {
+                // Event types are snake_case ASCII in the parser
+                // dictionary; rejecting anything else stops a typo
+                // from silently passing the deny-list.
+                if t.is_empty()
+                    || t.len() > 64
+                    || !t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    return Err("invalid_scope_types");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pull a ShareScope back out of the stored JSONB. Returns `None` if
+/// the column is null or the JSON is shaped wrong — read paths fall
+/// back to "no clamp" rather than 500ing because a malformed scope
+/// can't have been written through the validated `add_share` path.
+fn scope_from_value(v: &serde_json::Value) -> Option<ShareScope> {
+    serde_json::from_value::<ShareScope>(v.clone()).ok()
+}
+
+/// Apply scope.kind to a timeline-or-summary request. Returns
+/// `Ok(())` if the read is allowed; `Err(())` if the scope's kind
+/// excludes this surface (which 404s the request the same way an
+/// unknown handle would).
+fn scope_allows_timeline(scope: &ShareScope) -> bool {
+    matches!(scope.kind.as_str(), "full" | "timeline" | "tabs")
+}
+
+fn scope_allows_aggregates(scope: &ShareScope) -> bool {
+    matches!(scope.kind.as_str(), "full" | "aggregates" | "tabs")
+}
+
+/// Clamp `days` against `scope.window_days`. Returns the tighter of
+/// the two; `None` window = no clamp.
+fn clamp_days(days: u32, scope: Option<&ShareScope>) -> u32 {
+    match scope.and_then(|s| s.window_days) {
+        Some(w) => days.min(w),
+        None => days,
+    }
+}
+
+/// Apply event-type allow/deny filters to a `(event_type, count)`
+/// list. Returns a new (total, filtered) pair. The allowlist takes
+/// precedence: types absent from a non-empty allowlist are dropped
+/// before the denylist is consulted.
+fn apply_event_type_filter(
+    rows: Vec<(String, u64)>,
+    scope: Option<&ShareScope>,
+) -> (u64, Vec<(String, u64)>) {
+    let allow = scope.and_then(|s| s.allow_event_types.as_ref());
+    let deny = scope.and_then(|s| s.deny_event_types.as_ref());
+    let filtered: Vec<(String, u64)> = rows
+        .into_iter()
+        .filter(|(t, _)| {
+            if let Some(a) = allow {
+                if !a.iter().any(|x| x == t) {
+                    return false;
+                }
+            }
+            if let Some(d) = deny {
+                if d.iter().any(|x| x == t) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    let total = filtered.iter().map(|(_, c)| *c).sum();
+    (total, filtered)
+}
+
+/// Best-effort audit emission for a `share.viewed` row. Logged + not
+/// fatal — a hiccup in the audit pipeline must never block a friend
+/// read. Owner + recipient are in the payload because the actor on
+/// this audit kind is the *viewer*, not the owner.
+async fn emit_share_viewed(audit: &dyn AuditLog, viewer: &AuthenticatedUser, owner: &str) {
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(viewer.sub.clone()),
+            actor_handle: Some(viewer.preferred_username.clone()),
+            action: "share.viewed".to_string(),
+            payload: serde_json::json!({
+                "owner_handle": owner,
+                "recipient_handle": viewer.preferred_username,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.viewed)");
+    }
 }
 
 fn validate_handle(handle: &str) -> bool {
@@ -472,6 +676,26 @@ pub async fn add_share<U: UserStore>(
         }
     }
 
+    // Validate the optional scope. `kind = "full"` is normalised to
+    // `None` (no JSONB row) so re-grants from a UI that always sends
+    // a scope can still clear it back to legacy behaviour.
+    let scope_owned: Option<ShareScope> = match req.scope.as_ref() {
+        Some(s) => {
+            if let Err(code) = validate_scope(s) {
+                return err(StatusCode::BAD_REQUEST, code);
+            }
+            if s.kind == "full" {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        None => None,
+    };
+    let scope_json: Option<serde_json::Value> = scope_owned
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+
     // Validate the recipient exists in our user table — sharing with a
     // ghost handle is a UX trap (the wildcard subject would be the only
     // way to grant such a thing, and that's the public toggle's job).
@@ -517,6 +741,7 @@ pub async fn add_share<U: UserStore>(
             &recipient_user.claimed_handle,
             req.expires_at,
             note_owned.as_deref(),
+            scope_json.as_ref(),
         )
         .await
     {
@@ -532,6 +757,7 @@ pub async fn add_share<U: UserStore>(
                 "recipient_handle": recipient_user.claimed_handle,
                 "expires_at": req.expires_at,
                 "has_note": note_owned.is_some(),
+                "scope_kind": scope_owned.as_ref().map(|s| s.kind.clone()),
             }),
         })
         .await
@@ -634,6 +860,7 @@ pub async fn delete_share(
 pub async fn list_shares(
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
     Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
+    Extension(audit_query): Extension<Arc<dyn AuditQuery>>,
     auth: AuthenticatedUser,
 ) -> Response {
     let Some(client) = spicedb.as_ref() else {
@@ -673,14 +900,37 @@ pub async fn list_shares(
             std::collections::HashMap::new()
         }
     };
+    // Bulk-load view stats from audit_log. Failure degrades to
+    // "no stats" (view_count = 0) rather than failing the whole call
+    // — the same posture as metadata fetch.
+    let view_index: std::collections::HashMap<String, _> = match audit_query
+        .share_views_for_owner(&auth.preferred_username)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|s| (s.recipient_handle.to_ascii_lowercase(), s))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "share_views_for_owner fetch failed");
+            std::collections::HashMap::new()
+        }
+    };
     let user_shares: Vec<ShareEntry> = handles
         .into_iter()
         .map(|h| {
-            let m = meta_index.get(&h.to_ascii_lowercase());
+            let key = h.to_ascii_lowercase();
+            let m = meta_index.get(&key);
+            let v = view_index.get(&key);
             ShareEntry {
                 recipient_handle: h,
                 expires_at: m.and_then(|x| x.expires_at),
                 note: m.and_then(|x| x.note.clone()),
+                scope: m
+                    .and_then(|x| x.scope.as_ref())
+                    .and_then(scope_from_value),
+                view_count: v.map(|s| s.view_count).unwrap_or(0),
+                last_viewed_at: v.and_then(|s| s.last_viewed_at),
             }
         })
         .collect();
@@ -776,6 +1026,9 @@ pub async fn list_shared_with_me(
                 owner_handle: h,
                 expires_at: m.and_then(|x| x.expires_at),
                 note: m.and_then(|x| x.note.clone()),
+                scope: m
+                    .and_then(|x| x.scope.as_ref())
+                    .and_then(scope_from_value),
             }
         })
         .collect();
@@ -1056,23 +1309,42 @@ where
 }
 
 async fn render_summary<Q: EventQuery>(query: &Q, handle: &str) -> Response {
+    render_summary_scoped(query, handle, None).await
+}
+
+/// Same as [`render_summary`] but applies a per-share scope clamp to
+/// the result. The clamp drops disallowed event types from `by_type`
+/// and recomputes `total` so the returned shape is internally
+/// consistent (no `sum(by_type) != total` mismatch on the client).
+async fn render_summary_scoped<Q: EventQuery>(
+    query: &Q,
+    handle: &str,
+    scope: Option<&ShareScope>,
+) -> Response {
     // `_shared` variant — excludes rows the owner has hidden from
     // shared/public views. Hidden events still count for the owner
     // via `/v1/me/summary` (which calls the un-suffixed method) so
     // they don't disappear from your own UI.
     match query.summary_for_handle_shared(handle).await {
-        Ok((total, by_type)) => (
-            StatusCode::OK,
-            Json(PublicSummaryResponse {
-                claimed_handle: handle.to_string(),
-                total,
-                by_type: by_type
-                    .into_iter()
-                    .map(|(event_type, count)| PublicTypeCount { event_type, count })
-                    .collect(),
-            }),
-        )
-            .into_response(),
+        Ok((total, by_type)) => {
+            let (total, by_type) = if scope.is_some() {
+                apply_event_type_filter(by_type, scope)
+            } else {
+                (total, by_type)
+            };
+            (
+                StatusCode::OK,
+                Json(PublicSummaryResponse {
+                    claimed_handle: handle.to_string(),
+                    total,
+                    by_type: by_type
+                        .into_iter()
+                        .map(|(event_type, count)| PublicTypeCount { event_type, count })
+                        .collect(),
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "public summary query failed");
             err(StatusCode::INTERNAL_SERVER_ERROR, "query_failed")
@@ -1081,6 +1353,20 @@ async fn render_summary<Q: EventQuery>(query: &Q, handle: &str) -> Response {
 }
 
 async fn render_timeline<Q: EventQuery>(query: &Q, handle: &str, days: u32) -> Response {
+    render_timeline_scoped(query, handle, days, None).await
+}
+
+/// Scope-aware timeline. Today's clamp is window-only — bucket
+/// counts cannot be filtered by event type without rewriting the
+/// `_shared` repo method to take a type list, which is out of scope
+/// for this slice. The window clamp alone delivers the audit's
+/// headline "7 days only" use case.
+async fn render_timeline_scoped<Q: EventQuery>(
+    query: &Q,
+    handle: &str,
+    days: u32,
+    _scope: Option<&ShareScope>,
+) -> Response {
     // `_shared` variant — see `render_summary` for the rationale.
     match query.timeline_shared(handle, days).await {
         Ok(rows) => {
@@ -1223,8 +1509,25 @@ pub async fn friend_summary<Q: EventQuery>(
         &auth.preferred_username,
     )
     .await;
+    // Pull the scope clamp now, after the auth gate. A metadata
+    // fetch failure degrades to "no clamp" rather than 404ing the
+    // viewer — same posture as the expiry check, which also fails
+    // open when Postgres flaps.
+    let scope = meta
+        .find(&handle, &auth.preferred_username)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|m| m.scope)
+        .and_then(|v| scope_from_value(&v));
+    if let Some(s) = scope.as_ref() {
+        if !scope_allows_aggregates(s) {
+            return (StatusCode::NOT_FOUND, ()).into_response();
+        }
+    }
     render_or_404(check, || async {
-        render_summary(query.as_ref(), &handle).await
+        emit_share_viewed(audit.as_ref(), &auth, &handle).await;
+        render_summary_scoped(query.as_ref(), &handle, scope.as_ref()).await
     })
     .await
 }
@@ -1278,8 +1581,22 @@ pub async fn friend_timeline<Q: EventQuery>(
         &auth.preferred_username,
     )
     .await;
+    let scope = meta
+        .find(&handle, &auth.preferred_username)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|m| m.scope)
+        .and_then(|v| scope_from_value(&v));
+    if let Some(s) = scope.as_ref() {
+        if !scope_allows_timeline(s) {
+            return (StatusCode::NOT_FOUND, ()).into_response();
+        }
+    }
+    let clamped_days = clamp_days(days, scope.as_ref());
     render_or_404(check, || async {
-        render_timeline(query.as_ref(), &handle, days).await
+        emit_share_viewed(audit.as_ref(), &auth, &handle).await;
+        render_timeline_scoped(query.as_ref(), &handle, clamped_days, scope.as_ref()).await
     })
     .await
 }
@@ -1317,16 +1634,25 @@ mod tests {
     ) -> Router {
         let meta: Arc<dyn ShareMetadataStore> =
             Arc::new(MemoryShareMetadataStore::default());
+        // `list_shares` (added in W3) reads view stats off the same
+        // memory audit log, so reuse the writer's storage by sharing
+        // a fresh MemoryAuditLog through both Extensions. Tests that
+        // care about *writes* still pass their own writer in via
+        // `audit`; tests that don't touch /v1/me/shares are unaffected.
+        let audit_query_log: Arc<MemoryAuditLog> = Arc::new(MemoryAuditLog::default());
+        let audit_query: Arc<dyn AuditQuery> = audit_query_log;
         Router::new()
             .route("/v1/me/visibility", post(set_visibility::<MemoryUserStore>))
             .route("/v1/me/share", post(add_share::<MemoryUserStore>))
             .route("/v1/me/share/:recipient_handle", delete(delete_share))
             .route("/v1/me/shared-with-me", get(list_shared_with_me))
+            .route("/v1/me/shares", get(list_shares))
             .with_state(users)
             .layer(Extension(verifier))
             .layer(Extension(spicedb))
             .layer(Extension(meta))
             .layer(Extension(audit))
+            .layer(Extension(audit_query))
     }
 
     /// Seed a user, mark their RSI handle verified, and return the

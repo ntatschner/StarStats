@@ -15,16 +15,22 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use sqlx::PgPool;
 
-/// One metadata row. Both `expires_at` and `note` are nullable to
-/// model "share exists, no extras".
+/// One metadata row. `expires_at`, `note`, and `scope` are nullable
+/// to model "share exists, no extras". `scope = None` means "full
+/// manifest" — the legacy behaviour preserved by migration 0025.
 #[derive(Debug, Clone)]
 pub struct ShareMeta {
     pub owner_handle: String,
     pub recipient_handle: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub note: Option<String>,
+    /// Per-share scope clamp (see `sharing_routes::ShareScope` for the
+    /// validated shape). Stored untyped at this layer so the store
+    /// stays migration-friendly — the HTTP handler is the validator.
+    pub scope: Option<Value>,
     #[allow(dead_code)]
     pub created_at: DateTime<Utc>,
 }
@@ -42,13 +48,16 @@ pub const NOTE_MAX_LEN: usize = 280;
 #[async_trait]
 pub trait ShareMetadataStore: Send + Sync + 'static {
     /// Upsert a metadata row. Idempotent — re-granting a share
-    /// overwrites the previous expiry/note.
+    /// overwrites the previous expiry/note/scope. Pass `scope = None`
+    /// to mean "full manifest" (the legacy default, preserved by
+    /// migration 0025).
     async fn upsert(
         &self,
         owner_handle: &str,
         recipient_handle: &str,
         expires_at: Option<DateTime<Utc>>,
         note: Option<&str>,
+        scope: Option<&Value>,
     ) -> Result<(), ShareMetaError>;
 
     /// Look up a single metadata row. `Ok(None)` = "share exists,
@@ -100,23 +109,28 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         recipient_handle: &str,
         expires_at: Option<DateTime<Utc>>,
         note: Option<&str>,
+        scope: Option<&Value>,
     ) -> Result<(), ShareMetaError> {
         // ON CONFLICT mirrors the expression-based PK declaration.
+        // `scope` is bound as Option<Value> so a `None` lands as SQL
+        // NULL (= "full manifest", the legacy default).
         sqlx::query(
             r#"
             INSERT INTO share_metadata
-                (owner_handle, recipient_handle, expires_at, note)
-            VALUES ($1, $2, $3, $4)
+                (owner_handle, recipient_handle, expires_at, note, scope)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (lower(owner_handle), lower(recipient_handle))
             DO UPDATE SET
                 expires_at = EXCLUDED.expires_at,
-                note       = EXCLUDED.note
+                note       = EXCLUDED.note,
+                scope      = EXCLUDED.scope
             "#,
         )
         .bind(owner_handle)
         .bind(recipient_handle)
         .bind(expires_at)
         .bind(note)
+        .bind(scope)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -129,10 +143,17 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
     ) -> Result<Option<ShareMeta>, ShareMetaError> {
         let row = sqlx::query_as::<
             _,
-            (String, String, Option<DateTime<Utc>>, Option<String>, DateTime<Utc>),
+            (
+                String,
+                String,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<Value>,
+                DateTime<Utc>,
+            ),
         >(
             r#"
-            SELECT owner_handle, recipient_handle, expires_at, note, created_at
+            SELECT owner_handle, recipient_handle, expires_at, note, scope, created_at
             FROM share_metadata
             WHERE lower(owner_handle) = lower($1)
               AND lower(recipient_handle) = lower($2)
@@ -142,11 +163,12 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         .bind(recipient_handle)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(o, r, e, n, c)| ShareMeta {
+        Ok(row.map(|(o, r, e, n, s, c)| ShareMeta {
             owner_handle: o,
             recipient_handle: r,
             expires_at: e,
             note: n,
+            scope: s,
             created_at: c,
         }))
     }
@@ -157,10 +179,17 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
     ) -> Result<Vec<ShareMeta>, ShareMetaError> {
         let rows = sqlx::query_as::<
             _,
-            (String, String, Option<DateTime<Utc>>, Option<String>, DateTime<Utc>),
+            (
+                String,
+                String,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<Value>,
+                DateTime<Utc>,
+            ),
         >(
             r#"
-            SELECT owner_handle, recipient_handle, expires_at, note, created_at
+            SELECT owner_handle, recipient_handle, expires_at, note, scope, created_at
             FROM share_metadata
             WHERE lower(owner_handle) = lower($1)
             "#,
@@ -170,11 +199,12 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(o, r, e, n, c)| ShareMeta {
+            .map(|(o, r, e, n, s, c)| ShareMeta {
                 owner_handle: o,
                 recipient_handle: r,
                 expires_at: e,
                 note: n,
+                scope: s,
                 created_at: c,
             })
             .collect())
@@ -186,10 +216,17 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
     ) -> Result<Vec<ShareMeta>, ShareMetaError> {
         let rows = sqlx::query_as::<
             _,
-            (String, String, Option<DateTime<Utc>>, Option<String>, DateTime<Utc>),
+            (
+                String,
+                String,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<Value>,
+                DateTime<Utc>,
+            ),
         >(
             r#"
-            SELECT owner_handle, recipient_handle, expires_at, note, created_at
+            SELECT owner_handle, recipient_handle, expires_at, note, scope, created_at
             FROM share_metadata
             WHERE lower(recipient_handle) = lower($1)
             "#,
@@ -199,11 +236,12 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(o, r, e, n, c)| ShareMeta {
+            .map(|(o, r, e, n, s, c)| ShareMeta {
                 owner_handle: o,
                 recipient_handle: r,
                 expires_at: e,
                 note: n,
+                scope: s,
                 created_at: c,
             })
             .collect())
@@ -261,6 +299,7 @@ pub mod test_support {
             recipient_handle: &str,
             expires_at: Option<DateTime<Utc>>,
             note: Option<&str>,
+            scope: Option<&Value>,
         ) -> Result<(), ShareMetaError> {
             let mut rows = self.rows.lock().unwrap();
             rows.insert(
@@ -270,6 +309,7 @@ pub mod test_support {
                     recipient_handle: recipient_handle.to_string(),
                     expires_at,
                     note: note.map(|s| s.to_string()),
+                    scope: scope.cloned(),
                     created_at: Utc::now(),
                 },
             );
