@@ -24,16 +24,38 @@ export function useHealth(): { items: HealthItem[]; refresh: () => Promise<void>
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      if (cancelled) return;
-      await refresh();
-    })();
-    const handle = window.setInterval(() => {
-      if (!cancelled) void refresh();
-    }, POLL_MS);
+    let handle: number | undefined;
+
+    const start = () => {
+      if (handle !== undefined) return;
+      void refresh();
+      handle = window.setInterval(() => {
+        if (!cancelled) void refresh();
+      }, POLL_MS);
+    };
+    const stop = () => {
+      if (handle !== undefined) {
+        window.clearInterval(handle);
+        handle = undefined;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // Returning from hidden → immediate refresh, then resume polling.
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     return () => {
       cancelled = true;
-      window.clearInterval(handle);
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
 
