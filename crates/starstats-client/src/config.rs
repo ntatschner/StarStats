@@ -326,17 +326,61 @@ mod tests {
         let cfg: Config = toml::from_str(toml_text).unwrap();
         assert_eq!(cfg.theme, Theme::Stanton);
     }
+
+    #[test]
+    fn default_remote_sync_api_url_is_public_origin() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.remote_sync.api_url.as_deref(),
+            Some(DEFAULT_API_URL),
+            "fresh installs should default to the public StarStats API",
+        );
+    }
+
+    #[test]
+    fn config_without_api_url_field_deserialises_to_default() {
+        // Backward-compat: configs persisted before the default
+        // landed (or without the field set) should inherit the new
+        // default via #[serde(default)] on RemoteSyncConfig.
+        let toml_text = "[remote_sync]\nenabled = true\n";
+        let cfg: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(cfg.remote_sync.api_url.as_deref(), Some(DEFAULT_API_URL));
+    }
+
+    #[test]
+    fn config_preserves_custom_api_url() {
+        // A user pointing at a self-hosted / dev instance keeps their
+        // URL; the default only applies when the field is absent.
+        let toml_text = r#"
+            [remote_sync]
+            enabled = true
+            api_url = "http://localhost:8080"
+        "#;
+        let cfg: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(
+            cfg.remote_sync.api_url.as_deref(),
+            Some("http://localhost:8080")
+        );
+    }
 }
 
 fn default_auto_update_check() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Public production StarStats API origin. Used as the default
+/// `RemoteSyncConfig.api_url` so a fresh install can hit Enable and
+/// proceed straight to pairing without first hunting down a URL.
+/// Users on self-hosted instances override via Settings.
+pub const DEFAULT_API_URL: &str = "https://api.starstats.app";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteSyncConfig {
     pub enabled: bool,
-    /// Base URL of the StarStats API, e.g. `https://api.example.com`.
+    /// Base URL of the StarStats API. Defaults to the public
+    /// production origin (`DEFAULT_API_URL`). Override to point at
+    /// a self-hosted server or a local dev instance.
     pub api_url: Option<String>,
     /// RSI handle the user claims. Server cross-checks this against
     /// the bearer token's `preferred_username`; mismatch → 403.
@@ -352,6 +396,19 @@ pub struct RemoteSyncConfig {
     /// size and we get clean partial-success accounting.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+}
+
+impl Default for RemoteSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: Some(DEFAULT_API_URL.to_string()),
+            claimed_handle: None,
+            access_token: None,
+            interval_secs: default_sync_interval_secs(),
+            batch_size: default_batch_size(),
+        }
+    }
 }
 
 fn default_sync_interval_secs() -> u64 {
