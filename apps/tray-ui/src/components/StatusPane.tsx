@@ -3,12 +3,12 @@ import {
   api,
   type LogKind,
   type ParseCoverageResponse,
+  type SettingsField,
   type SourceStats,
   type StatusResponse,
   type TimelineEntry,
 } from '../api';
 import {
-  Banner,
   GhostButton,
   KV,
   StatPill,
@@ -25,14 +25,9 @@ import {
 } from './tray/format';
 import type { HangarStats } from '../api';
 import { EventSparkline } from './EventSparkline';
-
-/// Only http(s) origins get rendered as a clickable link in the
-/// email-verification banner. Defends against a hostile local config
-/// that injects a `javascript:` / `data:` web_origin.
-function isSafeWebOrigin(value: string | null): value is string {
-  if (!value) return false;
-  return /^https?:\/\//i.test(value);
-}
+import { HealthCard } from './HealthCard';
+import { useHealth } from '../hooks/useHealth';
+import { friendlyError } from '../lib/friendlyError';
 
 /// Compact label + tone colour for each `LogKind`. Live = ok green
 /// (it's the currently-tailed source); archived = info blue (passive
@@ -75,25 +70,26 @@ function kindBreakdown(
 
 interface Props {
   status: StatusResponse;
-  /// Web UI origin used by the email-verification banner link.
-  /// `null` if the user hasn't configured an API URL yet — we hide
-  /// the link in that case so we don't render a dangling anchor.
+  /// Web UI origin (kept on the prop surface for the legacy
+  /// email-verification banner; now unused — the HealthCard's
+  /// EmailUnverified item carries the link via HealthAction::OpenUrl,
+  /// which it gets from the server-side config).
   webOrigin: string | null;
-  /// Routes the user to the Settings pane where the pairing form
-  /// lives. Used by the auth-lost banner's CTA.
-  onGoToSettings: () => void;
+  /// Routes the user to the Settings pane and focuses a specific
+  /// field. Driven by HealthCard CTAs (e.g. "Set up" → API URL).
+  onGoToSettings: (field: SettingsField) => void;
 }
 
-export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
+export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Props) {
   const {
     tail,
     sync,
     event_counts,
     total_events,
     discovered_logs,
-    account,
     hangar,
   } = status;
+  const { items: healthItems, refresh: refreshHealth } = useHealth();
   const [coverage, setCoverage] = useState<ParseCoverageResponse | null>(
     null,
   );
@@ -169,13 +165,6 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
   const hasSyncActivity =
     sync.last_attempt_at !== null || sync.batches_sent > 0;
 
-  // Banner precedence: auth_lost > email_verified === false. If
-  // we're not paired the email-verify nag is pointless — fixing
-  // pairing is strictly the higher-priority action.
-  const showAuthLost = account.auth_lost;
-  const showEmailUnverified =
-    !showAuthLost && account.email_verified === false;
-
   // Top-types ranked bar — denominator clamped to 1 to avoid
   // divide-by-zero when event_counts is empty (handled separately
   // below, but still defensive).
@@ -186,33 +175,44 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {showAuthLost && (
-        <Banner tone="warn" action="Re-pair" onAction={onGoToSettings}>
-          This device is no longer paired with your account.
-        </Banner>
-      )}
-      {showEmailUnverified && (
-        <Banner tone="info">
-          Comm-Link unverified —{' '}
-          {isSafeWebOrigin(webOrigin) ? (
-            <a
-              href={webOrigin}
-              target="_blank"
-              rel="noreferrer"
-              style={{
-                color: 'inherit',
-                textDecoration: 'underline',
-                fontWeight: 600,
-              }}
-            >
-              claim it before someone else can
-            </a>
-          ) : (
-            'claim it before someone else can'
-          )}
-          .
-        </Banner>
-      )}
+      <HealthCard
+        items={healthItems}
+        onGoToSettings={onGoToSettings}
+        onDismiss={async (id) => {
+          try {
+            await api.dismissHealth(id);
+            void refreshHealth();
+          } catch (e) {
+            const f = friendlyError(e);
+            // eslint-disable-next-line no-console
+            console.warn('dismiss_health failed:', f.title, f.body);
+          }
+        }}
+        onRetrySync={async () => {
+          try {
+            await api.retrySyncNow();
+            void refreshHealth();
+          } catch (e) {
+            const f = friendlyError(e);
+            // eslint-disable-next-line no-console
+            console.warn('retry_sync_now failed:', f.title, f.body);
+          }
+        }}
+        onRefreshHangar={async () => {
+          try {
+            await api.refreshHangarNow();
+            void refreshHealth();
+          } catch (e) {
+            const f = friendlyError(e);
+            // eslint-disable-next-line no-console
+            console.warn('refresh_hangar_now failed:', f.title, f.body);
+          }
+        }}
+        onOpenUrl={async (url) => {
+          const { open } = await import('@tauri-apps/plugin-shell');
+          await open(url);
+        }}
+      />
 
       {/* HEADLINE STAT STRIP */}
       <div style={{ display: 'flex', gap: 8 }}>
@@ -968,7 +968,8 @@ function HangarCard({ hangar }: HangarCardProps) {
       await api.refreshHangarNow();
     } catch (err) {
       setRefreshingSince(null);
-      setRefreshError(err instanceof Error ? err.message : String(err));
+      const f = friendlyError(err);
+      setRefreshError(`${f.title}: ${f.body}`);
     }
   };
 

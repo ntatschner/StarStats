@@ -27,7 +27,7 @@ describe('InlineCheck', () => {
 
   it('disables the button while running', async () => {
     const user = userEvent.setup();
-    const onCheck = vi.fn(() => new Promise(() => {})); // never resolves
+    const onCheck = vi.fn(() => new Promise<{ ok: boolean; message: string }>(() => {})); // never resolves
     render(<InlineCheck label="Test" value="https://x" onCheck={onCheck} />);
     await user.click(screen.getByRole('button', { name: /test/i }));
     expect(screen.getByRole('button', { name: /testing|test/i })).toBeDisabled();

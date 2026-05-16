@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type {
   Config,
   ReleaseChannel,
@@ -22,6 +22,17 @@ import {
 } from './tray/primitives';
 import { ReingestCard } from './ReingestCard';
 import { ReparseCard } from './ReparseCard';
+import { useFieldFocus } from '../hooks/useFieldFocus';
+import { InlineCheck, type InlineCheckResult } from './InlineCheck';
+import { friendlyError } from '../lib/friendlyError';
+
+/// Compact one-line presentation of a FriendlyError for inline span
+/// usage. Keeps the title and body together; hint is dropped (we
+/// already separately surface debug-logging hints elsewhere).
+function inlineFriendly(err: unknown): string {
+  const f = friendlyError(err);
+  return `${f.title}: ${f.body}`;
+}
 
 interface Props {
   config: Config;
@@ -75,6 +86,24 @@ export function SettingsPane({ config, onSave }: Props) {
     total: number | null;
   } | null>(null);
 
+  // Field-focus registration for cross-pane HealthCard CTAs. Each
+  // outer wrapper registers its DOM element; useFieldFocus.focus
+  // scrolls + focuses the first interactive child.
+  const fieldFocus = useFieldFocus();
+  const gamelogPathRef = useRef<HTMLDivElement>(null);
+  const apiUrlRef = useRef<HTMLDivElement>(null);
+  const pairingCodeRef = useRef<HTMLDivElement>(null);
+  const rsiCookieRef = useRef<HTMLDivElement>(null);
+  const updatesRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fieldFocus.register('gamelog_path', gamelogPathRef.current);
+    fieldFocus.register('api_url', apiUrlRef.current);
+    fieldFocus.register('pairing_code', pairingCodeRef.current);
+    fieldFocus.register('rsi_cookie', rsiCookieRef.current);
+    fieldFocus.register('updates', updatesRef.current);
+  }, [fieldFocus]);
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -83,7 +112,7 @@ export function SettingsPane({ config, onSave }: Props) {
         if (!cancelled) setCookieStatus(next);
       })
       .catch((e) => {
-        if (!cancelled) setCookieError(String(e));
+        if (!cancelled) setCookieError(inlineFriendly(e));
       });
     api
       .getAppVersion()
@@ -181,7 +210,7 @@ export function SettingsPane({ config, onSave }: Props) {
       setPairingCode('');
       setPairedAs(outcome.claimed_handle);
     } catch (err) {
-      setPairError(String(err));
+      setPairError(inlineFriendly(err));
     } finally {
       setPairing(false);
     }
@@ -200,7 +229,7 @@ export function SettingsPane({ config, onSave }: Props) {
       setCookieDraft('');
       setCookieSavedAt(Date.now());
     } catch (err) {
-      setCookieError(String(err));
+      setCookieError(inlineFriendly(err));
     } finally {
       setCookieSaving(false);
     }
@@ -221,7 +250,7 @@ export function SettingsPane({ config, onSave }: Props) {
       setCookieStatus(next);
       setCookieSavedAt(null);
     } catch (err) {
-      setCookieError(String(err));
+      setCookieError(inlineFriendly(err));
     } finally {
       setCookieSaving(false);
     }
@@ -235,7 +264,7 @@ export function SettingsPane({ config, onSave }: Props) {
       await onSave(draft);
       setSavedAt(Date.now());
     } catch (err) {
-      setError(String(err));
+      setError(inlineFriendly(err));
     } finally {
       setSaving(false);
     }
@@ -342,30 +371,33 @@ export function SettingsPane({ config, onSave }: Props) {
         </div>
       </TrayCard>
 
-      <TrayCard title="Game.log">
-        <Field
-          label="Override path"
-          hint="Leave blank to auto-discover the largest LIVE/PTU/EPTU log."
-        >
-          <TextInput
-            type="text"
-            value={draft.gamelog_path ?? ''}
-            placeholder="auto-discover"
-            onChange={(e) =>
-              editDraft((prev) => ({
-                ...prev,
-                gamelog_path: e.target.value || null,
-              }))
-            }
-            spellCheck={false}
-          />
-        </Field>
-      </TrayCard>
+      <div ref={gamelogPathRef}>
+        <TrayCard title="Game.log">
+          <Field
+            label="Override path"
+            hint="Leave blank to auto-discover the largest LIVE/PTU/EPTU log."
+          >
+            <TextInput
+              type="text"
+              value={draft.gamelog_path ?? ''}
+              placeholder="auto-discover"
+              onChange={(e) =>
+                editDraft((prev) => ({
+                  ...prev,
+                  gamelog_path: e.target.value || null,
+                }))
+              }
+              spellCheck={false}
+            />
+          </Field>
+        </TrayCard>
+      </div>
 
       <ReingestCard />
 
       <ReparseCard />
 
+      <div ref={updatesRef}>
       <TrayCard
         title="Updates"
         kicker={appVersion ? `v${appVersion}` : undefined}
@@ -520,6 +552,7 @@ export function SettingsPane({ config, onSave }: Props) {
           </label>
         </div>
       </TrayCard>
+      </div>
 
       <TrayCard
         title="Remote sync"
@@ -572,18 +605,34 @@ export function SettingsPane({ config, onSave }: Props) {
             gap: 12,
           }}
         >
-          <Field label="API URL">
-            <TextInput
-              type="url"
+          <div ref={apiUrlRef}>
+            <Field label="API URL">
+              <TextInput
+                type="url"
+                value={draft.remote_sync.api_url ?? ''}
+                placeholder="https://api.example.com"
+                onChange={(e) =>
+                  updateRemote({ api_url: e.target.value || null })
+                }
+                spellCheck={false}
+              />
+            </Field>
+            <InlineCheck
+              label="Test connection"
               value={draft.remote_sync.api_url ?? ''}
-              placeholder="https://api.example.com"
-              onChange={(e) =>
-                updateRemote({ api_url: e.target.value || null })
-              }
-              spellCheck={false}
+              onCheck={async (url): Promise<InlineCheckResult> => {
+                const r = await api.checkApiUrl(url);
+                return {
+                  ok: r.ok,
+                  message: r.ok
+                    ? `Reachable${r.server_version ? ` · server v${r.server_version}` : ''}`
+                    : r.error ?? 'Unknown error',
+                };
+              }}
             />
-          </Field>
+          </div>
 
+          <div ref={pairingCodeRef}>
           <Field label="Hangar">
             {isPaired ? (
               <div
@@ -693,6 +742,7 @@ export function SettingsPane({ config, onSave }: Props) {
               </div>
             )}
           </Field>
+          </div>
 
           <div
             style={{
@@ -797,23 +847,40 @@ export function SettingsPane({ config, onSave }: Props) {
           )}
         </p>
 
-        <Field
-          label="Rsi-Token cookie"
-          hint="Find this in DevTools → Application → Cookies → robertsspaceindustries.com → Rsi-Token. Never leaves your machine — only parsed ship lists are sent."
-        >
-          <TextInput
-            type="password"
+        <div ref={rsiCookieRef}>
+          <Field
+            label="Rsi-Token cookie"
+            hint="Find this in DevTools → Application → Cookies → robertsspaceindustries.com → Rsi-Token. Never leaves your machine — only parsed ship lists are sent."
+          >
+            <TextInput
+              type="password"
+              value={cookieDraft}
+              placeholder="•••••••••••••••••••••••••••"
+              onChange={(e) => {
+                setCookieDraft(e.target.value);
+                setCookieSavedAt(null);
+                setCookieError(null);
+              }}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
+          <InlineCheck
+            label="Test cookie"
             value={cookieDraft}
-            placeholder="•••••••••••••••••••••••••••"
-            onChange={(e) => {
-              setCookieDraft(e.target.value);
-              setCookieSavedAt(null);
-              setCookieError(null);
+            onCheck={async (cookie): Promise<InlineCheckResult> => {
+              const r = await api.checkRsiCookie(cookie);
+              return {
+                ok: r.ok,
+                message: r.ok
+                  ? r.handle
+                    ? `Authenticated as ${r.handle}`
+                    : 'Cookie accepted'
+                  : r.error ?? 'Unknown error',
+              };
             }}
-            spellCheck={false}
-            autoComplete="off"
           />
-        </Field>
+        </div>
 
         <div
           style={{
