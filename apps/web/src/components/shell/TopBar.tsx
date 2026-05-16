@@ -35,16 +35,17 @@ export function TopBar({ handle, location = null }: Props) {
       </Link>
       <LocationChip location={location} />
       <span style={{ flex: 1 }} />
-      {/* Native GET form — submits to /metrics?view=raw&type=<input>,
-          the existing event-type filter contract on the Raw stream
-          tab. Server-rendered so it works without JS. */}
+      {/* Native GET form — submits to /journey?view=types&type=<input>,
+          the merged event-type filter surface (audit v2 §07 moved the
+          old /metrics raw stream here). Server-rendered so it works
+          without JS. */}
       <form
         method="GET"
-        action="/metrics"
+        action="/journey"
         role="search"
         style={{ display: 'flex', alignItems: 'center', gap: 6 }}
       >
-        <input type="hidden" name="view" value="raw" />
+        <input type="hidden" name="view" value="types" />
         <input
           type="search"
           name="type"

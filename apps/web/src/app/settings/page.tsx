@@ -24,6 +24,7 @@ import { HangarCard } from '@/components/HangarCard';
 import { logger } from '@/lib/logger';
 import { clearSession, getSession } from '@/lib/session';
 import { getTheme, isTheme, setTheme, type Theme } from '@/lib/theme';
+import { SecuritySection } from './_components/SecuritySection';
 
 interface SearchParams {
   status?: string;
@@ -118,12 +119,6 @@ const mutedStyle: React.CSSProperties = {
 const dimStyle: React.CSSProperties = {
   color: 'var(--fg-dim)',
   fontSize: 12,
-};
-
-const twoColStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-  gap: 16,
 };
 
 const themeGridStyle: React.CSSProperties = {
@@ -885,127 +880,57 @@ export default async function SettingsPage(props: {
         </div>
       </section>
 
-      {/* Password + 2FA — two-column row */}
-      <div data-rspgrid="2" style={twoColStyle}>
-        <section className="ss-card" id="password">
-          <header style={cardHeaderStyle}>
-            <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-              Security
-            </div>
-            <h2 style={cardTitleStyle}>Change password</h2>
-          </header>
-          <div style={cardBodyStyle}>
-            <form action={passwordAction} style={formStyle}>
-              <label className="ss-label">
-                <span className="ss-label-text">Current password</span>
-                <input
-                  className="ss-input"
-                  type="password"
-                  name="current_password"
-                  required
-                  autoComplete="current-password"
-                />
-              </label>
-              <label className="ss-label">
-                <span className="ss-label-text">New password</span>
-                <input
-                  className="ss-input"
-                  type="password"
-                  name="new_password"
-                  required
-                  minLength={12}
-                  autoComplete="new-password"
-                />
-                <small style={dimStyle}>At least 12 characters.</small>
-              </label>
-              <button
-                type="submit"
-                className="ss-btn ss-btn--primary"
-                style={{ alignSelf: 'flex-start' }}
-              >
-                Update password
-              </button>
-            </form>
+      {/* Password — full-width row above the inline Security/2FA card.
+          The 2FA wizard is now absorbed into <SecuritySection> below
+          (audit v2 §09: inline 2FA wizard into Settings → Security),
+          so password no longer shares a 2-col row with it. */}
+      <section className="ss-card" id="password">
+        <header style={cardHeaderStyle}>
+          <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
+            Security
           </div>
-        </section>
+          <h2 style={cardTitleStyle}>Change password</h2>
+        </header>
+        <div style={cardBodyStyle}>
+          <form action={passwordAction} style={formStyle}>
+            <label className="ss-label">
+              <span className="ss-label-text">Current password</span>
+              <input
+                className="ss-input"
+                type="password"
+                name="current_password"
+                required
+                autoComplete="current-password"
+              />
+            </label>
+            <label className="ss-label">
+              <span className="ss-label-text">New password</span>
+              <input
+                className="ss-input"
+                type="password"
+                name="new_password"
+                required
+                minLength={12}
+                autoComplete="new-password"
+              />
+              <small style={dimStyle}>At least 12 characters.</small>
+            </label>
+            <button
+              type="submit"
+              className="ss-btn ss-btn--primary"
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Update password
+            </button>
+          </form>
+        </div>
+      </section>
 
-        <section className="ss-card" id="2fa">
-          <header style={cardHeaderStyle}>
-            <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-              Security
-            </div>
-            <h2 style={cardTitleStyle}>Two-factor authentication</h2>
-          </header>
-          <div style={cardBodyStyle}>
-            {me.totp_enabled ? (
-              <>
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: 10,
-                    alignItems: 'flex-start',
-                  }}
-                >
-                  <span className="ss-badge ss-badge--ok">
-                    <span className="ss-badge-dot" />
-                    On
-                  </span>
-                  <span
-                    style={{
-                      color: 'var(--fg-muted)',
-                      fontSize: 13,
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    Every sign-in asks for an authentication code from
-                    your authenticator app.
-                  </span>
-                </div>
-                <Link
-                  href="/settings/2fa"
-                  className="ss-btn ss-btn--ghost"
-                  style={{ alignSelf: 'flex-start' }}
-                >
-                  Manage 2FA
-                </Link>
-              </>
-            ) : (
-              <>
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: 10,
-                    alignItems: 'flex-start',
-                  }}
-                >
-                  <span className="ss-badge ss-badge--warn">
-                    <span className="ss-badge-dot" />
-                    Off
-                  </span>
-                  <span
-                    style={{
-                      color: 'var(--fg-muted)',
-                      fontSize: 13,
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    Your account is protected only by your password.
-                    Adding a second factor stops anyone with a stolen
-                    password from signing in.
-                  </span>
-                </div>
-                <Link
-                  href="/settings/2fa"
-                  className="ss-btn ss-btn--primary"
-                  style={{ alignSelf: 'flex-start' }}
-                >
-                  Enable 2FA
-                </Link>
-              </>
-            )}
-          </div>
-        </section>
-      </div>
+      {/* Inline two-factor wizard. Replaces the standalone /settings/2fa
+          route per audit v2 §07 (absorb) and §09 (inline into Settings).
+          Anchored at #security so the legacy redirect from /settings/2fa
+          lands on this card. */}
+      <SecuritySection me={me} />
 
       {/* Change Comm-Link */}
       <section className="ss-card" id="email">
@@ -1143,6 +1068,14 @@ function labelForStatus(code: string): string {
       return 'Org snapshot refreshed.';
     case 'theme_updated':
       return 'Theme updated.';
+    case 'totp_enabled':
+      return "Two-factor enabled. Save your recovery codes below — you won't see them again.";
+    case 'totp_ack':
+      return 'Recovery codes acknowledged.';
+    case 'totp_disabled':
+      return 'Two-factor disabled.';
+    case 'totp_regenerated':
+      return 'New recovery codes generated. Save them — the old set is gone.';
     default:
       return 'Done.';
   }
@@ -1190,6 +1123,14 @@ function labelForError(code: string): string {
       return 'Orgs were just refreshed — please wait a few minutes before refreshing again.';
     case 'invalid_theme':
       return "That theme isn't recognised. Pick one of the four shown.";
+    case 'invalid_code':
+      return "That authentication code didn't match. Check the time on your device and try again.";
+    case 'no_setup':
+      return 'Start two-factor setup before trying to confirm.';
+    case 'already_enabled':
+      return 'Two-factor is already enabled on this account.';
+    case 'not_enabled':
+      return "Two-factor isn't enabled on this account.";
     case 'unexpected':
       return 'Something went wrong. Please try again.';
     default:

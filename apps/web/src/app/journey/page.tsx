@@ -1,13 +1,15 @@
 /**
  * /journey — activity surface.
  *
- * Five internal tabs, each fetched conditionally based on the active
- * URL param:
+ * Internal tabs, each fetched conditionally based on the active URL
+ * param:
  *   - Location (default): current pill + recent journey trace
  *   - Travel: top quantum destinations + planets visited
  *   - Combat: top weapons + deaths by zone
  *   - Loadout: top attached items
  *   - Stability: crashes per channel
+ *   - Types: event-type breakdown + per-type raw stream (merged in
+ *     from the deprecated `/metrics` page per audit v2 §07)
  *
  * Server component. Each tab fetch is conditional so a user looking
  * at `Travel` doesn't pay for the Combat / Loadout / Stability calls.
@@ -62,6 +64,7 @@ import {
   prettyClass,
 } from '@/lib/reference';
 import { getSession } from '@/lib/session';
+import { parseMetricsRange, TypesTab } from './_components/TypesTab';
 
 const TAB_IDS = [
   'location',
@@ -70,6 +73,7 @@ const TAB_IDS = [
   'loadout',
   'stability',
   'commerce',
+  'types',
 ] as const;
 type TabId = (typeof TAB_IDS)[number];
 
@@ -80,11 +84,18 @@ const TAB_LABELS: Record<TabId, string> = {
   loadout: 'Loadout',
   stability: 'Stability',
   commerce: 'Commerce',
+  types: 'Types',
 };
 
 interface SearchParams {
   view?: string;
   range?: string;
+  // Types tab — preserves the legacy `/metrics?view=raw&type=…`
+  // contract that the global TopBar search still posts. `type` pins
+  // the filter; `before_seq` / `after_seq` drive cursor pagination.
+  type?: string;
+  before_seq?: string;
+  after_seq?: string;
 }
 
 function parseTab(raw?: string): TabId {
@@ -114,10 +125,12 @@ export default async function JourneyPage(props: {
   // didn't need it; cutting it removes the worst sequential wait.
   //
   // Location uses fixed sub-windows (24h / 7d) per its UX titles —
-  // the chip row would be misleading there. Every other tab honors
-  // the range. The server's commerce endpoint now accepts hours too
-  // (paired in the same commit), so the chip strip works there.
-  const showRangeBar = view !== 'location';
+  // the chip row would be misleading there. Types owns its own
+  // metrics-range switcher (7d/30d/90d/all) inside the breakdown
+  // card. Every other tab honors the page-level hour-based range.
+  // The server's commerce endpoint now accepts hours too (paired in
+  // the same commit), so the chip strip works there.
+  const showRangeBar = view !== 'location' && view !== 'types';
 
   return (
     <div
@@ -174,6 +187,15 @@ export default async function JourneyPage(props: {
       )}
       {view === 'commerce' && (
         <CommerceTab token={session.token} hours={hours} />
+      )}
+      {view === 'types' && (
+        <TypesTab
+          token={session.token}
+          range={parseMetricsRange(params.range)}
+          eventType={params.type}
+          beforeSeqRaw={params.before_seq}
+          afterSeqRaw={params.after_seq}
+        />
       )}
     </div>
   );
