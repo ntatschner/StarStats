@@ -11,6 +11,17 @@ export default function App() {
   const [view, setView] = useState<TrayView>('status');
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Apply the persisted theme to the document root. `index.html` ships
+  // with `data-theme="stanton"` so the unstyled-flash before config
+  // loads is still a valid theme; once config arrives we swap the
+  // attribute and the four `[data-theme="..."]` token blocks in
+  // `starstats-tokens.css` repaint without a reflow.
+  useEffect(() => {
+    if (config?.theme) {
+      document.documentElement.dataset.theme = config.theme;
+    }
+  }, [config?.theme]);
   // Sourced via the Tauri command (Rust CARGO_PKG_VERSION) rather
   // than a Vite build-time constant from `package.json`, because
   // `package.json` was the wrong source of truth — it shipped at
@@ -69,25 +80,33 @@ export default function App() {
       />
       <main className="app__main">
         {error && <div className="error">Error: {error}</div>}
-        {view === 'status' &&
-          (status ? (
-            <StatusPane
-              status={status}
-              webOrigin={
-                config?.web_origin ?? config?.remote_sync.api_url ?? null
-              }
-              onGoToSettings={() => setView('settings')}
-            />
-          ) : (
-            <div className="loading">Loading…</div>
-          ))}
-        {view === 'logs' && <LogsPane />}
-        {view === 'settings' &&
-          (config ? (
-            <SettingsPane config={config} onSave={onSaveConfig} />
-          ) : (
-            <div className="loading">Loading…</div>
-          ))}
+        {/*
+          Keyed wrapper triggers the design system's `.ss-screen-enter`
+          fade-and-lift animation every time the user switches tabs;
+          inside, the staggered `.ss-card` mount-in animations cascade
+          per the nth-child rules in `starstats-tokens.css`.
+        */}
+        <div key={view} className="ss-screen-enter">
+          {view === 'status' &&
+            (status ? (
+              <StatusPane
+                status={status}
+                webOrigin={
+                  config?.web_origin ?? config?.remote_sync.api_url ?? null
+                }
+                onGoToSettings={() => setView('settings')}
+              />
+            ) : (
+              <div className="loading">Loading…</div>
+            ))}
+          {view === 'logs' && <LogsPane />}
+          {view === 'settings' &&
+            (config ? (
+              <SettingsPane config={config} onSave={onSaveConfig} />
+            ) : (
+              <div className="loading">Loading…</div>
+            ))}
+        </div>
       </main>
     </div>
   );

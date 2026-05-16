@@ -103,6 +103,55 @@ export const RELEASE_CHANNEL_LABELS: Record<ReleaseChannel, string> = {
   live: 'Live',
 };
 
+/**
+ * Visual theme matching the four `[data-theme="..."]` blocks in
+ * `starstats-tokens.css`. Serialised lowercase to match the Rust
+ * `Theme` enum (snake_case serde).
+ */
+export type Theme = 'stanton' | 'pyro' | 'terra' | 'nyx';
+
+/**
+ * Settings → Appearance card metadata. Each entry maps a theme id to
+ * a display label, a short tagline (lifted from the design tokens
+ * comment header), and four palette swatches the picker renders.
+ * Colour values are duplicated from `starstats-tokens.css` rather than
+ * read at runtime so the swatch preview survives unknown future themes
+ * without a CSS round-trip.
+ */
+export interface ThemeMeta {
+  id: Theme;
+  label: string;
+  tagline: string;
+  swatch: { bg: string; surface: string; accent: string; fg: string };
+}
+
+export const THEMES: ReadonlyArray<ThemeMeta> = [
+  {
+    id: 'stanton',
+    label: 'Stanton',
+    tagline: 'warm amber',
+    swatch: { bg: '#0F0E12', surface: '#1A1820', accent: '#E8A23C', fg: '#ECE7DD' },
+  },
+  {
+    id: 'pyro',
+    label: 'Pyro',
+    tagline: 'molten coral',
+    swatch: { bg: '#100C0E', surface: '#1F1517', accent: '#F25C3F', fg: '#F2E6E0' },
+  },
+  {
+    id: 'terra',
+    label: 'Terra',
+    tagline: 'cool teal',
+    swatch: { bg: '#0B1014', surface: '#131C22', accent: '#4FB8A1', fg: '#E2EAEC' },
+  },
+  {
+    id: 'nyx',
+    label: 'Nyx',
+    tagline: 'violet on cream',
+    swatch: { bg: '#F4F1EC', surface: '#FFFFFF', accent: '#5B3FD9', fg: '#1B1722' },
+  },
+];
+
 export interface Config {
   gamelog_path: string | null;
   remote_sync: RemoteSyncConfig;
@@ -122,6 +171,10 @@ export interface Config {
   /// toggle on from Settings → Updates to capture logs for a bug
   /// report. The panic-only log is always written.
   debug_logging: boolean;
+  /// Visual theme driving the `[data-theme="..."]` attribute on
+  /// `<html>`. Defaults Stanton server-side; users switch via
+  /// Settings → Appearance.
+  theme: Theme;
 }
 
 

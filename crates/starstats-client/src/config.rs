@@ -40,6 +40,12 @@ pub struct Config {
     /// always written regardless of this flag.
     #[serde(default)]
     pub debug_logging: bool,
+    /// Visual theme applied to the tray webview. Drives the
+    /// `[data-theme="..."]` attribute the design tokens scope against.
+    /// Defaults to Stanton (warm amber) — the design system's canonical
+    /// dark theme.
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 impl Default for Config {
@@ -51,6 +57,42 @@ impl Default for Config {
             auto_update_check: default_auto_update_check(),
             release_channel: ReleaseChannel::default(),
             debug_logging: false,
+            theme: Theme::default(),
+        }
+    }
+}
+
+/// User-selectable visual theme. Each variant matches one of the four
+/// `[data-theme="..."]` blocks in `starstats-tokens.css` — switching
+/// themes is just a paint change (no layout reflow, no font swap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Warm amber on charcoal. The design system's default.
+    Stanton,
+    /// Molten coral, more aggressive accent. Dark.
+    Pyro,
+    /// Cool teal, clinical. Dark.
+    Terra,
+    /// Deep violet on warm off-white. Light.
+    Nyx,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::Stanton
+    }
+}
+
+impl Theme {
+    /// Lowercase token serialised into config.toml and matched by the
+    /// `[data-theme="..."]` selectors in `starstats-tokens.css`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Theme::Stanton => "stanton",
+            Theme::Pyro => "pyro",
+            Theme::Terra => "terra",
+            Theme::Nyx => "nyx",
         }
     }
 }
@@ -204,6 +246,32 @@ mod tests {
             // serde renders enum variants quoted; strip quotes to compare.
             assert_eq!(json.trim_matches('"'), c.as_str());
         }
+    }
+
+    #[test]
+    fn theme_default_is_stanton() {
+        assert_eq!(Theme::default(), Theme::Stanton);
+        assert_eq!(Config::default().theme, Theme::Stanton);
+    }
+
+    #[test]
+    fn theme_round_trips_through_serde() {
+        for t in [Theme::Stanton, Theme::Pyro, Theme::Terra, Theme::Nyx] {
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(json.trim_matches('"'), t.as_str());
+            let parsed: Theme = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, t);
+        }
+    }
+
+    #[test]
+    fn config_without_theme_field_deserialises_to_stanton() {
+        // Backward-compat: configs persisted before the theme field
+        // existed must still load. `#[serde(default)]` on Config
+        // covers absent fields by inserting Theme::default().
+        let toml_text = "auto_update_check = true\n";
+        let cfg: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(cfg.theme, Theme::Stanton);
     }
 }
 

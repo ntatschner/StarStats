@@ -20,12 +20,14 @@ interface TrayCardProps {
 }
 
 export function TrayCard({ title, kicker, right, children, mono = false }: TrayCardProps) {
+  // The `ss-card` class wires this surface into the design system's
+  // animations (mount-in, hover lift) and the `.ss-screen-enter`
+  // nth-child stagger. We keep the tray-specific tight padding inline
+  // — the global `.ss-card-pad` is the wider web-app density.
   return (
     <section
+      className="ss-card"
       style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--r-md)',
         padding: '14px 16px',
       }}
     >

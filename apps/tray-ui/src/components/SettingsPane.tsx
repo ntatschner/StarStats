@@ -1,6 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { Config, ReleaseChannel, RsiCookieStatus } from '../api';
-import { api, RELEASE_CHANNEL_LABELS } from '../api';
+import type {
+  Config,
+  ReleaseChannel,
+  RsiCookieStatus,
+  Theme,
+} from '../api';
+import { api, RELEASE_CHANNEL_LABELS, THEMES } from '../api';
 import {
   applyUpdate,
   checkForUpdate,
@@ -147,6 +152,16 @@ export function SettingsPane({ config, onSave }: Props) {
       remote_sync: { ...prev.remote_sync, ...patch },
     }));
 
+  // Eager preview: flip the document attribute immediately so the user
+  // sees the theme switch before Save. App.tsx's `useEffect` will
+  // reconcile on persistence; if the user dismisses without saving,
+  // the preview persists until next config refresh — a deliberate UX
+  // trade for instant feedback.
+  const updateTheme = (theme: Theme) => {
+    editDraft((prev) => ({ ...prev, theme }));
+    document.documentElement.dataset.theme = theme;
+  };
+
   const handlePair = async () => {
     if (!draft.remote_sync.api_url) {
       setPairError('Set the API URL above first.');
@@ -235,6 +250,98 @@ export function SettingsPane({ config, onSave }: Props) {
       onSubmit={handleSubmit}
       style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
     >
+      <TrayCard
+        title="Appearance"
+        kicker={`theme · ${draft.theme}`}
+      >
+        <p
+          style={{
+            margin: '0 0 10px',
+            color: 'var(--fg-muted)',
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          Four themes from the StarStats design system. Swatches preview
+          live; the change persists on Save.
+        </p>
+        <div
+          role="radiogroup"
+          aria-label="Theme"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 8,
+          }}
+        >
+          {THEMES.map((t) => {
+            const active = draft.theme === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => updateTheme(t.id)}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'stretch',
+                  gap: 6,
+                  padding: 8,
+                  background: t.swatch.surface,
+                  border: `1px solid ${active ? 'var(--accent)' : 'var(--border-strong)'}`,
+                  borderRadius: 'var(--r-sm)',
+                  cursor: 'pointer',
+                  outline: active ? '2px solid var(--accent)' : 'none',
+                  outlineOffset: 1,
+                  transition:
+                    'transform 120ms var(--ease-out), border-color 180ms var(--ease-out)',
+                  fontFamily: 'inherit',
+                  textAlign: 'left',
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: 'flex',
+                    gap: 3,
+                    height: 16,
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <span style={{ flex: 1, background: t.swatch.bg }} />
+                  <span style={{ flex: 1, background: t.swatch.surface }} />
+                  <span style={{ flex: 1, background: t.swatch.accent }} />
+                  <span style={{ flex: 1, background: t.swatch.fg }} />
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: t.swatch.fg,
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  {t.label}
+                </span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: t.swatch.fg,
+                    opacity: 0.55,
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {t.tagline}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </TrayCard>
+
       <TrayCard title="Game.log">
         <Field
           label="Override path"

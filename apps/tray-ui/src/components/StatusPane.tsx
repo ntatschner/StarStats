@@ -193,7 +193,7 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
       )}
       {showEmailUnverified && (
         <Banner tone="info">
-          Your Comm-Link isn&apos;t verified.{' '}
+          Comm-Link unverified —{' '}
           {isSafeWebOrigin(webOrigin) ? (
             <a
               href={webOrigin}
@@ -205,10 +205,10 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
                 fontWeight: 600,
               }}
             >
-              Verify it on the web
+              claim it before someone else can
             </a>
           ) : (
-            'Verify it on the web'
+            'claim it before someone else can'
           )}
           .
         </Banner>
