@@ -464,7 +464,10 @@ mod tests {
         inputs.remote_sync_enabled = true;
         let items = current_health(&inputs);
         assert!(items.iter().any(|i| i.id == HealthId::ApiUrlMissing));
-        let item = items.iter().find(|i| i.id == HealthId::ApiUrlMissing).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::ApiUrlMissing)
+            .unwrap();
         assert_eq!(item.severity, Severity::Warn);
         assert_eq!(
             item.action,
@@ -519,7 +522,10 @@ mod tests {
         inputs.sync_last_error = Some("502 Bad Gateway".into());
         inputs.sync_attempts_since_success = 4;
         let items = current_health(&inputs);
-        let item = items.iter().find(|i| i.id == HealthId::SyncFailing).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::SyncFailing)
+            .unwrap();
         assert_eq!(item.severity, Severity::Error);
         match &item.params {
             HealthParams::SyncFailing {
@@ -577,7 +583,10 @@ mod tests {
         inputs.cookie_configured = false;
         inputs.hangar_last_attempt_at = Some(inputs.now);
         let items = current_health(&inputs);
-        let item = items.iter().find(|i| i.id == HealthId::CookieMissing).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::CookieMissing)
+            .unwrap();
         assert_eq!(item.severity, Severity::Warn);
         assert!(item.dismissible);
     }
@@ -601,7 +610,10 @@ mod tests {
         inputs.email_verified = Some(false);
         inputs.web_origin = Some("https://app.example".into());
         let items = current_health(&inputs);
-        let item = items.iter().find(|i| i.id == HealthId::EmailUnverified).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::EmailUnverified)
+            .unwrap();
         assert_eq!(item.severity, Severity::Warn);
         match &item.action {
             Some(HealthAction::OpenUrl { url }) => {
@@ -628,7 +640,10 @@ mod tests {
         inputs.tail_current_path = Some("C:/SC/Game.log".into());
         inputs.tail_last_event_at = Some(inputs.now - chrono::Duration::minutes(31));
         let items = current_health(&inputs);
-        let item = items.iter().find(|i| i.id == HealthId::GameLogStale).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::GameLogStale)
+            .unwrap();
         assert_eq!(item.severity, Severity::Warn);
         assert!(item.action.is_none());
     }
@@ -683,7 +698,10 @@ mod tests {
         inputs.gamelog_override_set = true;
         inputs.disk_free_bytes = Some(500 * 1024 * 1024);
         let items = current_health(&inputs);
-        let item = items.iter().find(|i| i.id == HealthId::DiskFreeLow).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.id == HealthId::DiskFreeLow)
+            .unwrap();
         assert_eq!(item.severity, Severity::Warn);
         assert!(item.action.is_none());
     }

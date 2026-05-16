@@ -269,13 +269,17 @@ mod tests {
         let mut cfg = Config::default();
         cfg.dismissed_health.push(crate::health::DismissedHealth {
             id: crate::health::HealthId::UpdateAvailable,
-            fingerprint: "[\"update_available\",{\"id\":\"update_available\",\"version\":\"0.4.1\"}]".into(),
+            fingerprint:
+                "[\"update_available\",{\"id\":\"update_available\",\"version\":\"0.4.1\"}]".into(),
             dismissed_at: chrono::Utc::now(),
         });
         let s = toml::to_string_pretty(&cfg).expect("serialise");
         let round: Config = toml::from_str(&s).expect("deserialise");
         assert_eq!(round.dismissed_health.len(), 1);
-        assert_eq!(round.dismissed_health[0].id, crate::health::HealthId::UpdateAvailable);
+        assert_eq!(
+            round.dismissed_health[0].id,
+            crate::health::HealthId::UpdateAvailable
+        );
     }
 
     #[test]
@@ -388,4 +392,3 @@ pub fn save(cfg: &Config) -> Result<()> {
     std::fs::write(&path, text).context("write config.toml")?;
     Ok(())
 }
-

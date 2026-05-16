@@ -1447,14 +1447,16 @@ fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInput
         .flatten()
         .is_some();
 
-    let sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
-    );
+    let sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
     let sc_process_running = sys
         .processes_by_name("StarCitizen.exe".as_ref())
         .next()
         .is_some()
-        || sys.processes_by_name("StarCitizen".as_ref()).next().is_some();
+        || sys
+            .processes_by_name("StarCitizen".as_ref())
+            .next()
+            .is_some();
 
     let disk_free_bytes = crate::config::data_dir()
         .ok()
@@ -1465,9 +1467,7 @@ fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInput
     // failure rather than silently swallow — without the warn, a
     // regression in the upstream timestamp shape would mask the
     // staleness signal indefinitely.
-    let parse_dt = |label: &str,
-                    s: &Option<String>|
-     -> Option<chrono::DateTime<chrono::Utc>> {
+    let parse_dt = |label: &str, s: &Option<String>| -> Option<chrono::DateTime<chrono::Utc>> {
         let raw = s.as_deref()?;
         match chrono::DateTime::parse_from_rfc3339(raw) {
             Ok(d) => Some(d.with_timezone(&chrono::Utc)),

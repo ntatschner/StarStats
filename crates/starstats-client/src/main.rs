@@ -31,9 +31,9 @@ mod hangar;
 // `secret` is consumed by both `hangar` and the cookie-management
 // commands.
 mod parser_defs;
+mod probes;
 #[allow(dead_code)]
 mod process_guard;
-mod probes;
 mod secret;
 mod state;
 mod storage;
