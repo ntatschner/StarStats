@@ -26,14 +26,14 @@ import { getSession } from '@/lib/session';
 
 export default async function DonateReturnPage() {
   const session = await getSession();
-  if (!session) redirect('/auth/login?next=/donate/return');
+  if (!session) redirect('/auth/login?next=/support/return');
 
   let supporter: SupporterStatusDto;
   try {
     supporter = await getSupporterStatus(session.token);
   } catch (e) {
     if (e instanceof ApiCallError && e.status === 401) {
-      redirect('/auth/login?next=/donate/return');
+      redirect('/auth/login?next=/support/return');
     }
     throw e;
   }
@@ -77,10 +77,10 @@ export default async function DonateReturnPage() {
 
         <p style={{ margin: 0, fontSize: 12, color: 'var(--fg-dim)' }}>
           <Link
-            href="/donate"
+            href="/support"
             style={{ color: 'var(--accent)', textDecoration: 'underline' }}
           >
-            Back to donate
+            Back to Support
           </Link>
           {' · '}
           <Link
@@ -181,7 +181,7 @@ function PendingPanel() {
         If the payment is taking unusually long (more than a minute), it may
         have been declined or cancelled — your card statement is the
         authoritative source. Come back to{' '}
-        <code className="mono">/donate</code> any time to retry.
+        <code className="mono">/support</code> any time to retry.
       </p>
     </section>
   );
