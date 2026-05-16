@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   api,
   type LogKind,
@@ -28,6 +28,7 @@ import { EventSparkline } from './EventSparkline';
 import { HealthCard } from './HealthCard';
 import { useHealth } from '../hooks/useHealth';
 import { friendlyError } from '../lib/friendlyError';
+import { composeProfileUrl } from '../lib/profileUrl';
 
 /// Compact label + tone colour for each `LogKind`. Live = ok green
 /// (it's the currently-tailed source); archived = info blue (passive
@@ -70,17 +71,23 @@ function kindBreakdown(
 
 interface Props {
   status: StatusResponse;
-  /// Web UI origin (kept on the prop surface for the legacy
-  /// email-verification banner; now unused — the HealthCard's
-  /// EmailUnverified item carries the link via HealthAction::OpenUrl,
-  /// which it gets from the server-side config).
+  /// Web UI origin used to build the "Open on web" deep link to the
+  /// user's public profile (`${webOrigin}/u/${claimed_handle}`).
+  /// `null` until the device is paired and the API URL is configured.
   webOrigin: string | null;
   /// Routes the user to the Settings pane and focuses a specific
   /// field. Driven by HealthCard CTAs (e.g. "Set up" → API URL).
   onGoToSettings: (field: SettingsField) => void;
 }
 
-export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Props) {
+/// Transient label flashed on the "Copy summary" button after a
+/// clipboard write. Reverts to `idle` automatically.
+type CopyState = 'idle' | 'copied' | 'failed';
+
+const COPY_FLASH_OK_MS = 1500;
+const COPY_FLASH_ERR_MS = 2000;
+
+export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
   const {
     tail,
     sync,
@@ -103,6 +110,17 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
   // Set of event_names with an in-flight mark-as-noise call, to
   // disable double-clicks and surface a "working…" affordance.
   const [pendingNoise, setPendingNoise] = useState<Set<string>>(new Set());
+  // Copy-summary button: prevents reentrancy and drives the transient
+  // "Copied!" / "Failed" label that auto-reverts after a beat.
+  const [copyState, setCopyState] = useState<CopyState>('idle');
+  const [copyInFlight, setCopyInFlight] = useState(false);
+  // Claimed RSI handle, fetched lazily on mount via `getConfig`.
+  // Stays null on failure so the Open-on-web button renders disabled
+  // rather than throwing — the user can still pair from Settings.
+  const [claimedHandle, setClaimedHandle] = useState<string | null>(null);
+  // Free-text filter over the session timeline; matches against
+  // event_type and summary, case-insensitive.
+  const [timelineQuery, setTimelineQuery] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -134,6 +152,43 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
       window.clearInterval(handle);
     };
   }, []);
+
+  // One-shot config read on mount to populate the claimed handle used
+  // by the "Open on web" CTA. Swallows failures: a null handle just
+  // renders the button disabled.
+  useEffect(() => {
+    api
+      .getConfig()
+      .then((c) => setClaimedHandle(c.remote_sync.claimed_handle))
+      .catch(() => {});
+  }, []);
+
+  const profileUrl = composeProfileUrl(webOrigin, claimedHandle);
+
+  const handleCopySummary = async () => {
+    if (copyInFlight) return;
+    setCopyInFlight(true);
+    try {
+      const text = await api.getSessionSummaryText();
+      await navigator.clipboard.writeText(text);
+      setCopyState('copied');
+      window.setTimeout(() => setCopyState('idle'), COPY_FLASH_OK_MS);
+    } catch (e) {
+      setCopyState('failed');
+      const f = friendlyError(e);
+      // eslint-disable-next-line no-console
+      console.warn('copy_session_summary failed:', f.title, f.body);
+      window.setTimeout(() => setCopyState('idle'), COPY_FLASH_ERR_MS);
+    } finally {
+      setCopyInFlight(false);
+    }
+  };
+
+  const handleOpenOnWeb = async () => {
+    if (!profileUrl) return;
+    const { open } = await import('@tauri-apps/plugin-shell');
+    await open(profileUrl);
+  };
 
   const handleMarkAsNoise = async (eventName: string) => {
     setPendingNoise((prev) => {
@@ -172,6 +227,34 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
 
   const totalSyncEvents =
     sync.events_accepted + sync.events_duplicate + sync.events_rejected;
+
+  // In-memory timeline filter — matches event_type and summary,
+  // case-insensitive. Returns the full list when the query is blank.
+  const visibleTimeline = useMemo(() => {
+    if (!timeline) return null;
+    const q = timelineQuery.trim().toLowerCase();
+    if (!q) return timeline;
+    return timeline.filter(
+      (e) =>
+        e.event_type.toLowerCase().includes(q) ||
+        e.summary.toLowerCase().includes(q),
+    );
+  }, [timeline, timelineQuery]);
+
+  const isFiltering = timelineQuery.trim().length > 0;
+  const timelineKicker =
+    timeline === null
+      ? '…'
+      : isFiltering && visibleTimeline
+        ? `${visibleTimeline.length} of ${timeline.length} entries`
+        : `${timeline.length} entries`;
+
+  const copyLabel =
+    copyState === 'copied'
+      ? 'Copied!'
+      : copyState === 'failed'
+        ? 'Failed — see log'
+        : 'Copy summary';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -213,6 +296,28 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
           await open(url);
         }}
       />
+
+      {/* ACTION ROW */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <GhostButton
+          onClick={handleCopySummary}
+          disabled={copyInFlight}
+          title="Copy a plain-text session summary to the clipboard"
+        >
+          {copyLabel}
+        </GhostButton>
+        <GhostButton
+          onClick={handleOpenOnWeb}
+          disabled={profileUrl === null}
+          title={
+            profileUrl === null
+              ? 'Pair the device and configure web origin first'
+              : 'Open your StarStats profile in the browser'
+          }
+        >
+          Open on web
+        </GhostButton>
+      </div>
 
       {/* HEADLINE STAT STRIP */}
       <div style={{ display: 'flex', gap: 8 }}>
@@ -451,15 +556,37 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
       {/* TIMELINE */}
       <TrayCard
         title="Session timeline"
-        kicker={`${timeline?.length ?? 0} entries`}
+        kicker={timelineKicker}
+        right={
+          <input
+            type="search"
+            value={timelineQuery}
+            onChange={(ev) => setTimelineQuery(ev.target.value)}
+            placeholder="filter…"
+            aria-label="Filter session timeline"
+            style={{
+              width: 140,
+              padding: '4px 8px',
+              fontSize: 11,
+              fontFamily: 'inherit',
+              border: '1px solid var(--border)',
+              background: 'var(--bg)',
+              color: 'var(--fg)',
+              borderRadius: 'var(--r-xs)',
+              outline: 'none',
+            }}
+          />
+        }
       >
-        {timeline === null ? (
+        {visibleTimeline === null ? (
           <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
             Loading timeline…
           </p>
-        ) : timeline.length === 0 ? (
+        ) : visibleTimeline.length === 0 ? (
           <p style={{ margin: 0, color: 'var(--fg-dim)', fontSize: 13 }}>
-            Scope is clear. Launch Star Citizen to start the feed.
+            {isFiltering
+              ? `No entries match “${timelineQuery.trim()}”.`
+              : 'Scope is clear. Launch Star Citizen to start the feed.'}
           </p>
         ) : (
           <ol
@@ -474,7 +601,7 @@ export function StatusPane({ status, webOrigin: _webOrigin, onGoToSettings }: Pr
               overflowY: 'auto',
             }}
           >
-            {timeline.map((e) => {
+            {visibleTimeline.map((e) => {
               const accent = TONE_VAR[toneForType(e.event_type)];
               return (
                 <li
