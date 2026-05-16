@@ -24,9 +24,13 @@ describe('friendlyError', () => {
     const e = friendlyError(new Error('server returned HTTP 502'));
     expect(e.title).toBe('Server error');
   });
-  it('maps no-cookie hints', () => {
-    const e = friendlyError(new Error('rsi-token cookie missing'));
+  it('maps RSI cookie failures', () => {
+    const e = friendlyError(new Error('Rsi-Token cookie missing'));
     expect(e.title).toBe('No RSI cookie');
+  });
+  it('does not classify generic cookie text as RSI cookie', () => {
+    const e = friendlyError(new Error('document.cookie is blocked by user setting'));
+    expect(e.title).not.toBe('No RSI cookie');
   });
   it('falls back with 200-char cap', () => {
     const long = 'a'.repeat(300);
