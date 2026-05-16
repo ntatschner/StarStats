@@ -33,6 +33,7 @@ mod hangar;
 mod parser_defs;
 #[allow(dead_code)]
 mod process_guard;
+mod probes;
 mod secret;
 mod state;
 mod storage;
