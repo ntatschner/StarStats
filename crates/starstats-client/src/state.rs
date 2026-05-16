@@ -8,9 +8,21 @@ use crate::hangar::HangarStats;
 use crate::launcher::LauncherStats;
 use crate::storage::Storage;
 use crate::sync::SyncStats;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Notify;
+
+/// Snapshot of the most recent auto-update check, populated at
+/// startup when `Config.auto_update_check` is true and also after a
+/// manual "Check for updates" click. `None` while no check has run
+/// yet or the latest check found no update. Surfaced to the UI via
+/// `health::current_health` → `HealthId::UpdateAvailable`.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub checked_at: DateTime<Utc>,
+}
 
 /// Account-lifecycle signals the tray reflects in its UI.
 ///
@@ -75,4 +87,10 @@ pub struct AppState {
     pub _tail_handle: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
     /// Same as `_tail_handle` but for the launcher-log watcher.
     pub _launcher_handle: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
+    /// Result of the most recent update check. `Some` when a newer
+    /// version is available; cleared/set fresh on each check. Read
+    /// by the health surface (`HealthId::UpdateAvailable`); written
+    /// by the JS-side `updater.ts` after a successful check via the
+    /// `set_update_available` Tauri command.
+    pub update_available: Arc<parking_lot::Mutex<Option<UpdateInfo>>>,
 }

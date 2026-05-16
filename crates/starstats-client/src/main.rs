@@ -298,6 +298,7 @@ fn main() {
                 sync_handle,
                 _tail_handle: parking_lot::Mutex::new(watcher),
                 _launcher_handle: parking_lot::Mutex::new(launcher_watcher),
+                update_available: Arc::new(parking_lot::Mutex::new(None)),
             });
 
             // 4. Tray icon + menu
