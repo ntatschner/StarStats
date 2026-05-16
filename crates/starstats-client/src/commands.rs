@@ -1422,6 +1422,156 @@ fn redact(s: &str) -> String {
     format!("…{last4}")
 }
 
+// === Health surface (added 2026-05-16) =================================
+
+/// Assemble a `HealthInputs` snapshot from `AppState`, `Config`, the
+/// secret store, and `sysinfo`. Pure read-only — never mutates state.
+fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInputs, String> {
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+
+    let now = chrono::Utc::now();
+
+    let tail = state.tail_stats.lock().clone();
+    let sync_snap = state.sync_stats.lock().clone();
+    let hangar = state.hangar_stats.lock().clone();
+    let account = state.account_status.lock().clone();
+    let update_avail = state.update_available.lock().clone();
+
+    let config = crate::config::load().map_err(|e| e.to_string())?;
+    let gamelog_override_set = config.gamelog_path.is_some();
+    let discovered = crate::discovery::discover();
+
+    let cookie_configured = SecretStore::new(ACCOUNT_RSI_SESSION_COOKIE)
+        .ok()
+        .and_then(|s| s.get().ok())
+        .flatten()
+        .is_some();
+
+    let sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+    );
+    let sc_process_running = sys
+        .processes_by_name("StarCitizen.exe".as_ref())
+        .next()
+        .is_some()
+        || sys.processes_by_name("StarCitizen".as_ref()).next().is_some();
+
+    let disk_free_bytes = crate::config::data_dir()
+        .ok()
+        .and_then(|d| free_bytes_for_path(&d));
+
+    // Parse hangar timestamps from RFC3339 strings into DateTime<Utc>.
+    let parse_dt = |s: &Option<String>| -> Option<chrono::DateTime<chrono::Utc>> {
+        s.as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
+    let tail_last_event_at = parse_dt(&tail.last_event_at);
+    let hangar_last_attempt_at = parse_dt(&hangar.last_attempt_at);
+    let hangar_last_success_at = parse_dt(&hangar.last_success_at);
+
+    Ok(crate::health::HealthInputs {
+        now,
+        gamelog_discovered_count: discovered.len(),
+        gamelog_override_set,
+        remote_sync_enabled: config.remote_sync.enabled,
+        api_url: config.remote_sync.api_url.clone(),
+        access_token: config.remote_sync.access_token.clone(),
+        web_origin: config.web_origin.clone(),
+        auth_lost: account.auth_lost,
+        email_verified: account.email_verified,
+        cookie_configured,
+        sync_last_error: sync_snap.last_error.clone(),
+        // The SyncStats type tracks per-attempt counters elsewhere; for
+        // now this is left at zero. A future commit can plumb the
+        // attempts-since-success counter through.
+        sync_attempts_since_success: 0,
+        hangar_last_attempt_at,
+        hangar_last_success_at,
+        hangar_last_skip_reason: hangar.last_skip_reason.clone(),
+        tail_current_path: tail
+            .current_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        tail_last_event_at,
+        sc_process_running,
+        disk_free_bytes,
+        update_available_version: update_avail.as_ref().map(|u| u.version.clone()),
+        dismissed: config.dismissed_health.clone(),
+    })
+}
+
+/// Best-effort free-space query for the partition containing `path`.
+/// Returns `None` on platforms or paths where it fails.
+fn free_bytes_for_path(path: &std::path::Path) -> Option<u64> {
+    use sysinfo::Disks;
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+#[tauri::command]
+pub async fn get_health(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::health::HealthItem>, String> {
+    let inputs = snapshot_health_inputs(&state)?;
+    Ok(crate::health::current_health(&inputs))
+}
+
+#[tauri::command]
+pub async fn dismiss_health(
+    id: crate::health::HealthId,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let inputs = snapshot_health_inputs(&state)?;
+    let live = crate::health::current_health(&inputs);
+    let target = live
+        .iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| format!("No live HealthItem with id {:?}", id))?;
+    if !target.dismissible {
+        return Err(format!("HealthItem {:?} is not dismissible", id));
+    }
+    let mut config = crate::config::load().map_err(|e| e.to_string())?;
+    config
+        .dismissed_health
+        .push(crate::health::DismissedHealth {
+            id: target.id,
+            fingerprint: target.fingerprint.clone(),
+            dismissed_at: chrono::Utc::now(),
+        });
+    crate::config::save(&config).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_api_url(url: String) -> Result<crate::probes::ApiUrlCheck, String> {
+    Ok(crate::probes::check_api_url(url).await)
+}
+
+#[tauri::command]
+pub async fn check_rsi_cookie(cookie: String) -> Result<crate::probes::CookieCheck, String> {
+    Ok(crate::probes::check_rsi_cookie(cookie).await)
+}
+
+/// Set by `apps/tray-ui/src/updater.ts` after a successful auto-update
+/// or manual update check that found a newer version. Feeds the
+/// `HealthId::UpdateAvailable` item in the health surface.
+#[tauri::command]
+pub async fn set_update_available(
+    version: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    *state.update_available.lock() = Some(crate::state::UpdateInfo {
+        version,
+        checked_at: chrono::Utc::now(),
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

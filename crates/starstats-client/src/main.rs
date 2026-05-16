@@ -334,6 +334,11 @@ fn main() {
             commands::set_rsi_cookie,
             commands::clear_rsi_cookie,
             commands::get_rsi_cookie_status,
+            commands::get_health,
+            commands::dismiss_health,
+            commands::check_api_url,
+            commands::check_rsi_cookie,
+            commands::set_update_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
