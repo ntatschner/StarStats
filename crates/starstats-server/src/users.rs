@@ -140,10 +140,7 @@ pub trait UserStore: Send + Sync + 'static {
     /// Admin-only paginated list. Ordered by `created_at DESC` so
     /// new signups surface first. Substring search runs over
     /// `claimed_handle` OR `email` (case-insensitive).
-    async fn list_users(
-        &self,
-        filters: ListUsersFilters,
-    ) -> Result<Vec<User>, UserError>;
+    async fn list_users(&self, filters: ListUsersFilters) -> Result<Vec<User>, UserError>;
 
     // -- Email verification ------------------------------------------
     /// Stash a freshly-minted verification token + its expiry on the
@@ -456,10 +453,7 @@ impl UserStore for PostgresUserStore {
         Ok(row.map(user_from_row))
     }
 
-    async fn list_users(
-        &self,
-        filters: ListUsersFilters,
-    ) -> Result<Vec<User>, UserError> {
+    async fn list_users(&self, filters: ListUsersFilters) -> Result<Vec<User>, UserError> {
         let limit = filters.limit.clamp(1, 200);
         let offset = filters.offset.max(0);
         let q_norm = filters
@@ -994,10 +988,7 @@ pub mod test_support {
                 .cloned())
         }
 
-        async fn list_users(
-            &self,
-            filters: ListUsersFilters,
-        ) -> Result<Vec<User>, UserError> {
+        async fn list_users(&self, filters: ListUsersFilters) -> Result<Vec<User>, UserError> {
             let limit = filters.limit.clamp(1, 200) as usize;
             let offset = filters.offset.max(0) as usize;
             let q_lower = filters

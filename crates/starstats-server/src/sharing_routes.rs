@@ -27,7 +27,6 @@ use crate::share_metadata::{ShareMetadataStore, NOTE_MAX_LEN};
 use crate::spicedb::{ObjectRef, SpicedbClient};
 use crate::users::{PostgresUserStore, UserStore};
 use crate::validation::{build_timeline_buckets, resolve_timeline_days};
-use chrono::{DateTime, Utc};
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
@@ -35,6 +34,7 @@ use axum::{
     routing::{delete, get, post},
     Extension, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
@@ -376,7 +376,9 @@ fn validate_scope(scope: &ShareScope) -> Result<(), &'static str> {
                 // from silently passing the deny-list.
                 if t.is_empty()
                     || t.len() > 64
-                    || !t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    || !t
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 {
                     return Err("invalid_scope_types");
                 }
@@ -824,10 +826,7 @@ pub async fn delete_share(
     // a leftover row with no SpiceDB relation is invisible to all
     // reads (find/list never join an orphan), so a transient
     // failure here is benign.
-    if let Err(e) = meta
-        .delete(&auth.preferred_username, recipient)
-        .await
-    {
+    if let Err(e) = meta.delete(&auth.preferred_username, recipient).await {
         tracing::warn!(error = %e, "share_metadata delete failed");
     }
 
@@ -887,19 +886,17 @@ pub async fn list_shares(
     // "no metadata recorded" rather than failing the whole call —
     // the SpiceDB rows are the source of truth for which shares
     // exist, metadata is decorative.
-    let meta_index: std::collections::HashMap<String, _> = match meta
-        .list_by_owner(&auth.preferred_username)
-        .await
-    {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|m| (m.recipient_handle.to_ascii_lowercase(), m))
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "list_by_owner metadata fetch failed");
-            std::collections::HashMap::new()
-        }
-    };
+    let meta_index: std::collections::HashMap<String, _> =
+        match meta.list_by_owner(&auth.preferred_username).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|m| (m.recipient_handle.to_ascii_lowercase(), m))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "list_by_owner metadata fetch failed");
+                std::collections::HashMap::new()
+            }
+        };
     // Bulk-load view stats from audit_log. Failure degrades to
     // "no stats" (view_count = 0) rather than failing the whole call
     // — the same posture as metadata fetch.
@@ -926,9 +923,7 @@ pub async fn list_shares(
                 recipient_handle: h,
                 expires_at: m.and_then(|x| x.expires_at),
                 note: m.and_then(|x| x.note.clone()),
-                scope: m
-                    .and_then(|x| x.scope.as_ref())
-                    .and_then(scope_from_value),
+                scope: m.and_then(|x| x.scope.as_ref()).and_then(scope_from_value),
                 view_count: v.map(|s| s.view_count).unwrap_or(0),
                 last_viewed_at: v.and_then(|s| s.last_viewed_at),
             }
@@ -994,10 +989,7 @@ pub async fn list_shared_with_me(
             .into_response();
     };
 
-    let handles = match client
-        .list_shared_with_me(&auth.preferred_username)
-        .await
-    {
+    let handles = match client.list_shared_with_me(&auth.preferred_username).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(error = %e, "list_shared_with_me failed");
@@ -1005,19 +997,17 @@ pub async fn list_shared_with_me(
         }
     };
 
-    let meta_index: std::collections::HashMap<String, _> = match meta
-        .list_by_recipient(&auth.preferred_username)
-        .await
-    {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|m| (m.owner_handle.to_ascii_lowercase(), m))
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "list_by_recipient metadata fetch failed");
-            std::collections::HashMap::new()
-        }
-    };
+    let meta_index: std::collections::HashMap<String, _> =
+        match meta.list_by_recipient(&auth.preferred_username).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|m| (m.owner_handle.to_ascii_lowercase(), m))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "list_by_recipient metadata fetch failed");
+                std::collections::HashMap::new()
+            }
+        };
     let owners: Vec<SharedWithMeEntry> = handles
         .into_iter()
         .map(|h| {
@@ -1026,9 +1016,7 @@ pub async fn list_shared_with_me(
                 owner_handle: h,
                 expires_at: m.and_then(|x| x.expires_at),
                 note: m.and_then(|x| x.note.clone()),
-                scope: m
-                    .and_then(|x| x.scope.as_ref())
-                    .and_then(scope_from_value),
+                scope: m.and_then(|x| x.scope.as_ref()).and_then(scope_from_value),
             }
         })
         .collect();
@@ -1632,8 +1620,7 @@ mod tests {
         spicedb: Arc<Option<SpicedbClient>>,
         audit: Arc<dyn AuditLog>,
     ) -> Router {
-        let meta: Arc<dyn ShareMetadataStore> =
-            Arc::new(MemoryShareMetadataStore::default());
+        let meta: Arc<dyn ShareMetadataStore> = Arc::new(MemoryShareMetadataStore::default());
         // `list_shares` (added in W3) reads view stats off the same
         // memory audit log, so reuse the writer's storage by sharing
         // a fresh MemoryAuditLog through both Extensions. Tests that

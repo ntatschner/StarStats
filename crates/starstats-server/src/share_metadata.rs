@@ -70,10 +70,7 @@ pub trait ShareMetadataStore: Send + Sync + 'static {
     ) -> Result<Option<ShareMeta>, ShareMetaError>;
 
     /// Bulk lookup for one owner — pairs with `list_shares`.
-    async fn list_by_owner(
-        &self,
-        owner_handle: &str,
-    ) -> Result<Vec<ShareMeta>, ShareMetaError>;
+    async fn list_by_owner(&self, owner_handle: &str) -> Result<Vec<ShareMeta>, ShareMetaError>;
 
     /// Bulk lookup for one recipient — pairs with
     /// `list_shared_with_me`.
@@ -173,10 +170,7 @@ impl ShareMetadataStore for PostgresShareMetadataStore {
         }))
     }
 
-    async fn list_by_owner(
-        &self,
-        owner_handle: &str,
-    ) -> Result<Vec<ShareMeta>, ShareMetaError> {
+    async fn list_by_owner(&self, owner_handle: &str) -> Result<Vec<ShareMeta>, ShareMetaError> {
         let rows = sqlx::query_as::<
             _,
             (

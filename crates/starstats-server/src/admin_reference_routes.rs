@@ -185,8 +185,7 @@ pub async fn list_reference_entries<R: ReferenceStore>(
         Some(n) => entries
             .into_iter()
             .filter(|e| {
-                e.class_name.to_lowercase().contains(n)
-                    || e.display_name.to_lowercase().contains(n)
+                e.class_name.to_lowercase().contains(n) || e.display_name.to_lowercase().contains(n)
             })
             .collect(),
         None => entries,

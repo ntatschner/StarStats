@@ -440,17 +440,14 @@ pub mod test_support {
         ) -> Result<Vec<Org>, OrgError> {
             let limit = limit.clamp(1, 200) as usize;
             let offset = offset.max(0) as usize;
-            let q_lower = q
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty());
+            let q_lower = q.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
             let rows = self.rows.lock().unwrap();
             let mut out: Vec<Org> = rows
                 .values()
                 .filter(|o| match q_lower.as_ref() {
                     None => true,
                     Some(q) => {
-                        o.name.to_lowercase().contains(q)
-                            || o.slug.to_lowercase().contains(q)
+                        o.name.to_lowercase().contains(q) || o.slug.to_lowercase().contains(q)
                     }
                 })
                 .cloned()
