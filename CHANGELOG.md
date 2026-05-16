@@ -32,6 +32,42 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.0.5-beta] — 2026-05-16
+
+### Added
+
+- **Tray Health surface.** New "Health" section at the top of Status
+  aggregates every actionable setup/lifetime problem into a single
+  list — Game.log missing, API URL missing, pairing missing,
+  auth-lost, sync failing, hangar skipped, RSI cookie missing while
+  paired, email unverified, Game.log stale while SC is running,
+  update available, low disk space. Each item gets a per-row CTA
+  (Set up / Retry sync / Refresh now / Open). Info- and Warn-severity
+  items are dismissible; dismissals re-emerge when the underlying
+  params change (fingerprint over the payload, not the id).
+- **Inline configuration probes.** New "Test connection" and "Test
+  cookie" buttons next to the API URL and RSI session-cookie inputs
+  in Settings. Both perform a single 5-second HTTPS round-trip and
+  render the result inline — no need to save and wait for the next
+  sync cycle to learn if the value works.
+- **Friendly error messages.** Tauri command failures in
+  SettingsPane and the hangar refresh card are now categorised
+  (timeout / connection refused / 401-403 / 404 / 5xx / no cookie /
+  unknown) instead of rendered as raw error strings.
+- **Vitest test runner** for `apps/tray-ui/` — 31 frontend tests
+  cover the new pure modules and components.
+
+### Changed
+
+- The top-of-Status `auth_lost` and `email_unverified` banners are
+  replaced by `HealthItem`s in the new Health card with the same
+  severities. Per-card inline error displays (cookie save error,
+  pair error, hangar refresh error) are retained — the Health card
+  aggregates without removing the editing-context affordances.
+- HealthCard CTAs that navigate to Settings now focus the relevant
+  field via a new `useFieldFocus` registry (one provider at App
+  root, ref callbacks on each registered field).
+
 ## [0.0.4-beta] — 2026-05-16
 
 Tray design-language polish. The tray UI's tokens and primitives
