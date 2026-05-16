@@ -186,8 +186,14 @@ export function StatusPane({ status, webOrigin, onGoToSettings }: Props) {
 
   const handleOpenOnWeb = async () => {
     if (!profileUrl) return;
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(profileUrl);
+    try {
+      const { open } = await import('@tauri-apps/plugin-shell');
+      await open(profileUrl);
+    } catch (e) {
+      const f = friendlyError(e);
+      // eslint-disable-next-line no-console
+      console.warn('open_on_web failed:', f.title, f.body);
+    }
   };
 
   const handleMarkAsNoise = async (eventName: string) => {
