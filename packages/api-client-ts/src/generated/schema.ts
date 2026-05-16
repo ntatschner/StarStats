@@ -807,6 +807,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/events/{seq}/hide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["hide_event"];
+        delete: operations["unhide_event"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me/hangar": {
         parameters: {
             query?: never;
@@ -1844,6 +1860,15 @@ export interface components {
             /** Format: date-time */
             event_timestamp?: string | null;
             event_type: string;
+            /**
+             * Format: date-time
+             * @description `Some(ts)` means the owner has hidden this row from shared/public
+             *     views; `None` means visible. Only surfaced on the owner's own
+             *     `/v1/me/events` response so the UI can render a "hidden" badge
+             *     + a re-show control. Friend/public endpoints don't expose
+             *     `EventDto` (they return per-day counts only).
+             */
+            hidden_at?: string | null;
             log_source: string;
             /**
              * @description Free-form JSON — variant of `starstats_core::events::GameEvent`,
@@ -1958,6 +1983,16 @@ export interface components {
         HealthResponseSchema: {
             status: string;
             version: string;
+        };
+        /**
+         * @description Response body for the hide/unhide toggles. `changed=true` means
+         *     the row's `hidden_at` actually flipped this call; `false` is a
+         *     no-op (already in the requested state, or the seq doesn't match
+         *     any event the caller owns). Same body shape for both POST and
+         *     DELETE so the web client only has one type to deal with.
+         */
+        HideToggleResponse: {
+            changed: boolean;
         };
         IngestBatchDto: {
             /** Format: int64 */
@@ -3209,7 +3244,11 @@ export interface operations {
                  *     ~20k (items) and the admin tool isn't a hot path.
                  */
                 q?: string;
-                /** @description 1-based page number; defaults to 1. Pages of 100. */
+                /**
+                 * @description Page size; defaults to 100, capped at 500. Larger than the
+                 *     50/200 used elsewhere because entries are pure metadata —
+                 *     no SpiceDB fan-out, no JOINs — so wider pages are cheap.
+                 */
                 limit?: number;
                 offset?: number;
             };
@@ -5394,6 +5433,80 @@ export interface operations {
                 content?: never;
             };
             /** @description Query failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    hide_event: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Event seq cursor of the row to hide */
+                seq: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Toggle result (no-op or applied) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HideToggleResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Update failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unhide_event: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Event seq cursor of the row to unhide */
+                seq: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Toggle result (no-op or applied) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HideToggleResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Update failed */
             500: {
                 headers: {
                     [name: string]: unknown;

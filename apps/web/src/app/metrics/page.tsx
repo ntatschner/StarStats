@@ -15,13 +15,16 @@
 import Link from 'next/link';
 import type { Route } from 'next';
 import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
 import {
   ApiCallError,
   getMetricsEventTypes,
   getMetricsSessions,
   getSummary,
   getTimeline,
+  hideEvent,
   listEvents,
+  unhideEvent,
   type EventDto,
   type EventTypeBreakdownResponse,
   type EventTypeStatsDto,
@@ -32,6 +35,7 @@ import {
   type SummaryResponse,
   type TimelineResponse,
 } from '@/lib/api';
+import { logger } from '@/lib/logger';
 import { formatEventSummary } from '@/lib/event-summary';
 import { formatEventType } from '@/lib/event-types';
 import {
@@ -227,10 +231,48 @@ export default async function MetricsPage(props: {
           beforeSeq={beforeSeq}
           afterSeq={afterSeq}
           references={references}
+          toggleHide={toggleHideAction}
         />
       )}
     </div>
   );
+
+  /**
+   * Server action used by the Raw stream tab's per-row hide/unhide
+   * buttons. `formData` carries `seq` (the row to toggle) and
+   * `currently_hidden` ('true' or 'false' — what the row's state is
+   * at render time). The action picks POST vs DELETE accordingly and
+   * revalidates `/metrics` so the page re-renders with the new state.
+   *
+   * Errors are logged and the page is still revalidated; the next
+   * render will show whatever the server actually persisted.
+   */
+  async function toggleHideAction(formData: FormData) {
+    'use server';
+    const s = await getSession();
+    if (!s) redirect('/auth/login?next=/metrics?view=raw');
+    const seqRaw = String(formData.get('seq') ?? '');
+    const seq = Number.parseInt(seqRaw, 10);
+    if (!Number.isFinite(seq) || seq <= 0) {
+      logger.warn({ seqRaw }, 'toggleHideAction: malformed seq');
+      return;
+    }
+    const currentlyHidden =
+      String(formData.get('currently_hidden') ?? '') === 'true';
+    try {
+      if (currentlyHidden) {
+        await unhideEvent(s.token, seq);
+      } else {
+        await hideEvent(s.token, seq);
+      }
+    } catch (e) {
+      if (e instanceof ApiCallError && e.status === 401) {
+        redirect('/auth/login?next=/metrics?view=raw');
+      }
+      logger.error({ err: e, seq, currentlyHidden }, 'event hide toggle failed');
+    }
+    revalidatePath('/metrics');
+  }
 }
 
 // -- Search-param parsing -------------------------------------------
@@ -941,12 +983,14 @@ function RawTab({
   beforeSeq,
   afterSeq,
   references,
+  toggleHide,
 }: {
   events: ListEventsResponse | null;
   eventType: string | undefined;
   beforeSeq: number | undefined;
   afterSeq: number | undefined;
   references: ReferenceLookup;
+  toggleHide: (formData: FormData) => Promise<void>;
 }) {
   const rows = events?.events ?? [];
   // Sort newest-first to mirror dashboard's stream rendering — the
@@ -1035,6 +1079,7 @@ function RawTab({
                 e={e}
                 last={i === sorted.length - 1}
                 references={references}
+                toggleHide={toggleHide}
               />
             ))}
           </ol>
@@ -1086,22 +1131,29 @@ function RawRow({
   e,
   last,
   references,
+  toggleHide,
 }: {
   e: EventDto;
   last: boolean;
   references: ReferenceLookup;
+  toggleHide: (formData: FormData) => Promise<void>;
 }) {
+  const hidden = e.hidden_at !== null && e.hidden_at !== undefined;
   return (
     <li
       style={{
         display: 'grid',
-        gridTemplateColumns: '120px 200px 1fr',
+        // Four columns: timestamp · event-type · summary · hide-toggle.
+        // The toggle column is fixed-width so its alignment is stable
+        // across rows of varying summary length.
+        gridTemplateColumns: '120px 200px 1fr 110px',
         gap: 14,
         alignItems: 'baseline',
         padding: '10px 0',
         borderBottom: last ? 'none' : '1px solid var(--border)',
         fontFamily: 'var(--font-mono)',
         fontSize: 12,
+        opacity: hidden ? 0.5 : 1,
       }}
     >
       <span style={{ color: 'var(--fg-dim)' }}>
@@ -1123,9 +1175,59 @@ function RawRow({
         </span>
         <span>{formatEventType(e.event_type).label}</span>
       </Link>
-      <span style={{ color: 'var(--fg-muted)' }}>
+      <span
+        style={{
+          color: 'var(--fg-muted)',
+          textDecoration: hidden ? 'line-through' : undefined,
+        }}
+      >
         {formatEventSummary(e.payload, references)}
       </span>
+      <form
+        action={toggleHide}
+        style={{
+          margin: 0,
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          gap: 6,
+        }}
+      >
+        <input type="hidden" name="seq" value={String(e.seq)} />
+        <input
+          type="hidden"
+          name="currently_hidden"
+          value={hidden ? 'true' : 'false'}
+        />
+        {hidden && (
+          <span
+            className="ss-badge"
+            title={`Hidden from shares at ${e.hidden_at}`}
+            style={{
+              fontSize: 10,
+              borderColor: 'var(--fg-dim)',
+              color: 'var(--fg-dim)',
+            }}
+          >
+            hidden
+          </span>
+        )}
+        <button
+          type="submit"
+          className="ss-btn ss-btn--link"
+          title={
+            hidden
+              ? 'Make this event visible to people you share with again'
+              : 'Hide this event from shared and public views'
+          }
+          style={{
+            fontSize: 11,
+            color: hidden ? 'var(--accent)' : 'var(--fg-muted)',
+          }}
+        >
+          {hidden ? 'Unhide' : 'Hide'}
+        </button>
+      </form>
     </li>
   );
 }

@@ -302,6 +302,38 @@ export async function listEvents(
   );
 }
 
+export type HideToggleResponse =
+  apiSchema['schemas']['HideToggleResponse'];
+
+/** Hide one event from shared/public views. Owner-only — the server
+ *  filters by claimed_handle = caller. Idempotent: `changed=false`
+ *  when the row was already hidden (or doesn't belong to you). */
+export async function hideEvent(
+  bearer: string,
+  seq: number,
+): Promise<HideToggleResponse> {
+  return request<HideToggleResponse>(
+    'POST',
+    `/v1/me/events/${seq}/hide`,
+    undefined,
+    bearer,
+  );
+}
+
+/** Reverse of {@link hideEvent} — clears `hidden_at`. Same idempotent
+ *  semantics. */
+export async function unhideEvent(
+  bearer: string,
+  seq: number,
+): Promise<HideToggleResponse> {
+  return request<HideToggleResponse>(
+    'DELETE',
+    `/v1/me/events/${seq}/hide`,
+    undefined,
+    bearer,
+  );
+}
+
 // -- Account ---------------------------------------------------------
 
 export async function getMe(bearer: string): Promise<MeResponse> {

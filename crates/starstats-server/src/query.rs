@@ -9,6 +9,7 @@
 //! authorisation slice (SpiceDB) and route prefix.
 
 use crate::api_error::ApiErrorBody;
+use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::AuthenticatedUser;
 use crate::locations::{self, ResolvedLocation, LOCATION_EVENT_TYPES};
 use crate::repo::{
@@ -18,7 +19,7 @@ use crate::repo::{
 use crate::spicedb::SpicedbClient;
 use crate::validation::{build_timeline_buckets, is_valid_event_type, resolve_timeline_days};
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     Extension,
@@ -143,6 +144,12 @@ pub struct EventDto {
     /// internally tagged on `type`.
     #[schema(value_type = Object)]
     pub payload: serde_json::Value,
+    /// `Some(ts)` means the owner has hidden this row from shared/public
+    /// views; `None` means visible. Only surfaced on the owner's own
+    /// `/v1/me/events` response so the UI can render a "hidden" badge
+    /// + a re-show control. Friend/public endpoints don't expose
+    /// `EventDto` (they return per-day counts only).
+    pub hidden_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -225,6 +232,7 @@ pub async fn list_events<Q: EventQuery>(
                     log_source: e.log_source,
                     source_offset: e.source_offset,
                     payload: e.payload,
+                    hidden_at: e.hidden_at,
                 })
                 .collect();
             (
@@ -335,6 +343,108 @@ pub async fn summary<Q: EventQuery>(
             .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "summary failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
+        }
+    }
+}
+
+/// Response body for the hide/unhide toggles. `changed=true` means
+/// the row's `hidden_at` actually flipped this call; `false` is a
+/// no-op (already in the requested state, or the seq doesn't match
+/// any event the caller owns). Same body shape for both POST and
+/// DELETE so the web client only has one type to deal with.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HideToggleResponse {
+    pub changed: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/me/events/{seq}/hide",
+    tag = "query",
+    params(("seq" = i64, Path, description = "Event seq cursor of the row to hide")),
+    responses(
+        (status = 200, description = "Toggle result (no-op or applied)", body = HideToggleResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 500, description = "Update failed"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn hide_event<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    user: AuthenticatedUser,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Path(seq): Path<i64>,
+) -> impl IntoResponse {
+    match query
+        .set_event_hidden(&user.preferred_username, seq, true)
+        .await
+    {
+        Ok(changed) => {
+            if changed {
+                // Best-effort audit. The hide is already committed at
+                // the DB level; a logging hiccup doesn't reverse it.
+                if let Err(e) = audit
+                    .append(AuditEntry {
+                        actor_sub: Some(user.sub.clone()),
+                        actor_handle: Some(user.preferred_username.clone()),
+                        action: "event.hidden".to_string(),
+                        payload: serde_json::json!({ "seq": seq }),
+                    })
+                    .await
+                {
+                    tracing::warn!(error = %e, "audit append failed (event.hidden)");
+                }
+            }
+            (StatusCode::OK, Json(HideToggleResponse { changed })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, seq, "hide_event failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
+        }
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/me/events/{seq}/hide",
+    tag = "query",
+    params(("seq" = i64, Path, description = "Event seq cursor of the row to unhide")),
+    responses(
+        (status = 200, description = "Toggle result (no-op or applied)", body = HideToggleResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 500, description = "Update failed"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn unhide_event<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    user: AuthenticatedUser,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Path(seq): Path<i64>,
+) -> impl IntoResponse {
+    match query
+        .set_event_hidden(&user.preferred_username, seq, false)
+        .await
+    {
+        Ok(changed) => {
+            if changed {
+                if let Err(e) = audit
+                    .append(AuditEntry {
+                        actor_sub: Some(user.sub.clone()),
+                        actor_handle: Some(user.preferred_username.clone()),
+                        action: "event.unhidden".to_string(),
+                        payload: serde_json::json!({ "seq": seq }),
+                    })
+                    .await
+                {
+                    tracing::warn!(error = %e, "audit append failed (event.unhidden)");
+                }
+            }
+            (StatusCode::OK, Json(HideToggleResponse { changed })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, seq, "unhide_event failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "query failed").into_response()
         }
     }
@@ -1522,6 +1632,7 @@ mod tests {
             log_source: "live".into(),
             source_offset: 0,
             payload: json!({"type": ty}),
+            hidden_at: None,
         }
     }
 
@@ -1561,6 +1672,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({"type":"join_pu"}),
+                hidden_at: None,
             },
             StoredQueryEvent {
                 seq: 2,
@@ -1570,6 +1682,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({"type":"join_pu"}),
+                hidden_at: None,
             },
             StoredQueryEvent {
                 seq: 3,
@@ -1579,6 +1692,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({"type":"actor_death"}),
+                hidden_at: None,
             },
         ]));
 
@@ -1617,6 +1731,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({}),
+                hidden_at: None,
             },
             StoredQueryEvent {
                 seq: 2,
@@ -1626,6 +1741,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({}),
+                hidden_at: None,
             },
             StoredQueryEvent {
                 seq: 3,
@@ -1635,6 +1751,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({}),
+                hidden_at: None,
             },
             StoredQueryEvent {
                 seq: 4,
@@ -1644,6 +1761,7 @@ mod tests {
                 log_source: "live".into(),
                 source_offset: 0,
                 payload: json!({}),
+                hidden_at: None,
             },
         ]));
 
@@ -2134,6 +2252,7 @@ mod tests {
             log_source: "live".into(),
             source_offset: 0,
             payload,
+            hidden_at: None,
         }
     }
 

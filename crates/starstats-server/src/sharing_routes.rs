@@ -1056,7 +1056,11 @@ where
 }
 
 async fn render_summary<Q: EventQuery>(query: &Q, handle: &str) -> Response {
-    match query.summary_for_handle(handle).await {
+    // `_shared` variant — excludes rows the owner has hidden from
+    // shared/public views. Hidden events still count for the owner
+    // via `/v1/me/summary` (which calls the un-suffixed method) so
+    // they don't disappear from your own UI.
+    match query.summary_for_handle_shared(handle).await {
         Ok((total, by_type)) => (
             StatusCode::OK,
             Json(PublicSummaryResponse {
@@ -1077,7 +1081,8 @@ async fn render_summary<Q: EventQuery>(query: &Q, handle: &str) -> Response {
 }
 
 async fn render_timeline<Q: EventQuery>(query: &Q, handle: &str, days: u32) -> Response {
-    match query.timeline(handle, days).await {
+    // `_shared` variant — see `render_summary` for the rationale.
+    match query.timeline_shared(handle, days).await {
         Ok(rows) => {
             let buckets = build_timeline_buckets(rows, days)
                 .into_iter()

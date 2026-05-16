@@ -87,6 +87,8 @@ impl Modify for SecurityAddon {
         well_known::openid_configuration,
         ingest::handle,
         query::list_events,
+        query::hide_event,
+        query::unhide_event,
         query::summary,
         query::timeline,
         query::metrics_event_types,
@@ -202,6 +204,7 @@ impl Modify for SecurityAddon {
         // Query
         query::EventsListResponse,
         query::EventDto,
+        query::HideToggleResponse,
         query::SummaryResponse,
         query::TypeCount,
         query::TimelineResponse,

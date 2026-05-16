@@ -46,7 +46,7 @@ pub trait EventStore: Send + Sync + 'static {
 /// — `raw_line` and `idempotency_key` aren't surfaced by query
 /// endpoints (clients have their own copies; the raw line is only
 /// useful for re-classification by the server).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StoredQueryEvent {
     pub seq: i64,
     /// Used by query filters; not surfaced to the API DTO since
@@ -58,6 +58,12 @@ pub struct StoredQueryEvent {
     pub log_source: String,
     pub source_offset: i64,
     pub payload: Value,
+    /// `Some(ts)` means the owner has marked this row as hidden from
+    /// shared/public views (timeline + summary endpoints filter it
+    /// out). `None` = visible. Only the owner's own `/v1/me/events`
+    /// response surfaces this field — friend/public DTOs are
+    /// pre-filtered and never include hidden rows in the first place.
+    pub hidden_at: Option<DateTime<Utc>>,
 }
 
 /// Direction of cursor pagination on `event_seq`.
@@ -182,11 +188,50 @@ pub trait EventQuery: Send + Sync + 'static {
         days: u32,
     ) -> Result<Vec<(NaiveDate, i64)>, RepoError>;
 
+    /// Same as [`Self::timeline`] but excludes rows the owner has
+    /// hidden (`hidden_at IS NOT NULL`). Used by the friend/public
+    /// timeline endpoints. Default delegates to `timeline` so the
+    /// in-memory test impl stays simple — the production Postgres
+    /// impl overrides with the WHERE filter.
+    async fn timeline_shared(
+        &self,
+        claimed_handle: &str,
+        days: u32,
+    ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
+        self.timeline(claimed_handle, days).await
+    }
+
     /// Returns (total, [(event_type, count)]).
     async fn summary_for_handle(
         &self,
         claimed_handle: &str,
     ) -> Result<(u64, Vec<(String, u64)>), RepoError>;
+
+    /// Same as [`Self::summary_for_handle`] but excludes hidden rows.
+    /// Used by the friend/public summary endpoints. Default delegates
+    /// to the owner variant — Postgres overrides with WHERE filter.
+    async fn summary_for_handle_shared(
+        &self,
+        claimed_handle: &str,
+    ) -> Result<(u64, Vec<(String, u64)>), RepoError> {
+        self.summary_for_handle(claimed_handle).await
+    }
+
+    /// Set or clear the `hidden_at` flag on one event. `hide=true`
+    /// marks the row hidden (`hidden_at = NOW()`); `hide=false`
+    /// clears it (`hidden_at = NULL`). Returns `true` when a row
+    /// matched and `false` for a no-op (either the event doesn't
+    /// belong to the caller or it was already in the requested
+    /// state). Idempotent. Default impl returns false — the in-memory
+    /// test impl overrides to support tests.
+    async fn set_event_hidden(
+        &self,
+        _claimed_handle: &str,
+        _seq: i64,
+        _hide: bool,
+    ) -> Result<bool, RepoError> {
+        Ok(false)
+    }
 
     /// Per-event-type breakdown with `last_seen` for the Metrics page's
     /// "Event types" tab. Returns rows sorted by count DESC. If
@@ -784,7 +829,7 @@ impl EventQuery for PostgresStore {
         // hits the wire as a bound parameter — no string interpolation.
         let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT seq, claimed_handle, event_type, event_timestamp,
-                    log_source, source_offset, payload
+                    log_source, source_offset, payload, hidden_at
              FROM events
              WHERE claimed_handle = ",
         );
@@ -829,6 +874,7 @@ impl EventQuery for PostgresStore {
                 String,
                 i64,
                 Value,
+                Option<DateTime<Utc>>,
             )>()
             .fetch_all(&self.pool)
             .await?;
@@ -844,6 +890,7 @@ impl EventQuery for PostgresStore {
                     log_source,
                     source_offset,
                     payload,
+                    hidden_at,
                 )| {
                     StoredQueryEvent {
                         seq,
@@ -853,6 +900,7 @@ impl EventQuery for PostgresStore {
                         log_source,
                         source_offset,
                         payload,
+                        hidden_at,
                     }
                 },
             )
@@ -911,6 +959,106 @@ impl EventQuery for PostgresStore {
                 .map(|(t, c)| (t, c.max(0) as u64))
                 .collect(),
         ))
+    }
+
+    /// Shared-perspective variant: excludes rows the owner has hidden.
+    /// Same shape as [`Self::timeline`] otherwise.
+    async fn timeline_shared(
+        &self,
+        claimed_handle: &str,
+        days: u32,
+    ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
+        let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(
+            "SELECT (date_trunc('day', event_timestamp) AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(*)::BIGINT
+             FROM events
+             WHERE claimed_handle = $1
+               AND event_timestamp IS NOT NULL
+               AND event_timestamp >= NOW() - make_interval(days => $2)
+               AND hidden_at IS NULL
+             GROUP BY day
+             ORDER BY day ASC",
+        )
+        .bind(claimed_handle)
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Shared-perspective variant: excludes rows the owner has hidden
+    /// from both the total and the by-type breakdown. Friend + public
+    /// summary endpoints call this; the owner's `/v1/me/summary`
+    /// keeps the un-filtered count.
+    async fn summary_for_handle_shared(
+        &self,
+        claimed_handle: &str,
+    ) -> Result<(u64, Vec<(String, u64)>), RepoError> {
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events
+             WHERE claimed_handle = $1 AND hidden_at IS NULL",
+        )
+        .bind(claimed_handle)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let by_type: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT event_type, COUNT(*)::BIGINT
+             FROM events
+             WHERE claimed_handle = $1 AND hidden_at IS NULL
+             GROUP BY event_type
+             ORDER BY 2 DESC",
+        )
+        .bind(claimed_handle)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok((
+            total.max(0) as u64,
+            by_type
+                .into_iter()
+                .map(|(t, c)| (t, c.max(0) as u64))
+                .collect(),
+        ))
+    }
+
+    /// Toggle the `hidden_at` flag for one event. `hide=true` sets
+    /// it to `NOW()`; `hide=false` nulls it. The `claimed_handle`
+    /// filter is the ownership check — an event belonging to a
+    /// different user is invisible and the UPDATE matches zero
+    /// rows. Returns `true` when a row actually changed (not "row
+    /// exists but state was already as requested").
+    async fn set_event_hidden(
+        &self,
+        claimed_handle: &str,
+        seq: i64,
+        hide: bool,
+    ) -> Result<bool, RepoError> {
+        // Two paths keep the SQL simple. The `IS DISTINCT FROM NULL`
+        // / `IS DISTINCT FROM hidden_at` predicate suppresses no-op
+        // updates so the boolean return is meaningful.
+        let result = if hide {
+            sqlx::query(
+                "UPDATE events SET hidden_at = NOW()
+                 WHERE claimed_handle = $1 AND seq = $2
+                   AND hidden_at IS NULL",
+            )
+            .bind(claimed_handle)
+            .bind(seq)
+            .execute(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE events SET hidden_at = NULL
+                 WHERE claimed_handle = $1 AND seq = $2
+                   AND hidden_at IS NOT NULL",
+            )
+            .bind(claimed_handle)
+            .bind(seq)
+            .execute(&self.pool)
+            .await?
+        };
+        Ok(result.rows_affected() > 0)
     }
 
     async fn event_type_breakdown(

@@ -386,6 +386,11 @@ async fn main() -> anyhow::Result<()> {
             post(ingest::handle::<PostgresStore>).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
         .route("/v1/me/events", get(query::list_events::<PostgresStore>))
+        .route(
+            "/v1/me/events/:seq/hide",
+            post(query::hide_event::<PostgresStore>)
+                .delete(query::unhide_event::<PostgresStore>),
+        )
         .route("/v1/me/summary", get(query::summary::<PostgresStore>))
         .route("/v1/me/timeline", get(query::timeline::<PostgresStore>))
         .route(
