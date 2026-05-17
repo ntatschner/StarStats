@@ -351,6 +351,65 @@ pub fn primary_entity_for(event: &GameEvent, claimed_handle: Option<&str>) -> En
     }
 }
 
+/// Stable snake_case key for a `GameEvent` variant.
+///
+/// Matches the `#[serde(rename_all = "snake_case")]` form on
+/// `GameEvent` so the key can be used interchangeably with the
+/// envelope's `type` discriminator. Returning `&'static str` keeps it
+/// allocation-free in hot paths like `group_key_for`.
+pub fn event_type_key(event: &GameEvent) -> &'static str {
+    match event {
+        GameEvent::ProcessInit(_) => "process_init",
+        GameEvent::LegacyLogin(_) => "legacy_login",
+        GameEvent::JoinPu(_) => "join_pu",
+        GameEvent::ChangeServer(_) => "change_server",
+        GameEvent::SeedSolarSystem(_) => "seed_solar_system",
+        GameEvent::ResolveSpawn(_) => "resolve_spawn",
+        GameEvent::ActorDeath(_) => "actor_death",
+        GameEvent::PlayerDeath(_) => "player_death",
+        GameEvent::PlayerIncapacitated(_) => "player_incapacitated",
+        GameEvent::VehicleDestruction(_) => "vehicle_destruction",
+        GameEvent::HudNotification(_) => "hud_notification",
+        GameEvent::LocationInventoryRequested(_) => "location_inventory_requested",
+        GameEvent::PlanetTerrainLoad(_) => "planet_terrain_load",
+        GameEvent::QuantumTargetSelected(_) => "quantum_target_selected",
+        GameEvent::AttachmentReceived(_) => "attachment_received",
+        GameEvent::VehicleStowed(_) => "vehicle_stowed",
+        GameEvent::GameCrash(_) => "game_crash",
+        GameEvent::LauncherActivity(_) => "launcher_activity",
+        GameEvent::MissionStart(_) => "mission_start",
+        GameEvent::MissionEnd(_) => "mission_end",
+        GameEvent::ShopBuyRequest(_) => "shop_buy_request",
+        GameEvent::ShopFlowResponse(_) => "shop_flow_response",
+        GameEvent::CommodityBuyRequest(_) => "commodity_buy_request",
+        GameEvent::CommoditySellRequest(_) => "commodity_sell_request",
+        GameEvent::SessionEnd(_) => "session_end",
+        GameEvent::RemoteMatch(_) => "remote_match",
+        GameEvent::BurstSummary(_) => "burst_summary",
+    }
+}
+
+/// Compose the group key the timeline uses to collapse near-duplicate
+/// rows within a session.
+///
+/// Shape: `"{event_type}:{entity_kind}:{entity_id}"` — e.g.
+/// `"player_death:player:alice"`. Same `(event_type, entity)` pair
+/// produces the same key across the session; different entities
+/// produce different keys even for the same event type.
+///
+/// Cheap by design: every component is either a `&'static str` or a
+/// pre-existing `String`. We avoid the `serde_json::to_string +
+/// trim_matches` round-trip and use [`entity_kind_key`] instead.
+pub fn group_key_for(event: &GameEvent, claimed_handle: Option<&str>) -> String {
+    let entity = primary_entity_for(event, claimed_handle);
+    format!(
+        "{}:{}:{}",
+        event_type_key(event),
+        entity_kind_key(entity.kind),
+        entity.id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +715,277 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         let back: EventMetadata = serde_json::from_str(&s).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_type_key_for_sampled_variants() {
+        let pd = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "1".into(),
+            zone: None,
+        });
+        assert_eq!(event_type_key(&pd), "player_death");
+
+        let vd = GameEvent::VehicleDestruction(VehicleDestruction {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            vehicle_class: "MISC_Freelancer".into(),
+            vehicle_id: Some("veh-1".into()),
+            destroy_level: 2,
+            caused_by: "unknown".into(),
+            zone: None,
+        });
+        assert_eq!(event_type_key(&vd), "vehicle_destruction");
+
+        let lir = GameEvent::LocationInventoryRequested(LocationInventoryRequested {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            player: "alice".into(),
+            location: "Stanton2_Orison".into(),
+        });
+        assert_eq!(event_type_key(&lir), "location_inventory_requested");
+
+        let crash = GameEvent::GameCrash(GameCrash {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            channel: "LIVE".into(),
+            crash_dir_name: "x".into(),
+            primary_log_name: None,
+            total_size_bytes: 0,
+        });
+        assert_eq!(event_type_key(&crash), "game_crash");
+    }
+
+    #[test]
+    fn event_type_key_matches_serde_discriminator_for_every_variant() {
+        // Build one event per variant; assert the static key equals the
+        // serde `type` discriminator (which is the snake_case variant
+        // name by virtue of `#[serde(rename_all = "snake_case")]`).
+        use crate::events::{
+            ActorDeath, AttachmentReceived, BurstSummary, ChangeServer, CommodityBuyRequest,
+            CommoditySellRequest, HudNotification, JoinPu, LauncherActivity, LauncherCategory,
+            LegacyLogin, MissionEnd, PlanetTerrainLoad, PlayerIncapacitated, ProcessInit,
+            QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn, SeedSolarSystem,
+            ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
+            VehicleStowed,
+        };
+        let ts = || "2026-05-17T00:00:00.000Z".to_string();
+        let events: Vec<GameEvent> = vec![
+            GameEvent::ProcessInit(ProcessInit {
+                timestamp: ts(),
+                local_session: "s".into(),
+                env_session: "s".into(),
+                online: true,
+            }),
+            GameEvent::LegacyLogin(LegacyLogin {
+                timestamp: ts(),
+                handle: "alice".into(),
+                server_time: None,
+            }),
+            GameEvent::JoinPu(JoinPu {
+                timestamp: ts(),
+                address: "1.2.3.4".into(),
+                port: 1,
+                shard: "shard1".into(),
+                location_id: "1".into(),
+            }),
+            GameEvent::ChangeServer(ChangeServer {
+                timestamp: ts(),
+                phase: ServerPhase::Start,
+                is_shard_persisted: false,
+                is_server: false,
+                is_multiplayer: false,
+                is_online: None,
+            }),
+            GameEvent::SeedSolarSystem(SeedSolarSystem {
+                timestamp: ts(),
+                solar_system: "Stanton".into(),
+                shard: "shard1".into(),
+                success: true,
+            }),
+            GameEvent::ResolveSpawn(ResolveSpawn {
+                timestamp: ts(),
+                player_geid: "g1".into(),
+                fallback: false,
+            }),
+            GameEvent::ActorDeath(ActorDeath {
+                timestamp: ts(),
+                victim: "v".into(),
+                victim_geid: None,
+                zone: "z".into(),
+                killer: "k".into(),
+                killer_geid: None,
+                weapon: "w".into(),
+                damage_type: "d".into(),
+            }),
+            GameEvent::PlayerDeath(PlayerDeath {
+                timestamp: ts(),
+                body_class: "b".into(),
+                body_id: "1".into(),
+                zone: None,
+            }),
+            GameEvent::PlayerIncapacitated(PlayerIncapacitated {
+                timestamp: ts(),
+                queue_id: 1,
+                zone: None,
+            }),
+            GameEvent::VehicleDestruction(VehicleDestruction {
+                timestamp: ts(),
+                vehicle_class: "c".into(),
+                vehicle_id: None,
+                destroy_level: 1,
+                caused_by: "x".into(),
+                zone: None,
+            }),
+            GameEvent::HudNotification(HudNotification {
+                timestamp: ts(),
+                text: "t".into(),
+                notification_id: 1,
+                mission_id: None,
+            }),
+            GameEvent::LocationInventoryRequested(LocationInventoryRequested {
+                timestamp: ts(),
+                player: "alice".into(),
+                location: "Stanton2_Orison".into(),
+            }),
+            GameEvent::PlanetTerrainLoad(PlanetTerrainLoad {
+                timestamp: ts(),
+                planet: "OOC_Stanton_2b_Daymar".into(),
+            }),
+            GameEvent::QuantumTargetSelected(QuantumTargetSelected {
+                timestamp: ts(),
+                phase: QuantumTargetPhase::Selected,
+                vehicle_class: "c".into(),
+                vehicle_id: "veh".into(),
+                destination: "d".into(),
+            }),
+            GameEvent::AttachmentReceived(AttachmentReceived {
+                timestamp: ts(),
+                player: "alice".into(),
+                item_class: "c".into(),
+                item_id: "id".into(),
+                status: "Attached".into(),
+                port: "p".into(),
+                elapsed_seconds: 0.0,
+            }),
+            GameEvent::VehicleStowed(VehicleStowed {
+                timestamp: ts(),
+                vehicle_id: "veh".into(),
+                landing_area: "la".into(),
+                landing_area_id: "lai".into(),
+                zone_host_id: None,
+            }),
+            GameEvent::GameCrash(GameCrash {
+                timestamp: ts(),
+                channel: "LIVE".into(),
+                crash_dir_name: "x".into(),
+                primary_log_name: None,
+                total_size_bytes: 0,
+            }),
+            GameEvent::LauncherActivity(LauncherActivity {
+                timestamp: ts(),
+                level: "info".into(),
+                message: "m".into(),
+                category: LauncherCategory::Info,
+            }),
+            GameEvent::MissionStart(MissionStart {
+                timestamp: ts(),
+                mission_id: "u".into(),
+                marker_kind: MissionMarkerKind::Phase,
+                mission_name: None,
+            }),
+            GameEvent::MissionEnd(MissionEnd {
+                timestamp: ts(),
+                mission_id: None,
+                outcome: None,
+            }),
+            GameEvent::ShopBuyRequest(ShopBuyRequest {
+                timestamp: ts(),
+                shop_id: None,
+                item_class: None,
+                quantity: None,
+                raw: "r".into(),
+            }),
+            GameEvent::ShopFlowResponse(ShopFlowResponse {
+                timestamp: ts(),
+                shop_id: None,
+                success: None,
+                raw: "r".into(),
+            }),
+            GameEvent::CommodityBuyRequest(CommodityBuyRequest {
+                timestamp: ts(),
+                commodity: None,
+                quantity: None,
+                raw: "r".into(),
+            }),
+            GameEvent::CommoditySellRequest(CommoditySellRequest {
+                timestamp: ts(),
+                commodity: None,
+                quantity: None,
+                raw: "r".into(),
+            }),
+            GameEvent::SessionEnd(SessionEnd {
+                timestamp: ts(),
+                kind: SessionEndKind::SystemQuit,
+            }),
+            GameEvent::RemoteMatch(RemoteMatch {
+                timestamp: ts(),
+                rule_id: "r".into(),
+                event_name: "name".into(),
+                fields: std::collections::BTreeMap::new(),
+            }),
+            GameEvent::BurstSummary(BurstSummary {
+                timestamp: ts(),
+                rule_id: "r".into(),
+                size: 5,
+                end_timestamp: ts(),
+                anchor_body_sample: None,
+            }),
+        ];
+
+        for ev in &events {
+            let key = event_type_key(ev);
+            let json = serde_json::to_string(ev).unwrap();
+            let expected_tag = format!("\"type\":\"{}\"", key);
+            assert!(
+                json.contains(&expected_tag),
+                "event_type_key {} does not match serde tag in {}",
+                key,
+                json,
+            );
+        }
+    }
+
+    #[test]
+    fn group_key_same_for_same_event_type_and_entity() {
+        let ev_a = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "1".into(),
+            zone: None,
+        });
+        let ev_b = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T01:00:00.000Z".into(),
+            body_class: "body_02_other".into(),
+            body_id: "2".into(),
+            zone: Some("Stanton2_Orison".into()),
+        });
+        let a = group_key_for(&ev_a, Some("alice"));
+        let b = group_key_for(&ev_b, Some("alice"));
+        assert_eq!(a, b);
+        assert_eq!(a, "player_death:player:alice");
+    }
+
+    #[test]
+    fn group_key_differs_for_different_entity() {
+        let ev = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "1".into(),
+            zone: None,
+        });
+        let a = group_key_for(&ev, Some("alice"));
+        let b = group_key_for(&ev, Some("bob"));
+        assert_ne!(a, b);
+        assert_eq!(a, "player_death:player:alice");
+        assert_eq!(b, "player_death:player:bob");
     }
 }
