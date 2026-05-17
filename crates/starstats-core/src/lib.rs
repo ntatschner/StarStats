@@ -29,8 +29,8 @@ pub use metadata::{
     EventSource, FieldProvenance,
 };
 pub use parser::{
-    classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
-    LogLine, ParseStats,
+    classify, classify_launcher_message, classify_with_metadata, parse_launcher_line,
+    structural_parse, LauncherLogLine, LogLine, ParseStats,
 };
 pub use parser_defs::{
     apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,

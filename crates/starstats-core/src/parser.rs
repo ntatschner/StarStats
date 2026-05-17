@@ -807,6 +807,25 @@ fn classify_body_prefix(ts: &str, body: &str) -> Option<GameEvent> {
     None
 }
 
+/// Classify a structurally-parsed line and stamp default Observed
+/// metadata in one call.
+///
+/// Returns `(event, metadata)`. Metadata is `Some(..)` exactly when
+/// the line classified — so the two `Option`s share the same
+/// presence. Inference passes that synthesise events or override
+/// `source` / `confidence` mutate the returned metadata; this helper
+/// only seeds the observed-default values.
+pub fn classify_with_metadata(
+    line: &LogLine<'_>,
+    claimed_handle: Option<&str>,
+) -> (Option<GameEvent>, Option<crate::metadata::EventMetadata>) {
+    let event = classify(line);
+    let meta = event
+        .as_ref()
+        .map(|e| crate::metadata::stamp(e, claimed_handle));
+    (event, meta)
+}
+
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -1454,5 +1473,33 @@ mod tests {
             "<2026-05-07T17:00:00.000Z> [Notice] some unrelated diagnostic chatter, no keyword";
         let p = structural_parse(line).unwrap();
         assert!(classify(&p).is_none());
+    }
+
+    #[test]
+    fn classify_with_metadata_stamps_primary_entity() {
+        // Reuse the same modern PlayerDeath fixture exercised by
+        // `classifies_modern_player_death_from_real_capture` — the
+        // helper must produce both the event and the default Observed
+        // metadata in lock-step.
+        let line = "<2026-05-01T18:46:15.085Z> [Notice] <Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]> Item 'body_01_noMagicPocket_9754924365641 - Class(body_01_noMagicPocket) - Context(Streamable Runtime-spawned) - Socpak()', Recorded data is: Port Name 'Body_ItemPort', Class GUID: 'dbaa8a7d-755f-4104-8b24-7b58fd1e76f6', KeptId: '9754924365641' [Team_CoreGameplayFeatures][Unknown]";
+        let parsed = structural_parse(line).expect("structural parse should succeed");
+        let (event, meta) = classify_with_metadata(&parsed, Some("CommanderJim"));
+        let m = meta.expect("PlayerDeath line should classify");
+        assert!(event.is_some());
+        assert_eq!(m.primary_entity.kind, crate::metadata::EntityKind::Player);
+        assert_eq!(m.primary_entity.id, "CommanderJim");
+        assert_eq!(m.source, crate::metadata::EventSource::Observed);
+        assert!((m.confidence - 1.0).abs() < f32::EPSILON);
+        assert!(m.group_key.starts_with("player_death:player:"));
+    }
+
+    #[test]
+    fn classify_with_metadata_returns_none_for_unclassified_line() {
+        let line =
+            "<2026-05-17T00:00:00.000Z> [Notice] some unrelated diagnostic chatter, no keyword";
+        let parsed = structural_parse(line).expect("structural parse should succeed");
+        let (event, meta) = classify_with_metadata(&parsed, None);
+        assert!(event.is_none());
+        assert!(meta.is_none());
     }
 }
