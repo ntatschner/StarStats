@@ -1321,6 +1321,17 @@ fn format_summary(event: &GameEvent) -> String {
             };
             format!("{} ({} events)", label, e.size)
         }
+        GameEvent::LocationChanged(e) => match &e.from {
+            Some(from) => format!("Location: {} → {}", from, e.to),
+            None => format!("Location: {}", e.to),
+        },
+        GameEvent::ShopRequestTimedOut(e) => match &e.item_class {
+            Some(item) => format!(
+                "Shop request timed out: {item} (after {}s)",
+                e.timed_out_after_secs
+            ),
+            None => format!("Shop request timed out (after {}s)", e.timed_out_after_secs),
+        },
     }
 }
 

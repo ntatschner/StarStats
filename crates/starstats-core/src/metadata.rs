@@ -344,6 +344,14 @@ pub fn primary_entity_for(event: &GameEvent, claimed_handle: Option<&str>) -> En
             id: e.rule_id.clone(),
             display_name: e.rule_id.clone(),
         },
+        GameEvent::LocationChanged(e) => EntityRef {
+            kind: EntityKind::Location,
+            id: e.to.clone(),
+            display_name: e.to.clone(),
+        },
+        GameEvent::ShopRequestTimedOut(e) => {
+            entity_with_fallback(EntityKind::Shop, e.shop_id.as_deref(), None)
+        }
     }
 }
 
@@ -382,6 +390,8 @@ pub fn event_type_key(event: &GameEvent) -> &'static str {
         GameEvent::SessionEnd(_) => "session_end",
         GameEvent::RemoteMatch(_) => "remote_match",
         GameEvent::BurstSummary(_) => "burst_summary",
+        GameEvent::LocationChanged(_) => "location_changed",
+        GameEvent::ShopRequestTimedOut(_) => "shop_request_timed_out",
     }
 }
 
@@ -692,6 +702,43 @@ mod tests {
     }
 
     #[test]
+    fn primary_entity_for_location_changed_uses_to_field() {
+        use crate::events::LocationChanged;
+        let ev = GameEvent::LocationChanged(LocationChanged {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            from: None,
+            to: "Daymar".into(),
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Location);
+        assert_eq!(e.id, "Daymar");
+        assert_eq!(e.display_name, "Daymar");
+    }
+
+    #[test]
+    fn primary_entity_for_shop_request_timed_out_falls_back_to_unknown() {
+        use crate::events::ShopRequestTimedOut;
+        let ev = GameEvent::ShopRequestTimedOut(ShopRequestTimedOut {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            shop_id: Some("shop_77".into()),
+            item_class: None,
+            timed_out_after_secs: 30,
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Shop);
+        assert_eq!(e.id, "shop_77");
+
+        let ev2 = GameEvent::ShopRequestTimedOut(ShopRequestTimedOut {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            shop_id: None,
+            item_class: None,
+            timed_out_after_secs: 30,
+        });
+        let e2 = primary_entity_for(&ev2, None);
+        assert_eq!(e2.id, "unknown");
+    }
+
+    #[test]
     fn primary_entity_for_game_crash_uses_fixed_system_id() {
         let ev = GameEvent::GameCrash(GameCrash {
             timestamp: "2026-05-17T00:00:00.000Z".into(),
@@ -779,10 +826,10 @@ mod tests {
         use crate::events::{
             ActorDeath, AttachmentReceived, BurstSummary, ChangeServer, CommodityBuyRequest,
             CommoditySellRequest, HudNotification, JoinPu, LauncherActivity, LauncherCategory,
-            LegacyLogin, MissionEnd, PlanetTerrainLoad, PlayerIncapacitated, ProcessInit,
-            QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn, SeedSolarSystem,
-            ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
-            VehicleStowed,
+            LegacyLogin, LocationChanged, MissionEnd, PlanetTerrainLoad, PlayerIncapacitated,
+            ProcessInit, QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn,
+            SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest,
+            ShopFlowResponse, ShopRequestTimedOut, VehicleStowed,
         };
         let ts = || "2026-05-17T00:00:00.000Z".to_string();
         let events: Vec<GameEvent> = vec![
@@ -955,6 +1002,17 @@ mod tests {
                 size: 5,
                 end_timestamp: ts(),
                 anchor_body_sample: None,
+            }),
+            GameEvent::LocationChanged(LocationChanged {
+                timestamp: ts(),
+                from: None,
+                to: "Daymar".into(),
+            }),
+            GameEvent::ShopRequestTimedOut(ShopRequestTimedOut {
+                timestamp: ts(),
+                shop_id: Some("shop_1".into()),
+                item_class: Some("rsi_rifle".into()),
+                timed_out_after_secs: 30,
             }),
         ];
 

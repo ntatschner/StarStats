@@ -41,6 +41,8 @@ pub enum GameEvent {
     SessionEnd(SessionEnd),
     RemoteMatch(RemoteMatch),
     BurstSummary(BurstSummary),
+    LocationChanged(LocationChanged),
+    ShopRequestTimedOut(ShopRequestTimedOut),
 }
 
 /// `<Init> Process sc-client started` — anchors the start of a session.
@@ -553,4 +555,74 @@ pub struct BurstSummary {
     /// every member. `None` if the producer didn't sample.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_body_sample: Option<String>,
+}
+
+// ---------------------------------------------------------------------
+// Inferred events (see crate::inference)
+//
+// These variants are emitted by the post-classify inference pass, not
+// directly by the line classifier. The engine never writes a single
+// log line that maps to them — they're derived from sequences of
+// observed events. Each carries the same shape as a normal `GameEvent`
+// so timeline consumers don't need a separate vocabulary.
+// ---------------------------------------------------------------------
+
+/// Player location transition derived from successive
+/// `PlanetTerrainLoad` events (or, in future rules, station / outpost
+/// signals). The engine emits no explicit "you entered X" event; this
+/// fills the gap so the timeline can render movement narratively.
+///
+/// `from` is `None` when the trigger event is the first location
+/// signal of the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationChanged {
+    pub timestamp: String,
+    pub from: Option<String>,
+    pub to: String,
+}
+
+/// Shop request that never received a matching `ShopFlowResponse`
+/// within the reconciliation window. Emitted by the inference pass so
+/// the timeline can surface a failed purchase instead of a dangling
+/// pending row.
+///
+/// `shop_id` and `item_class` mirror the originating request when
+/// present; `timed_out_after_secs` is the wall-clock cap the rule
+/// applied (typically 30s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShopRequestTimedOut {
+    pub timestamp: String,
+    pub shop_id: Option<String>,
+    pub item_class: Option<String>,
+    pub timed_out_after_secs: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_changed_serialises_with_snake_case_tag() {
+        let ev = GameEvent::LocationChanged(LocationChanged {
+            timestamp: "t".into(),
+            from: Some("Stanton1_Lorville".into()),
+            to: "OOC_Stanton_2b_Daymar".into(),
+        });
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"location_changed\""));
+        assert!(json.contains("\"to\":\"OOC_Stanton_2b_Daymar\""));
+    }
+
+    #[test]
+    fn shop_request_timed_out_serialises() {
+        let ev = GameEvent::ShopRequestTimedOut(ShopRequestTimedOut {
+            timestamp: "t".into(),
+            shop_id: Some("shop_1".into()),
+            item_class: Some("rsi_rifle".into()),
+            timed_out_after_secs: 30,
+        });
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"shop_request_timed_out\""));
+        assert!(json.contains("\"timed_out_after_secs\":30"));
+    }
 }

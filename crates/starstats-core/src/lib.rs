@@ -18,11 +18,11 @@ pub mod wire;
 pub use events::{
     ActorDeath, AttachmentReceived, BurstSummary, ChangeServer, CommodityBuyRequest,
     CommoditySellRequest, GameCrash, GameEvent, HudNotification, JoinPu, LauncherActivity,
-    LauncherCategory, LegacyLogin, LocationInventoryRequested, MissionEnd, MissionMarkerKind,
-    MissionStart, PlanetTerrainLoad, PlayerDeath, PlayerIncapacitated, ProcessInit,
-    QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn, SeedSolarSystem,
-    ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
-    VehicleStowed,
+    LauncherCategory, LegacyLogin, LocationChanged, LocationInventoryRequested, MissionEnd,
+    MissionMarkerKind, MissionStart, PlanetTerrainLoad, PlayerDeath, PlayerIncapacitated,
+    ProcessInit, QuantumTargetPhase, QuantumTargetSelected, RemoteMatch, ResolveSpawn,
+    SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
+    ShopRequestTimedOut, VehicleDestruction, VehicleStowed,
 };
 pub use metadata::{
     event_type_key, group_key_for, primary_entity_for, stamp, EntityKind, EntityRef, EventMetadata,

@@ -69,6 +69,8 @@ fn validate_game_event(event: &GameEvent) -> Result<(), ValidationError> {
         GameEvent::SessionEnd(e) => &e.timestamp,
         GameEvent::RemoteMatch(e) => &e.timestamp,
         GameEvent::BurstSummary(e) => &e.timestamp,
+        GameEvent::LocationChanged(e) => &e.timestamp,
+        GameEvent::ShopRequestTimedOut(e) => &e.timestamp,
     };
     check_timestamp(ts)?;
 
