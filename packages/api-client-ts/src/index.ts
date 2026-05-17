@@ -33,6 +33,11 @@ export type DeviceDto = components['schemas']['DeviceDto'];
 export type IngestResponse = components['schemas']['IngestResponse'];
 export type IngestBatch = components['schemas']['IngestBatchSchema'];
 export type EventEnvelope = components['schemas']['EventEnvelopeSchema'];
+export type EventMetadata = components['schemas']['EventMetadataSchema'];
+export type EntityRef = components['schemas']['EntityRefSchema'];
+export type EntityKind = components['schemas']['EntityKindSchema'];
+export type EventSource = components['schemas']['EventSourceSchema'];
+export type FieldProvenance = components['schemas']['FieldProvenanceSchema'];
 
 export type SummaryResponse = components['schemas']['SummaryResponse'];
 export type ListResponse = components['schemas']['ListResponse'];

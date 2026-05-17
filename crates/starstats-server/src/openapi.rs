@@ -210,6 +210,11 @@ impl Modify for SecurityAddon {
         ingest::IngestResponse,
         ingest::IngestBatchSchema,
         ingest::EventEnvelopeSchema,
+        ingest::EventMetadataSchema,
+        ingest::EntityRefSchema,
+        ingest::EntityKindSchema,
+        ingest::EventSourceSchema,
+        ingest::FieldProvenanceSchema,
         // Query
         query::EventsListResponse,
         query::EventDto,

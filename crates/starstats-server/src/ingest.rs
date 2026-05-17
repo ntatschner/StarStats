@@ -65,6 +65,94 @@ pub struct EventEnvelopeSchema {
     /// One of: `live`, `ptu`, `eptu`, `hotfix`, `tech`, `other`.
     pub source: String,
     pub source_offset: u64,
+    /// Cross-cutting metadata stamped by the client (or by the server
+    /// during the schema-v1 grace window). Optional on the wire so
+    /// envelopes produced by pre-v2 clients still deserialise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EventMetadataSchema>,
+}
+
+/// Categorical kind of the primary entity an event is about. Mirrors
+/// `starstats_core::metadata::EntityKind` (closed-vocabulary,
+/// snake_case on the wire).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum EntityKindSchema {
+    Player,
+    Vehicle,
+    Item,
+    Location,
+    Shop,
+    Mission,
+    Session,
+    System,
+}
+
+/// Where an event came from. Mirrors
+/// `starstats_core::metadata::EventSource`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum EventSourceSchema {
+    Observed,
+    Inferred,
+    Synthesized,
+}
+
+/// Reference to the primary entity an event is about. Mirrors
+/// `starstats_core::metadata::EntityRef`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[allow(dead_code)]
+pub struct EntityRefSchema {
+    pub kind: EntityKindSchema,
+    /// Stable identifier the timeline can dedupe / group on. The
+    /// sentinel value `"unknown"` is used when the source line did
+    /// not name one.
+    pub id: String,
+    /// Human-readable label. May differ from `id` (e.g. mission
+    /// title vs UUID).
+    pub display_name: String,
+}
+
+/// Per-field provenance. Mirrors
+/// `starstats_core::metadata::FieldProvenance`. Externally-tagged on
+/// `type` with `observed` / `inferred_from` discriminators.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum FieldProvenanceSchema {
+    Observed,
+    InferredFrom {
+        source_event_ids: Vec<String>,
+        rule_id: String,
+    },
+}
+
+/// Cross-cutting event metadata. Mirrors
+/// `starstats_core::metadata::EventMetadata`. See the core module
+/// docs for the design rationale.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[allow(dead_code)]
+pub struct EventMetadataSchema {
+    pub primary_entity: EntityRefSchema,
+    pub source: EventSourceSchema,
+    /// Confidence in `[0.0, 1.0]`. Observed events anchor at `1.0`.
+    pub confidence: f32,
+    /// Precomputed key used by the timeline to collapse near-duplicate
+    /// rows: `"{event_type}:{entity_kind}:{entity_id}"`.
+    pub group_key: String,
+    /// Per-field provenance map. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub field_provenance: std::collections::BTreeMap<String, FieldProvenanceSchema>,
+    /// Idempotency keys of the source events that triggered an
+    /// inferred event. Empty for observed / synthesized events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inference_inputs: Vec<String>,
+    /// Rule that produced an inferred event. None for observed /
+    /// synthesized events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
 }
 
 #[utoipa::path(

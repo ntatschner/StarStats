@@ -2068,6 +2068,31 @@ export interface components {
         EmailChangeVerifyResponse: {
             email: string;
         };
+        /**
+         * @description Categorical kind of the primary entity an event is about. Mirrors
+         *     `starstats_core::metadata::EntityKind` (closed-vocabulary,
+         *     snake_case on the wire).
+         * @enum {string}
+         */
+        EntityKindSchema: "player" | "vehicle" | "item" | "location" | "shop" | "mission" | "session" | "system";
+        /**
+         * @description Reference to the primary entity an event is about. Mirrors
+         *     `starstats_core::metadata::EntityRef`.
+         */
+        EntityRefSchema: {
+            /**
+             * @description Human-readable label. May differ from `id` (e.g. mission
+             *     title vs UUID).
+             */
+            display_name: string;
+            /**
+             * @description Stable identifier the timeline can dedupe / group on. The
+             *     sentinel value `"unknown"` is used when the source line did
+             *     not name one.
+             */
+            id: string;
+            kind: components["schemas"]["EntityKindSchema"];
+        };
         EventDto: {
             /** Format: date-time */
             event_timestamp?: string | null;
@@ -2101,12 +2126,52 @@ export interface components {
              */
             event: Record<string, never>;
             idempotency_key: string;
+            metadata?: null | components["schemas"]["EventMetadataSchema"];
             raw_line: string;
             /** @description One of: `live`, `ptu`, `eptu`, `hotfix`, `tech`, `other`. */
             source: string;
             /** Format: int64 */
             source_offset: number;
         };
+        /**
+         * @description Cross-cutting event metadata. Mirrors
+         *     `starstats_core::metadata::EventMetadata`. See the core module
+         *     docs for the design rationale.
+         */
+        EventMetadataSchema: {
+            /**
+             * Format: float
+             * @description Confidence in `[0.0, 1.0]`. Observed events anchor at `1.0`.
+             */
+            confidence: number;
+            /** @description Per-field provenance map. Omitted from the wire when empty. */
+            field_provenance?: {
+                [key: string]: components["schemas"]["FieldProvenanceSchema"];
+            };
+            /**
+             * @description Precomputed key used by the timeline to collapse near-duplicate
+             *     rows: `"{event_type}:{entity_kind}:{entity_id}"`.
+             */
+            group_key: string;
+            /**
+             * @description Idempotency keys of the source events that triggered an
+             *     inferred event. Empty for observed / synthesized events.
+             */
+            inference_inputs?: string[];
+            primary_entity: components["schemas"]["EntityRefSchema"];
+            /**
+             * @description Rule that produced an inferred event. None for observed /
+             *     synthesized events.
+             */
+            rule_id?: string | null;
+            source: components["schemas"]["EventSourceSchema"];
+        };
+        /**
+         * @description Where an event came from. Mirrors
+         *     `starstats_core::metadata::EventSource`.
+         * @enum {string}
+         */
+        EventSourceSchema: "observed" | "inferred" | "synthesized";
         EventTypeBreakdownResponse: {
             /**
              * @description Echo of the resolved range — clients use it for the column
@@ -2126,6 +2191,20 @@ export interface components {
             events: components["schemas"]["EventDto"][];
             /** Format: int64 */
             next_after?: number | null;
+        };
+        /**
+         * @description Per-field provenance. Mirrors
+         *     `starstats_core::metadata::FieldProvenance`. Externally-tagged on
+         *     `type` with `observed` / `inferred_from` discriminators.
+         */
+        FieldProvenanceSchema: {
+            /** @enum {string} */
+            type: "observed";
+        } | {
+            rule_id: string;
+            source_event_ids: string[];
+            /** @enum {string} */
+            type: "inferred_from";
         };
         FlagRequest: {
             /** @description Optional free-text reason. Capped at FLAG_REASON_MAX_LEN. */
