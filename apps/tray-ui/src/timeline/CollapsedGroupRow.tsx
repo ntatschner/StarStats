@@ -5,9 +5,9 @@
  * clicking the count badge drills in to reveal the full member list.
  *
  * `InferredBadge` renders next to the summary when the anchor's
- * `metadata.source === 'inferred'`. Phase 3 will surface per-field
- * provenance + the source-event trail here; for now we only show the
- * "inferred + confidence" pill.
+ * `metadata.source === 'inferred'`. `FieldProvenancePills` renders one
+ * small pill per field whose provenance is `inferred_from`, surfacing
+ * which fields on the anchor were derived rather than observed.
  */
 
 import { useState } from 'react';
@@ -17,6 +17,57 @@ import { InferredBadge } from './InferredBadge';
 
 interface Props {
   row: TimelineRow;
+}
+
+interface InferredFromProvenance {
+  type: 'inferred_from';
+  source_event_ids: string[];
+  rule_id: string;
+}
+
+interface ObservedProvenance {
+  type: 'observed';
+}
+
+type FieldProvenance = InferredFromProvenance | ObservedProvenance;
+
+function FieldProvenancePills({
+  provenance,
+}: {
+  provenance: Record<string, FieldProvenance> | undefined | null;
+}) {
+  if (provenance == null) return null;
+  const entries = Object.entries(provenance).filter(
+    (entry): entry is [string, InferredFromProvenance] =>
+      entry[1]?.type === 'inferred_from'
+  );
+  if (entries.length === 0) return null;
+  return (
+    <>
+      {entries.map(([field, p]) => (
+        <span
+          key={field}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '2px 8px',
+            borderRadius: 'var(--r-pill)',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            color: 'var(--fg-dim)',
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            fontFamily: 'var(--font-sans)',
+          }}
+          title={`Inferred via rule: ${p.rule_id ?? 'unknown'}`}
+        >
+          {`${field} inferred`}
+        </span>
+      ))}
+    </>
+  );
 }
 
 function eventTypeOf(ev: EventEnvelope): string {
@@ -40,6 +91,10 @@ export function CollapsedGroupRow({ row }: Props) {
   const isFolded = count > 1;
   const inferred = anchor.metadata?.source === 'inferred';
   const confidence = anchor.metadata?.confidence ?? 1;
+  const fieldProvenance = anchor.metadata?.field_provenance as
+    | Record<string, FieldProvenance>
+    | undefined
+    | null;
 
   const summary = eventTypeOf(anchor);
   const timestamp = eventTimestampOf(anchor);
@@ -85,6 +140,7 @@ export function CollapsedGroupRow({ row }: Props) {
             {summary}
           </span>
           {inferred && <InferredBadge confidence={confidence} />}
+          <FieldProvenancePills provenance={fieldProvenance} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {timestamp && (
