@@ -230,31 +230,87 @@ export default async function SharingPage(props: {
   // user understands they're updating an existing row.
   const isEditing = prefilledHandle !== '';
 
-  // Load the four parallel data sources. SpiceDB outages map to
-  // `degraded` so the page still renders with a clear banner instead
-  // of crashing.
+  // Load the four parallel data sources. Per-call settling so a
+  // single endpoint hiccup doesn't take down the whole page; the
+  // surviving sections still render with whatever data came back.
+  // SpiceDB 503 on any call flips to a clear "temporarily
+  // unavailable" banner; only an all-fail (every call rejected with
+  // something other than 401/503) falls through to the generic
+  // error fallback. 401 on any call short-circuits to login.
   let visibility: VisibilityResponse | null = null;
   let shares: ListSharesResponse | null = null;
   let inbound: ListSharedWithMeResponse | null = null;
   let myOrgs: ListOrgsResponse | null = null;
   let degraded: 'spicedb_unavailable' | 'unknown' | null = null;
-  try {
-    [visibility, shares, inbound, myOrgs] = await Promise.all([
-      getVisibility(session.token),
-      listShares(session.token),
-      listSharedWithMe(session.token),
-      listOrgs(session.token),
-    ]);
-  } catch (e) {
-    if (e instanceof ApiCallError && e.status === 401) {
+
+  const [visRes, sharesRes, inboundRes, orgsRes] = await Promise.allSettled([
+    getVisibility(session.token),
+    listShares(session.token),
+    listSharedWithMe(session.token),
+    listOrgs(session.token),
+  ]);
+
+  // 401 on any call -> re-auth. Look across all 4 results so a
+  // refresh-token failure on one of them still kicks us to login
+  // instead of half-rendering as anonymous.
+  for (const r of [visRes, sharesRes, inboundRes, orgsRes]) {
+    if (
+      r.status === 'rejected' &&
+      r.reason instanceof ApiCallError &&
+      r.reason.status === 401
+    ) {
       redirect('/auth/login?next=/sharing');
     }
-    if (e instanceof ApiCallError && e.status === 503) {
+  }
+
+  // SpiceDB 503 on any call -> show the temporarily-unavailable
+  // banner. Don't try to render partial state in that case — the
+  // page leans on ReBAC for almost every section.
+  for (const r of [visRes, sharesRes, inboundRes, orgsRes]) {
+    if (
+      r.status === 'rejected' &&
+      r.reason instanceof ApiCallError &&
+      r.reason.status === 503
+    ) {
       degraded = 'spicedb_unavailable';
-    } else {
-      logger.error({ err: e }, 'load sharing state failed');
-      degraded = 'unknown';
+      break;
     }
+  }
+
+  if (degraded === null) {
+    if (visRes.status === 'fulfilled') visibility = visRes.value;
+    if (sharesRes.status === 'fulfilled') shares = sharesRes.value;
+    if (inboundRes.status === 'fulfilled') inbound = inboundRes.value;
+    if (orgsRes.status === 'fulfilled') myOrgs = orgsRes.value;
+
+    // Log every rejection individually so server logs name the
+    // failing endpoint instead of swallowing it under one umbrella.
+    // Status is captured when it's an ApiCallError so the failure
+    // mode (4xx vs 5xx vs network) is visible without a full stack.
+    for (const [label, r] of [
+      ['getVisibility', visRes],
+      ['listShares', sharesRes],
+      ['listSharedWithMe', inboundRes],
+      ['listOrgs', orgsRes],
+    ] as const) {
+      if (r.status === 'rejected') {
+        const status =
+          r.reason instanceof ApiCallError ? r.reason.status : undefined;
+        logger.error(
+          { err: r.reason, call: label, status },
+          'sharing data fetch rejected',
+        );
+      }
+    }
+
+    // Fall back to the generic error fallback only when EVERY call
+    // failed — partial data is better than no data.
+    const allFailed =
+      visRes.status === 'rejected' &&
+      sharesRes.status === 'rejected' &&
+      inboundRes.status === 'rejected' &&
+      orgsRes.status === 'rejected';
+    if (allFailed) degraded = 'unknown';
   }
 
   // -- Server actions --------------------------------------------------
