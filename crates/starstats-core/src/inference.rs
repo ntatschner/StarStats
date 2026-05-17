@@ -62,21 +62,70 @@ pub fn infer(events: &[EventEnvelope], config: &InferenceConfig) -> Vec<Inferred
     rule_implicit_death_after_vehicle_destruction(events, config, &mut out);
     rule_implicit_location_change(events, config, &mut out);
     rule_implicit_shop_request_timeout(events, config, &mut out);
+    reconcile_supersedes(events, config, &mut out);
     out
 }
 
-/// Parse the wire timestamps as fixed-offset RFC3339. Returns `None`
-/// when the field doesn't parse — rules treat that as "skip this
-/// pairing" rather than failing the whole pass.
-fn parse_ts(ts: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(ts).ok()
+/// Mark inferred events as superseded when the observed stream later
+/// produces an event of the same `(event_type, primary_entity)`
+/// within `reconciliation_secs`. The observed event is the canonical
+/// row the timeline shows; the inferred row is retained in storage
+/// (with the back-reference set) so an audit pass can reconstruct
+/// why we initially guessed.
+///
+/// Walks the stream once per inferred event — `inferred.len()` is
+/// expected to be small (a handful per session, typically). The
+/// quadratic factor is bounded by `config.window_size` because we
+/// stop scanning as soon as we leave the reconciliation window.
+fn reconcile_supersedes(
+    events: &[EventEnvelope],
+    config: &InferenceConfig,
+    inferred: &mut [InferredEvent],
+) {
+    for row in inferred.iter_mut() {
+        let inferred_key = event_type_key(&row.event);
+        let inferred_entity = &row.metadata.primary_entity;
+        let Some(inferred_ts) = parse_ts(timestamp_of(&row.event)) else {
+            continue;
+        };
+
+        for env in events {
+            let Some(observed) = env.event.as_ref() else {
+                continue;
+            };
+            // An inferred row can only be superseded by an observed
+            // event — never by another inferred row. The wire-level
+            // envelopes coming into this pass are all observed
+            // (metadata.source defaults to None / Observed); inferred
+            // outputs live only in the InferredEvent vec we're
+            // mutating.
+            if event_type_key(observed) != inferred_key {
+                continue;
+            }
+            let observed_entity = primary_entity_for(observed, None);
+            if observed_entity.kind != inferred_entity.kind
+                || observed_entity.id != inferred_entity.id
+            {
+                continue;
+            }
+            let Some(observed_ts) = parse_ts(timestamp_of(observed)) else {
+                continue;
+            };
+            let delta = (observed_ts - inferred_ts).num_seconds();
+            if delta < 0 || delta > config.reconciliation_secs {
+                continue;
+            }
+            row.superseded_by = Some(env.idempotency_key.clone());
+            break;
+        }
+    }
 }
 
-/// Extract the parsed game event's timestamp, when the envelope
-/// actually carries a classified event.
-fn envelope_timestamp(env: &EventEnvelope) -> Option<&str> {
-    let ev = env.event.as_ref()?;
-    Some(match ev {
+/// Extract a timestamp out of an owned `GameEvent`. Mirrors
+/// [`envelope_timestamp`] for the inferred-event path where we hold
+/// the event directly (not wrapped in an envelope).
+fn timestamp_of(event: &GameEvent) -> &str {
+    match event {
         GameEvent::ProcessInit(e) => &e.timestamp,
         GameEvent::LegacyLogin(e) => &e.timestamp,
         GameEvent::JoinPu(e) => &e.timestamp,
@@ -106,7 +155,20 @@ fn envelope_timestamp(env: &EventEnvelope) -> Option<&str> {
         GameEvent::BurstSummary(e) => &e.timestamp,
         GameEvent::LocationChanged(e) => &e.timestamp,
         GameEvent::ShopRequestTimedOut(e) => &e.timestamp,
-    })
+    }
+}
+
+/// Parse the wire timestamps as fixed-offset RFC3339. Returns `None`
+/// when the field doesn't parse — rules treat that as "skip this
+/// pairing" rather than failing the whole pass.
+fn parse_ts(ts: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(ts).ok()
+}
+
+/// Extract the parsed game event's timestamp, when the envelope
+/// actually carries a classified event.
+fn envelope_timestamp(env: &EventEnvelope) -> Option<&str> {
+    env.event.as_ref().map(timestamp_of)
 }
 
 /// Build the inferred-event metadata block. Centralised so every rule
@@ -387,7 +449,7 @@ fn rule_implicit_shop_request_timeout(
 mod tests {
     use super::*;
     use crate::events::{
-        LocationInventoryRequested, PlanetTerrainLoad, ResolveSpawn, ShopBuyRequest,
+        LocationInventoryRequested, PlanetTerrainLoad, PlayerDeath, ResolveSpawn, ShopBuyRequest,
         ShopFlowResponse, VehicleDestruction,
     };
     use crate::wire::LogSource;
@@ -610,6 +672,83 @@ mod tests {
             .filter(|i| matches!(i.event, GameEvent::ShopRequestTimedOut(_)))
             .collect();
         assert!(timeouts.is_empty());
+    }
+
+    fn vehicle_destruction(ts: &str, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::VehicleDestruction(VehicleDestruction {
+                timestamp: ts.into(),
+                vehicle_class: "Cutlass".into(),
+                vehicle_id: Some("v1".into()),
+                destroy_level: 2,
+                caused_by: "self".into(),
+                zone: None,
+            }),
+            idk,
+        )
+    }
+
+    fn resolve_spawn(ts: &str, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::ResolveSpawn(ResolveSpawn {
+                timestamp: ts.into(),
+                player_geid: "Jim".into(),
+                fallback: false,
+            }),
+            idk,
+        )
+    }
+
+    fn observed_player_death(ts: &str, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::PlayerDeath(PlayerDeath {
+                timestamp: ts.into(),
+                body_class: "body_01_noMagicPocket".into(),
+                body_id: "id1".into(),
+                zone: None,
+            }),
+            idk,
+        )
+    }
+
+    #[test]
+    fn inferred_death_superseded_by_observed_player_death() {
+        // Vehicle blows up → spawn resolves → real PlayerDeath lands 6s
+        // after the synthesised one. Default reconciliation window is 5s,
+        // so we widen it for this case.
+        let veh = vehicle_destruction("2026-05-17T14:02:30Z", "envA");
+        let resp = resolve_spawn("2026-05-17T14:02:35Z", "envB");
+        let observed = observed_player_death("2026-05-17T14:02:33Z", "envObsDeath");
+        let cfg = InferenceConfig {
+            reconciliation_secs: 10,
+            ..InferenceConfig::default()
+        };
+        let out = infer(&[veh, resp, observed], &cfg);
+        let inferred_deaths: Vec<_> = out
+            .iter()
+            .filter(|i| matches!(i.event, GameEvent::PlayerDeath(_)))
+            .collect();
+        assert_eq!(inferred_deaths.len(), 1);
+        assert_eq!(
+            inferred_deaths[0].superseded_by.as_deref(),
+            Some("envObsDeath")
+        );
+    }
+
+    #[test]
+    fn inferred_death_not_superseded_when_observed_too_late() {
+        let veh = vehicle_destruction("2026-05-17T14:02:30Z", "envA");
+        let resp = resolve_spawn("2026-05-17T14:02:35Z", "envB");
+        // Observed death lands 20s after the inferred timestamp —
+        // outside the default 5s window.
+        let observed = observed_player_death("2026-05-17T14:02:50Z", "envObsDeath");
+        let out = infer(&[veh, resp, observed], &InferenceConfig::default());
+        let inferred_deaths: Vec<_> = out
+            .iter()
+            .filter(|i| matches!(i.event, GameEvent::PlayerDeath(_)))
+            .collect();
+        assert_eq!(inferred_deaths.len(), 1);
+        assert!(inferred_deaths[0].superseded_by.is_none());
     }
 
     #[test]
