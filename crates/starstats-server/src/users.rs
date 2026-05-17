@@ -271,6 +271,33 @@ pub trait UserStore: Send + Sync + 'static {
     /// [`RecoveryCodeStore::clear_for_user`] — this method handles
     /// the user row only.
     async fn disable_totp(&self, user_id: Uuid) -> Result<(), UserError>;
+
+    // -- Audit v2.1 §C — abuse-signal auto-pause -----------------------
+    //
+    // Tiny pair of helpers backing the cross-report-cluster pause: the
+    // report handler stamps `shares_paused_until` when the threshold
+    // crosses, and the add_share handler reads it on every new grant.
+    // Both work by handle so the report path can stamp the owner
+    // without a separate id lookup, and the add_share path can gate
+    // off `auth.preferred_username` directly.
+
+    /// Returns the current `shares_paused_until` value for the owner
+    /// of `handle`. `Ok(None)` covers BOTH "user does not exist" and
+    /// "column is NULL" — the gate treats them the same (not paused).
+    async fn get_shares_paused_until_by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<DateTime<Utc>>, UserError>;
+
+    /// Stamp `shares_paused_until = until` on the user identified by
+    /// `handle`. Pass `None` to clear (admin-initiated unpause).
+    /// Idempotent — unknown handles silently succeed with zero rows
+    /// touched, mirroring the lookup contract above.
+    async fn set_shares_paused_until_by_handle(
+        &self,
+        handle: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<(), UserError>;
 }
 
 // -- Argon2 helpers --------------------------------------------------
@@ -828,6 +855,43 @@ impl UserStore for PostgresUserStore {
         Ok(())
     }
 
+    async fn get_shares_paused_until_by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<DateTime<Utc>>, UserError> {
+        let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+            r#"
+            SELECT shares_paused_until
+              FROM users
+             WHERE lower(claimed_handle) = lower($1)
+            "#,
+        )
+        .bind(handle)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(t,)| t))
+    }
+
+    async fn set_shares_paused_until_by_handle(
+        &self,
+        handle: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<(), UserError> {
+        sqlx::query(
+            r#"
+            UPDATE users
+               SET shares_paused_until = $2,
+                   updated_at = NOW()
+             WHERE lower(claimed_handle) = lower($1)
+            "#,
+        )
+        .bind(handle)
+        .bind(until)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // -- Account deletion: pseudonymise events, then drop the user ----
     //
     // `events` rows are keyed by `claimed_handle`, not by `user_id`,
@@ -922,6 +986,13 @@ pub mod test_support {
         // the `User` struct in the in-memory impl too, mirroring the
         // Postgres `get_totp_secret` separate-query pattern.
         pub totp_secrets: Mutex<HashMap<Uuid, (Vec<u8>, Vec<u8>)>>,
+        // Audit v2.1 §C — abuse-signal auto-pause. Keyed by
+        // lower(claimed_handle). Lives off `User` for the same reason
+        // as `totp_secrets`: the field is only ever read via a
+        // dedicated query (`get_shares_paused_until_by_handle`), and
+        // keeping it off the struct avoids touching every existing
+        // SELECT in the Postgres impl.
+        pub shares_paused: Mutex<HashMap<String, DateTime<Utc>>>,
     }
 
     impl MemoryUserStore {
@@ -1285,6 +1356,32 @@ pub mod test_support {
                     u.pending_email = None;
                     u.pending_email_expires_at = None;
                     rows.insert(staged, u);
+                }
+            }
+            Ok(())
+        }
+
+        async fn get_shares_paused_until_by_handle(
+            &self,
+            handle: &str,
+        ) -> Result<Option<DateTime<Utc>>, UserError> {
+            let key = handle.to_ascii_lowercase();
+            Ok(self.shares_paused.lock().unwrap().get(&key).copied())
+        }
+
+        async fn set_shares_paused_until_by_handle(
+            &self,
+            handle: &str,
+            until: Option<DateTime<Utc>>,
+        ) -> Result<(), UserError> {
+            let key = handle.to_ascii_lowercase();
+            let mut map = self.shares_paused.lock().unwrap();
+            match until {
+                Some(t) => {
+                    map.insert(key, t);
+                }
+                None => {
+                    map.remove(&key);
                 }
             }
             Ok(())

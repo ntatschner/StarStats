@@ -665,6 +665,35 @@ pub async fn add_share<U: UserStore>(
         return resp;
     }
 
+    // Audit v2.1 §C abuse-signal: auto-pause gate. When the
+    // cross-report-cluster threshold fires (see
+    // `check_cross_report_cluster` below), the report handler stamps
+    // `shares_paused_until` on this owner with a short ban. While that
+    // timestamp is in the future, every new outbound grant is
+    // rejected up-front — before the SpiceDB write, before the
+    // recipient lookup, before the audit row. NULL/past timestamps
+    // fall through silently. Soft-fail posture: a query hiccup logs
+    // and skips the gate rather than blocking the legit caller.
+    match users
+        .get_shares_paused_until_by_handle(&auth.preferred_username)
+        .await
+    {
+        Ok(Some(until)) if until > Utc::now() => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorBody {
+                    error: "shares_paused".into(),
+                    detail: Some(format!("paused until {}", until.to_rfc3339())),
+                }),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "shares_paused_until lookup failed; skipping gate");
+        }
+    }
+
     let recipient = req.recipient_handle.trim();
     if !validate_handle(recipient) {
         return err(StatusCode::BAD_REQUEST, "invalid_recipient_handle");
@@ -1683,6 +1712,7 @@ pub async fn report_share(
     auth: AuthenticatedUser,
     Extension(reports): Extension<Arc<dyn ShareReportStore>>,
     Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Extension(users): Extension<Arc<dyn UserStore>>,
     Json(body): Json<ReportShareRequest>,
 ) -> Response {
     // Validate handles (cheap, same rules as the rest of the file).
@@ -1766,12 +1796,19 @@ pub async fn report_share(
 
     // Audit v2.1 §C abuse-signal: cross-report cluster. Once the
     // owner accumulates >= CLUSTER_REPORT_THRESHOLD reports inside
-    // CLUSTER_WINDOW, emit a signal row so moderators see the
-    // pattern in the audit log. The audit's "auto-pause new
-    // outbound shares" is deferred — it needs a users.shares_paused
-    // column we haven't added yet; signal-only is the safe starting
-    // point ("tune after a week of production data").
-    check_cross_report_cluster(reports.as_ref(), audit.as_ref(), &row.owner_handle).await;
+    // CLUSTER_WINDOW, emit a signal row AND stamp
+    // `users.shares_paused_until` with a short ban (PAUSE_DURATION).
+    // The signal row gives moderators visibility; the column flip
+    // gates `add_share` for the duration. Both writes are best-effort
+    // — a DB hiccup on either degrades to a logged warning, not a
+    // poisoned response.
+    check_cross_report_cluster(
+        reports.as_ref(),
+        audit.as_ref(),
+        users.as_ref(),
+        &row.owner_handle,
+    )
+    .await;
 
     (
         StatusCode::OK,
@@ -1795,13 +1832,15 @@ const RAPID_GRANT_THRESHOLD: usize = 15;
 const RAPID_GRANT_WINDOW_HOURS: i64 = 24;
 
 /// Cross-report cluster: same number of reports against one owner
-/// inside CLUSTER_WINDOW emits a signal row. The audit's
-/// "auto-pause new outbound shares" is documented as a follow-up
-/// once we have a users.shares_paused column; this ships the
-/// detection so moderators have the breadcrumb even without the
-/// enforcement.
+/// inside CLUSTER_WINDOW emits a signal row AND stamps
+/// `users.shares_paused_until = now() + PAUSE_DURATION_HOURS` so the
+/// next `add_share` from that owner returns 403 `shares_paused`. The
+/// pause is short by design — long enough to deter a flood, short
+/// enough that NULL'ing the column manually is rarely needed. A
+/// moderator can still clear it early via the admin surface.
 const CLUSTER_REPORT_THRESHOLD: usize = 3;
 const CLUSTER_WINDOW_HOURS: i64 = 72;
+const PAUSE_DURATION_HOURS: i64 = 24;
 
 async fn check_rapid_grant(
     audit_query: &dyn AuditQuery,
@@ -1856,6 +1895,7 @@ async fn check_rapid_grant(
 async fn check_cross_report_cluster(
     reports: &dyn ShareReportStore,
     audit: &dyn AuditLog,
+    users: &dyn UserStore,
     owner_handle: &str,
 ) {
     let since = Utc::now() - chrono::Duration::hours(CLUSTER_WINDOW_HOURS);
@@ -1879,6 +1919,24 @@ async fn check_cross_report_cluster(
     if n < CLUSTER_REPORT_THRESHOLD {
         return;
     }
+
+    // Stamp the pause first so the audit row's `paused_until` field
+    // reflects the timestamp we actually wrote. If the column write
+    // fails, the audit row still goes out with `auto_pause_applied:
+    // false` so moderators see the detection even when enforcement
+    // misfires.
+    let paused_until = Utc::now() + chrono::Duration::hours(PAUSE_DURATION_HOURS);
+    let pause_applied = match users
+        .set_shares_paused_until_by_handle(owner_handle, Some(paused_until))
+        .await
+    {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "shares_paused_until stamp failed; audit-only");
+            false
+        }
+    };
+
     if let Err(e) = audit
         .append(AuditEntry {
             actor_sub: None,
@@ -1888,8 +1946,9 @@ async fn check_cross_report_cluster(
                 "window_hours": CLUSTER_WINDOW_HOURS,
                 "threshold": CLUSTER_REPORT_THRESHOLD,
                 "observed_count": n,
-                "auto_pause_applied": false,
-                "note": "Detection only; auto-pause deferred until users.shares_paused column lands.",
+                "auto_pause_applied": pause_applied,
+                "paused_until": pause_applied.then_some(paused_until),
+                "pause_duration_hours": PAUSE_DURATION_HOURS,
             }),
         })
         .await
@@ -2175,6 +2234,86 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "cannot_share_with_self");
         assert!(audit_mem.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_share_returns_403_when_owner_is_paused() {
+        // Audit v2.1 §C: when shares_paused_until is in the future, the
+        // gate fires BEFORE the recipient lookup / SpiceDB write — so a
+        // 403 shares_paused short-circuits even with no spicedb wired,
+        // no recipient seeded, and a malformed body. That's the whole
+        // point of stamping the column at the top of add_share.
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit_mem = Arc::new(MemoryAuditLog::default());
+        let audit: Arc<dyn AuditLog> = audit_mem.clone();
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        users
+            .set_shares_paused_until_by_handle(
+                "Alice",
+                Some(Utc::now() + chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/me/share")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"recipient_handle":"bob"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "shares_paused");
+        // No audit row for a refused grant — only the pause-fire path
+        // writes one, and that's not exercised here.
+        assert!(audit_mem.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_share_passes_pause_gate_when_expired() {
+        // Past timestamps fall through silently — the gate is a check
+        // against "is the ban currently active?", not "has this user
+        // ever been paused?". A past timestamp should NOT short-circuit;
+        // the request continues until the next validation gate (here,
+        // the missing spicedb sidecar → 503).
+        let users = Arc::new(MemoryUserStore::new());
+        let (issuer, verifier) = fresh_pair();
+        let audit: Arc<dyn AuditLog> = Arc::new(MemoryAuditLog::default());
+        let spicedb: Arc<Option<SpicedbClient>> = Arc::new(None);
+        let (_, token) = seed_user(&users, "alice@example.com", "Alice", &issuer).await;
+        // Stamp a past timestamp — the gate should NOT fire.
+        users
+            .set_shares_paused_until_by_handle(
+                "Alice",
+                Some(Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        // Seed the recipient too — otherwise we'd 404 at the
+        // recipient lookup, which would also be a pass for this test
+        // but obscures whether we hit the pause gate first.
+        let phc = hash_password("password-123-abcdef").unwrap();
+        users.create("bob@example.com", &phc, "bob").await.unwrap();
+        let app = router(users, Arc::new(verifier), spicedb, audit);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/me/share")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"recipient_handle":"bob"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let (status, body) = read_body(resp).await;
+        // Got past the pause gate; the next gate (no spicedb sidecar
+        // wired in the test router) returns 503.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "spicedb_unavailable");
     }
 
     #[tokio::test]

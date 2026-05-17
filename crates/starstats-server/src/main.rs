@@ -342,6 +342,11 @@ async fn main() -> anyhow::Result<()> {
     let share_metadata_dyn: Arc<dyn crate::share_metadata::ShareMetadataStore> =
         share_metadata.clone();
     let share_reports_dyn: Arc<dyn crate::share_reports::ShareReportStore> = share_reports.clone();
+    // Audit v2.1 §C — abuse-signal auto-pause needs a dyn-cast UserStore
+    // so the report handler (which is monomorphic over the trait via an
+    // Extension, not a State generic like add_share) can stamp
+    // shares_paused_until on the owner.
+    let users_dyn: Arc<dyn crate::users::UserStore> = users.clone();
     let rsi_router = rsi_verify_routes::routes(users.clone());
     let profile_router = rsi_profile_routes::routes(users.clone(), profiles.clone());
     let rsi_orgs_router = rsi_org_routes::routes(users.clone(), rsi_orgs.clone());
@@ -477,6 +482,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(spicedb))
         .layer(Extension(share_metadata_dyn))
         .layer(Extension(share_reports_dyn))
+        .layer(Extension(users_dyn))
         .layer(Extension(audit_query))
         .layer(Extension(minio_mirror))
         .layer(Extension(mailer))
