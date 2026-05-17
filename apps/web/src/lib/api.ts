@@ -752,6 +752,10 @@ export type AdminSharingOverview =
   apiSchema['schemas']['AdminSharingOverview'];
 export type TopGranter = apiSchema['schemas']['TopGranter'];
 export type ScopeHistogram = apiSchema['schemas']['ScopeHistogram'];
+export type UserSharingContext =
+  apiSchema['schemas']['UserSharingContext'];
+export type UserShareEdge =
+  apiSchema['schemas']['UserShareEdge'];
 export type ReportShareRequest =
   apiSchema['schemas']['ReportShareRequest'];
 export type ReportShareResponse =
@@ -1086,6 +1090,23 @@ export async function getAdminSharingScopeHistogram(
   return request<ScopeHistogram>(
     'GET',
     '/v1/admin/sharing/scope-histogram',
+    undefined,
+    bearer,
+  );
+}
+
+/**
+ * Audit v2.1 §C — per-user sharing context for the admin user-detail
+ * sub-tab. One round-trip returns outbound + inbound shares + open
+ * reports involving this user (as reporter and as owner).
+ */
+export async function getAdminUserSharingContext(
+  bearer: string,
+  handle: string,
+): Promise<UserSharingContext> {
+  return request<UserSharingContext>(
+    'GET',
+    `/v1/admin/sharing/by-user/${encodeURIComponent(handle)}`,
     undefined,
     bearer,
   );

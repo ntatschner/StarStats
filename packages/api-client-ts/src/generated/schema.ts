@@ -178,6 +178,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/sharing/by-user/{handle}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_user_sharing_context"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/sharing/overview": {
         parameters: {
             query?: never;
@@ -3194,6 +3210,46 @@ export interface components {
              */
             theme?: string | null;
         };
+        UserShareEdge: {
+            /**
+             * @description The OTHER party on the share. For an outbound row, this is
+             *     the recipient; for an inbound row, this is the owner. Saves
+             *     the client from having to track which end of the relation
+             *     they're looking at.
+             */
+            counterparty_handle: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            note?: string | null;
+            /**
+             * @description Stringified scope kind (`full | timeline | aggregates | tabs`).
+             *     `None` when the row has a NULL scope (legacy "full" default).
+             */
+            scope_kind?: string | null;
+        };
+        UserSharingContext: {
+            /**
+             * @description The handle that was looked up (case-preserved from the path
+             *     after Postgres lower() matching).
+             */
+            handle: string;
+            /** @description Shares OTHERS own where THIS user is the recipient — inbound. */
+            inbound_shares: components["schemas"]["UserShareEdge"][];
+            /** @description Shares THIS user owns — outbound, by recipient handle. */
+            outbound_shares: components["schemas"]["UserShareEdge"][];
+            /**
+             * @description Reports filed AGAINST shares this user owns. Most recent
+             *     first, capped at 50.
+             */
+            reports_against: components["schemas"]["ShareReportRowDto"][];
+            /**
+             * @description Reports this user has filed (any status). Most recent first,
+             *     capped at 50.
+             */
+            reports_filed: components["schemas"]["ShareReportRowDto"][];
+        };
         /** @description Wrapper for `GET /v1/reference/vehicles`. */
         VehicleListResponse: {
             vehicles: components["schemas"]["VehicleReference"][];
@@ -3654,6 +3710,57 @@ export interface operations {
             };
             /** @description Caller lacks moderator role */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_user_sharing_context: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description RSI handle (case-insensitive) */
+                handle: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-user sharing context */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserSharingContext"];
+                };
+            };
+            /** @description Empty handle */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

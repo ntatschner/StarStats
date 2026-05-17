@@ -452,6 +452,157 @@ pub async fn resolve_report(
     }
 }
 
+// -- /v1/admin/sharing/by-user/:handle -------------------------------
+//
+// Audit v2.1 §C admin sub-tab — per-user sharing context. One
+// round-trip returns everything a moderator needs to triage a
+// specific user's sharing footprint: outbound + inbound shares
+// from `share_metadata`, plus the open + recent reports involving
+// them (as reporter OR as the share's owner).
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserShareEdge {
+    /// The OTHER party on the share. For an outbound row, this is
+    /// the recipient; for an inbound row, this is the owner. Saves
+    /// the client from having to track which end of the relation
+    /// they're looking at.
+    pub counterparty_handle: String,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub note: Option<String>,
+    /// Stringified scope kind (`full | timeline | aggregates | tabs`).
+    /// `None` when the row has a NULL scope (legacy "full" default).
+    pub scope_kind: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserSharingContext {
+    /// The handle that was looked up (case-preserved from the path
+    /// after Postgres lower() matching).
+    pub handle: String,
+    /// Shares THIS user owns — outbound, by recipient handle.
+    pub outbound_shares: Vec<UserShareEdge>,
+    /// Shares OTHERS own where THIS user is the recipient — inbound.
+    pub inbound_shares: Vec<UserShareEdge>,
+    /// Reports this user has filed (any status). Most recent first,
+    /// capped at 50.
+    pub reports_filed: Vec<ShareReportRowDto>,
+    /// Reports filed AGAINST shares this user owns. Most recent
+    /// first, capped at 50.
+    pub reports_against: Vec<ShareReportRowDto>,
+}
+
+const PER_USER_REPORT_CAP: usize = 50;
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/sharing/by-user/{handle}",
+    tag = "admin",
+    params(("handle" = String, Path, description = "RSI handle (case-insensitive)")),
+    responses(
+        (status = 200, description = "Per-user sharing context", body = UserSharingContext),
+        (status = 400, description = "Empty handle"),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller lacks moderator role"),
+        (status = 500, description = "Database error"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn get_user_sharing_context(
+    _: RequireModerator,
+    Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
+    Extension(reports): Extension<Arc<dyn ShareReportStore>>,
+    Path(handle): Path<String>,
+) -> Response {
+    let needle = handle.trim();
+    if needle.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_handle"})),
+        )
+            .into_response();
+    }
+
+    let outbound = match meta.list_by_owner(needle).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "list_by_owner failed");
+            return overview_500();
+        }
+    };
+    let inbound = match meta.list_by_recipient(needle).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "list_by_recipient failed");
+            return overview_500();
+        }
+    };
+
+    // For reports we walk both populations and filter in memory —
+    // the store's `list` doesn't take a handle filter, but at
+    // homelab volume the 500-row page is a comfortable upper bound.
+    // A future wave can add dedicated by-subject methods when volume
+    // warrants the extra index surface.
+    let all_reports = match reports.list(None, 500, 0).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "share_reports.list failed");
+            return overview_500();
+        }
+    };
+    let needle_lc = needle.to_ascii_lowercase();
+    let reports_filed: Vec<ShareReportRowDto> = all_reports
+        .iter()
+        .filter(|r| r.reporter_handle.to_ascii_lowercase() == needle_lc)
+        .take(PER_USER_REPORT_CAP)
+        .cloned()
+        .map(Into::into)
+        .collect();
+    let reports_against: Vec<ShareReportRowDto> = all_reports
+        .into_iter()
+        .filter(|r| r.owner_handle.to_ascii_lowercase() == needle_lc)
+        .take(PER_USER_REPORT_CAP)
+        .map(Into::into)
+        .collect();
+
+    let body = UserSharingContext {
+        handle: handle.clone(),
+        outbound_shares: outbound
+            .into_iter()
+            .map(|m| UserShareEdge {
+                counterparty_handle: m.recipient_handle,
+                expires_at: m.expires_at,
+                note: m.note,
+                scope_kind: m
+                    .scope
+                    .as_ref()
+                    .and_then(|v| v.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                created_at: m.created_at,
+            })
+            .collect(),
+        inbound_shares: inbound
+            .into_iter()
+            .map(|m| UserShareEdge {
+                counterparty_handle: m.owner_handle,
+                expires_at: m.expires_at,
+                note: m.note,
+                scope_kind: m
+                    .scope
+                    .as_ref()
+                    .and_then(|v| v.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                created_at: m.created_at,
+            })
+            .collect(),
+        reports_filed,
+        reports_against,
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 // -- Helpers ---------------------------------------------------------
 
 /// 500 envelope used by both handlers — kept local because the
@@ -506,6 +657,10 @@ pub fn router() -> Router {
         .route(
             "/v1/admin/sharing/reports/:id/resolve",
             post(resolve_report),
+        )
+        .route(
+            "/v1/admin/sharing/by-user/:handle",
+            get(get_user_sharing_context),
         )
 }
 

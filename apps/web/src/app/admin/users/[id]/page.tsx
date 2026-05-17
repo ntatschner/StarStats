@@ -13,9 +13,12 @@ import { redirect } from 'next/navigation';
 import {
   ApiCallError,
   getAdminUser,
+  getAdminUserSharingContext,
   grantAdminUserRole,
   revokeAdminUserRole,
   type AdminUserDto,
+  type UserShareEdge,
+  type UserSharingContext,
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
@@ -51,6 +54,7 @@ export default async function AdminUserDetailPage(props: PageProps) {
   const errorCode = params.error;
 
   let user: AdminUserDto;
+  let sharing: UserSharingContext | null = null;
   try {
     user = await getAdminUser(session.token, id);
   } catch (e) {
@@ -64,6 +68,21 @@ export default async function AdminUserDetailPage(props: PageProps) {
       redirect('/admin/users?error=user_not_found');
     }
     throw e;
+  }
+
+  // Audit v2.1 §C — per-user sharing context. Fail-soft so a hiccup
+  // in the sharing endpoint doesn't block the role-management page;
+  // the sub-tab just renders an empty state instead.
+  try {
+    sharing = await getAdminUserSharingContext(
+      session.token,
+      user.claimed_handle,
+    );
+  } catch (e) {
+    logger.warn(
+      { err: e, handle: user.claimed_handle },
+      'admin user sharing context fetch failed',
+    );
   }
 
   const isAdmin = session.staffRoles.some((r) => r === 'admin');
@@ -278,6 +297,216 @@ export default async function AdminUserDetailPage(props: PageProps) {
           </div>
         )}
       </section>
+
+      {/* Audit v2.1 §C — sharing context sub-tab. Read-only for now;
+          one-click admin revoke is in the reports queue. */}
+      <SharingContext context={sharing} />
+    </div>
+  );
+}
+
+function SharingContext({ context }: { context: UserSharingContext | null }) {
+  return (
+    <section
+      style={{
+        background: 'var(--bg-elev)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--r-card)',
+        padding: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+      }}
+    >
+      <header>
+        <h2 style={{ margin: 0 }}>Sharing</h2>
+        <p
+          style={{
+            margin: '4px 0 0',
+            color: 'var(--fg-muted)',
+            fontSize: 13,
+          }}
+        >
+          Outbound + inbound shares and reports involving this user.
+        </p>
+      </header>
+
+      {!context ? (
+        <p style={{ margin: 0, color: 'var(--fg-muted)', fontSize: 13 }}>
+          Couldn&apos;t load sharing context. Try refreshing.
+        </p>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: 16,
+          }}
+        >
+          <SharingBucket
+            title="Outbound shares"
+            empty="No shares granted by this user."
+            edges={context.outbound_shares ?? []}
+          />
+          <SharingBucket
+            title="Inbound shares"
+            empty="No shares granted to this user."
+            edges={context.inbound_shares ?? []}
+          />
+          <ReportsBucket
+            title="Reports filed"
+            empty="No reports filed by this user."
+            reports={context.reports_filed ?? []}
+            showOwnerColumn={true}
+          />
+          <ReportsBucket
+            title="Reports against"
+            empty="No reports filed against this user's shares."
+            reports={context.reports_against ?? []}
+            showOwnerColumn={false}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SharingBucket({
+  title,
+  empty,
+  edges,
+}: {
+  title: string;
+  empty: string;
+  edges: UserShareEdge[];
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{title}</h3>
+      {edges.length === 0 ? (
+        <p style={{ margin: 0, color: 'var(--fg-muted)', fontSize: 12 }}>
+          {empty}
+        </p>
+      ) : (
+        <ul
+          style={{
+            listStyle: 'none',
+            padding: 0,
+            margin: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            fontSize: 12,
+          }}
+        >
+          {edges.slice(0, 12).map((e) => (
+            <li
+              key={e.counterparty_handle + '|' + e.created_at}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 8,
+                padding: '4px 0',
+                borderBottom: '1px dotted var(--border)',
+              }}
+            >
+              <span className="mono">{e.counterparty_handle}</span>
+              <span style={{ color: 'var(--fg-muted)' }}>
+                {e.scope_kind ?? 'full'}
+                {e.expires_at
+                  ? ` · expires ${new Date(e.expires_at).toLocaleDateString()}`
+                  : ''}
+              </span>
+            </li>
+          ))}
+          {edges.length > 12 && (
+            <li
+              style={{
+                color: 'var(--fg-dim)',
+                fontSize: 11,
+                fontStyle: 'italic',
+              }}
+            >
+              +{edges.length - 12} more
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ReportsBucket({
+  title,
+  empty,
+  reports,
+  showOwnerColumn,
+}: {
+  title: string;
+  empty: string;
+  reports: NonNullable<UserSharingContext['reports_filed']>;
+  showOwnerColumn: boolean;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{title}</h3>
+      {reports.length === 0 ? (
+        <p style={{ margin: 0, color: 'var(--fg-muted)', fontSize: 12 }}>
+          {empty}
+        </p>
+      ) : (
+        <ul
+          style={{
+            listStyle: 'none',
+            padding: 0,
+            margin: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            fontSize: 12,
+          }}
+        >
+          {reports.slice(0, 8).map((r) => (
+            <li
+              key={r.id}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 8,
+                padding: '4px 0',
+                borderBottom: '1px dotted var(--border)',
+              }}
+            >
+              <span>
+                {r.reason}
+                <span
+                  style={{ color: 'var(--fg-muted)', marginLeft: 6 }}
+                >
+                  · {r.status}
+                </span>
+              </span>
+              <span
+                className="mono"
+                style={{ color: 'var(--fg-muted)' }}
+                title={r.created_at}
+              >
+                {showOwnerColumn ? r.owner_handle : r.recipient_handle}
+              </span>
+            </li>
+          ))}
+          {reports.length > 8 && (
+            <li
+              style={{
+                color: 'var(--fg-dim)',
+                fontSize: 11,
+                fontStyle: 'italic',
+              }}
+            >
+              +{reports.length - 8} more
+            </li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }
