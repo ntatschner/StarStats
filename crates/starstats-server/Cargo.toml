@@ -79,7 +79,7 @@ subtle = "2.6"
 # compatible — 0.5+ targets axum 0.8). `SmartIpKeyExtractor` reads
 # `Forwarded` / `X-Forwarded-For` / `X-Real-IP` so we get the real
 # client IP behind Traefik, falling back to peer addr in dev.
-tower_governor = "0.4"
+tower_governor = "0.8"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
