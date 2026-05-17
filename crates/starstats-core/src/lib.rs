@@ -7,6 +7,7 @@
 //! consuming crates.
 
 pub mod events;
+pub mod inference;
 pub mod metadata;
 pub mod parser;
 pub mod parser_defs;
@@ -24,6 +25,7 @@ pub use events::{
     SeedSolarSystem, ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse,
     ShopRequestTimedOut, VehicleDestruction, VehicleStowed,
 };
+pub use inference::{infer, InferenceConfig, InferredEvent};
 pub use metadata::{
     event_type_key, group_key_for, primary_entity_for, stamp, EntityKind, EntityRef, EventMetadata,
     EventSource, FieldProvenance,
