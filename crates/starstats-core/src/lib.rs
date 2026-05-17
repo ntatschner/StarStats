@@ -24,7 +24,10 @@ pub use events::{
     ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
     VehicleStowed,
 };
-pub use metadata::{EntityKind, EntityRef};
+pub use metadata::{
+    event_type_key, group_key_for, primary_entity_for, stamp, EntityKind, EntityRef, EventMetadata,
+    EventSource, FieldProvenance,
+};
 pub use parser::{
     classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
     LogLine, ParseStats,

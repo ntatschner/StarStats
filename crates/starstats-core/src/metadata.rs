@@ -410,6 +410,18 @@ pub fn group_key_for(event: &GameEvent, claimed_handle: Option<&str>) -> String 
     )
 }
 
+/// One-shot builder: produce Observed metadata for an event in a
+/// single call. The common path the classifier takes for every line
+/// it parses straight off `Game.log`.
+///
+/// Inferred and synthesized metadata are built by their respective
+/// rule pipelines downstream — this helper covers the 99% case.
+pub fn stamp(event: &GameEvent, claimed_handle: Option<&str>) -> EventMetadata {
+    let primary = primary_entity_for(event, claimed_handle);
+    let group_key = group_key_for(event, claimed_handle);
+    EventMetadata::observed(primary, group_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,6 +984,29 @@ mod tests {
         let b = group_key_for(&ev_b, Some("alice"));
         assert_eq!(a, b);
         assert_eq!(a, "player_death:player:alice");
+    }
+
+    #[test]
+    fn stamp_produces_observed_metadata_for_player_death() {
+        let ev = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "1".into(),
+            zone: None,
+        });
+        let m = stamp(&ev, Some("alice"));
+        assert_eq!(m.source, EventSource::Observed);
+        assert!((m.confidence - 1.0).abs() < f32::EPSILON);
+        assert_eq!(m.primary_entity.kind, EntityKind::Player);
+        assert_eq!(m.primary_entity.id, "alice");
+        assert!(
+            m.group_key.starts_with("player_death:player:"),
+            "group_key = {}",
+            m.group_key,
+        );
+        assert!(m.field_provenance.is_empty());
+        assert!(m.inference_inputs.is_empty());
+        assert_eq!(m.rule_id, None);
     }
 
     #[test]
