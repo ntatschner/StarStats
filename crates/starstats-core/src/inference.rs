@@ -5,7 +5,7 @@
 //! pass is pure — given the same input event slice it produces the same
 //! output, which keeps tests deterministic and idempotent.
 
-use crate::events::{GameEvent, LocationChanged, PlayerDeath};
+use crate::events::{GameEvent, LocationChanged, PlayerDeath, ShopRequestTimedOut};
 use crate::metadata::{
     entity_kind_key, event_type_key, primary_entity_for, EntityRef, EventMetadata, EventSource,
 };
@@ -61,6 +61,7 @@ pub fn infer(events: &[EventEnvelope], config: &InferenceConfig) -> Vec<Inferred
     let mut out = Vec::new();
     rule_implicit_death_after_vehicle_destruction(events, config, &mut out);
     rule_implicit_location_change(events, config, &mut out);
+    rule_implicit_shop_request_timeout(events, config, &mut out);
     out
 }
 
@@ -286,11 +287,108 @@ fn rule_implicit_location_change(
     }
 }
 
+/// Rule: `implicit_shop_request_timeout`.
+///
+/// Pattern: a `ShopBuyRequest` with no matching `ShopFlowResponse`
+/// landing within the 30-second SLO budget. The engine optimistically
+/// surfaces the buy in the kiosk UI before the backend confirms; when
+/// the backend never replies we synthesise a timeout event so the
+/// timeline shows the failed purchase instead of leaving the pending
+/// row dangling.
+///
+/// "Matching" here is by `shop_id` when both halves carry one,
+/// otherwise by the unkeyed pair (any in-flight response satisfies an
+/// in-flight request). Confidence is 0.90 — the highest of the three
+/// rules because the rule fires on the absence of a signal rather
+/// than a sequence: there's no benign alternative explanation for a
+/// missing response within 30s.
+const RULE_ID_IMPLICIT_SHOP_REQUEST_TIMEOUT: &str = "implicit_shop_request_timeout";
+const IMPLICIT_SHOP_REQUEST_TIMEOUT_SECS: i64 = 30;
+const IMPLICIT_SHOP_REQUEST_TIMEOUT_CONFIDENCE: f32 = 0.90;
+
+fn rule_implicit_shop_request_timeout(
+    events: &[EventEnvelope],
+    config: &InferenceConfig,
+    out: &mut Vec<InferredEvent>,
+) {
+    for (i, env) in events.iter().enumerate() {
+        let Some(GameEvent::ShopBuyRequest(req)) = env.event.as_ref() else {
+            continue;
+        };
+        let Some(req_ts) = parse_ts(&req.timestamp) else {
+            continue;
+        };
+
+        // Scan forward for a matching ShopFlowResponse within the SLO
+        // budget. Stop as soon as we see one whose `shop_id` matches
+        // (or, when the request had no id, the first response at all
+        // within the window — the engine doesn't keep multiple
+        // in-flight requests against the same kiosk).
+        let scan_end = (i + 1 + config.window_size).min(events.len());
+        let mut matched = false;
+        for follower in &events[(i + 1)..scan_end] {
+            let Some(follower_ts) = envelope_timestamp(follower).and_then(parse_ts) else {
+                continue;
+            };
+            let delta = (follower_ts - req_ts).num_seconds();
+            if delta > IMPLICIT_SHOP_REQUEST_TIMEOUT_SECS {
+                break;
+            }
+            if delta < 0 {
+                continue;
+            }
+            if let Some(GameEvent::ShopFlowResponse(resp)) = follower.event.as_ref() {
+                let id_match = match (&req.shop_id, &resp.shop_id) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, _) | (_, None) => true,
+                };
+                if id_match {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if matched {
+            continue;
+        }
+
+        // Timeout timestamp is the request's own timestamp; the
+        // `timed_out_after_secs` field carries the SLO budget so the
+        // UI can compose "timed out after 30s" without inspecting
+        // the metadata trail.
+        let timed_out_after_secs: u32 = IMPLICIT_SHOP_REQUEST_TIMEOUT_SECS
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let event = GameEvent::ShopRequestTimedOut(ShopRequestTimedOut {
+            timestamp: req.timestamp.clone(),
+            shop_id: req.shop_id.clone(),
+            item_class: req.item_class.clone(),
+            timed_out_after_secs,
+        });
+        let primary_entity = primary_entity_for(&event, None);
+        let metadata = build_inferred_metadata(
+            primary_entity,
+            &event,
+            IMPLICIT_SHOP_REQUEST_TIMEOUT_CONFIDENCE,
+            RULE_ID_IMPLICIT_SHOP_REQUEST_TIMEOUT,
+            vec![env.idempotency_key.clone()],
+        );
+        out.push(InferredEvent {
+            event,
+            metadata,
+            trigger_idempotency_key: env.idempotency_key.clone(),
+            superseded_by: None,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::{
-        LocationInventoryRequested, PlanetTerrainLoad, ResolveSpawn, VehicleDestruction,
+        LocationInventoryRequested, PlanetTerrainLoad, ResolveSpawn, ShopBuyRequest,
+        ShopFlowResponse, VehicleDestruction,
     };
     use crate::wire::LogSource;
 
@@ -444,5 +542,91 @@ mod tests {
         let b = planet_load("2026-05-17T14:05:00Z", "OOC_Stanton_2b_Daymar", "envB");
         let out = infer(&[a, b], &InferenceConfig::default());
         assert!(out.is_empty());
+    }
+
+    fn shop_buy(ts: &str, shop_id: Option<&str>, item: Option<&str>, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::ShopBuyRequest(ShopBuyRequest {
+                timestamp: ts.into(),
+                shop_id: shop_id.map(str::to_string),
+                item_class: item.map(str::to_string),
+                quantity: None,
+                raw: "r".into(),
+            }),
+            idk,
+        )
+    }
+
+    fn shop_response(ts: &str, shop_id: Option<&str>, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::ShopFlowResponse(ShopFlowResponse {
+                timestamp: ts.into(),
+                shop_id: shop_id.map(str::to_string),
+                success: Some(true),
+                raw: "r".into(),
+            }),
+            idk,
+        )
+    }
+
+    #[test]
+    fn implicit_shop_request_timeout_emitted_when_no_response() {
+        let req = shop_buy(
+            "2026-05-17T14:00:00Z",
+            Some("kiosk_1"),
+            Some("rsi_rifle"),
+            "envReq",
+        );
+        let out = infer(&[req], &InferenceConfig::default());
+        assert_eq!(out.len(), 1);
+        match &out[0].event {
+            GameEvent::ShopRequestTimedOut(s) => {
+                assert_eq!(s.shop_id.as_deref(), Some("kiosk_1"));
+                assert_eq!(s.item_class.as_deref(), Some("rsi_rifle"));
+                assert_eq!(s.timed_out_after_secs, 30);
+            }
+            other => panic!("expected ShopRequestTimedOut, got {:?}", other),
+        }
+        assert_eq!(
+            out[0].metadata.rule_id.as_deref(),
+            Some("implicit_shop_request_timeout")
+        );
+        assert!((out[0].metadata.confidence - 0.90).abs() < 0.001);
+        assert_eq!(out[0].metadata.inference_inputs, vec!["envReq"]);
+    }
+
+    #[test]
+    fn implicit_shop_request_timeout_not_emitted_when_response_in_window() {
+        let req = shop_buy(
+            "2026-05-17T14:00:00Z",
+            Some("kiosk_1"),
+            Some("rsi_rifle"),
+            "envReq",
+        );
+        let resp = shop_response("2026-05-17T14:00:15Z", Some("kiosk_1"), "envResp");
+        let out = infer(&[req, resp], &InferenceConfig::default());
+        let timeouts: Vec<_> = out
+            .iter()
+            .filter(|i| matches!(i.event, GameEvent::ShopRequestTimedOut(_)))
+            .collect();
+        assert!(timeouts.is_empty());
+    }
+
+    #[test]
+    fn implicit_shop_request_timeout_emitted_when_response_too_late() {
+        let req = shop_buy(
+            "2026-05-17T14:00:00Z",
+            Some("kiosk_1"),
+            Some("rsi_rifle"),
+            "envReq",
+        );
+        // Response lands 45s later — well past the 30s SLO.
+        let resp = shop_response("2026-05-17T14:00:45Z", Some("kiosk_1"), "envResp");
+        let out = infer(&[req, resp], &InferenceConfig::default());
+        let timeouts: Vec<_> = out
+            .iter()
+            .filter(|i| matches!(i.event, GameEvent::ShopRequestTimedOut(_)))
+            .collect();
+        assert_eq!(timeouts.len(), 1);
     }
 }
