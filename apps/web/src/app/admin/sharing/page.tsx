@@ -93,7 +93,6 @@ export default async function AdminSharingOverviewPage() {
         <h1
           style={{
             margin: 0,
-            fontSize: 32,
             fontWeight: 600,
             letterSpacing: '-0.02em',
           }}

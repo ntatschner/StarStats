@@ -9,15 +9,13 @@ import type { HangarSnapshot } from '@/lib/api';
  * without launching the tray. The empty state nudges users who haven't
  * paired the tray yet, since that's the only writer.
  *
- * TODO(audit-v2 §08): ProfileCard + OrgsCard got promoted to inline
- * "Refresh now" buttons backed by server actions. Hangar can't follow
- * suit yet — there's no `refreshHangar()` in `apps/web/src/lib/api.ts`
- * because the tray client is the only writer of `/v1/me/hangar`. Once
- * a server-side refresh endpoint exists, mirror the ProfileCard
- * pattern: import a `refreshHangarAction` from
- * `@/app/_actions/refresh-rsi`, gate on owner-side state, and render
- * `<RefreshSubmitButton />` in the card header. Until then, the empty
- * state's "Pair a device" link is the only refresh affordance.
+ * No inline "Refresh now" button (unlike ProfileCard / OrgsCard): the
+ * server holds zero RSI credentials by design — only the tray, running
+ * on the user's machine and reading the RSI cookie out of the OS
+ * keychain, can pull a fresh pledges page without breaking that trust
+ * boundary. So the affordance is a tray-launch hint ("Updated via tray
+ * · open Devices") rather than a Server Action — the truthful framing
+ * of where the refresh actually happens.
  */
 
 const SHIP_PREVIEW_LIMIT = 6;
@@ -101,8 +99,30 @@ export function HangarCard({
 
   return (
     <section className="ss-card ss-card-pad">
-      <div className="ss-eyebrow" style={{ marginBottom: 6 }}>
-        Hangar
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          gap: 12,
+          marginBottom: 6,
+        }}
+      >
+        <div className="ss-eyebrow">Hangar</div>
+        {/* Truthful refresh affordance — the tray is the only writer
+            (RSI cookie sits in the OS keychain), so the link points at
+            the device-pairing surface rather than promising a
+            web-side refresh that can't exist. */}
+        <Link
+          href="/devices"
+          style={{
+            fontSize: 11,
+            color: 'var(--fg-muted)',
+            textDecoration: 'none',
+          }}
+        >
+          Updated via tray · open Devices →
+        </Link>
       </div>
       <h2
         style={{
