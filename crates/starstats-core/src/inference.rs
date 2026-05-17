@@ -5,7 +5,7 @@
 //! pass is pure — given the same input event slice it produces the same
 //! output, which keeps tests deterministic and idempotent.
 
-use crate::events::{GameEvent, PlayerDeath};
+use crate::events::{GameEvent, LocationChanged, PlayerDeath};
 use crate::metadata::{
     entity_kind_key, event_type_key, primary_entity_for, EntityRef, EventMetadata, EventSource,
 };
@@ -60,6 +60,7 @@ pub struct InferredEvent {
 pub fn infer(events: &[EventEnvelope], config: &InferenceConfig) -> Vec<InferredEvent> {
     let mut out = Vec::new();
     rule_implicit_death_after_vehicle_destruction(events, config, &mut out);
+    rule_implicit_location_change(events, config, &mut out);
     out
 }
 
@@ -217,10 +218,80 @@ fn rule_implicit_death_after_vehicle_destruction(
     }
 }
 
+/// Rule: `implicit_location_change`.
+///
+/// Pattern: two `PlanetTerrainLoad` events naming different planets,
+/// with no `LocationInventoryRequested` separating them, indicates the
+/// player moved between celestial bodies without explicitly opening
+/// an inventory (which would otherwise anchor a high-confidence
+/// location). The engine doesn't write a "you changed location" line,
+/// so we synthesise one from the planet-terrain pair.
+///
+/// Confidence is 0.70 — lower than the death rule because the engine
+/// fires `<InvalidateAllTerrainCells>` on both load AND unload, which
+/// occasionally produces back-to-back terrain loads while the player
+/// is still in the same orbital neighbourhood.
+const RULE_ID_IMPLICIT_LOCATION_CHANGE: &str = "implicit_location_change";
+const IMPLICIT_LOCATION_CHANGE_CONFIDENCE: f32 = 0.70;
+
+fn rule_implicit_location_change(
+    events: &[EventEnvelope],
+    _config: &InferenceConfig,
+    out: &mut Vec<InferredEvent>,
+) {
+    // Track the most recent PlanetTerrainLoad and whether a
+    // LocationInventoryRequested has landed since. The inventory
+    // request is treated as a stronger location signal that breaks
+    // the chain — its own observed event captures the transition.
+    let mut prev_planet: Option<(&EventEnvelope, String)> = None;
+    let mut inventory_seen_since_prev = false;
+
+    for env in events {
+        match env.event.as_ref() {
+            Some(GameEvent::PlanetTerrainLoad(planet_load)) => {
+                if let Some((prev_env, prev_planet_name)) = prev_planet.as_ref() {
+                    if !inventory_seen_since_prev && prev_planet_name != &planet_load.planet {
+                        let event = GameEvent::LocationChanged(LocationChanged {
+                            timestamp: planet_load.timestamp.clone(),
+                            from: Some(prev_planet_name.clone()),
+                            to: planet_load.planet.clone(),
+                        });
+                        let primary_entity = primary_entity_for(&event, None);
+                        let metadata = build_inferred_metadata(
+                            primary_entity,
+                            &event,
+                            IMPLICIT_LOCATION_CHANGE_CONFIDENCE,
+                            RULE_ID_IMPLICIT_LOCATION_CHANGE,
+                            vec![
+                                prev_env.idempotency_key.clone(),
+                                env.idempotency_key.clone(),
+                            ],
+                        );
+                        out.push(InferredEvent {
+                            event,
+                            metadata,
+                            trigger_idempotency_key: env.idempotency_key.clone(),
+                            superseded_by: None,
+                        });
+                    }
+                }
+                prev_planet = Some((env, planet_load.planet.clone()));
+                inventory_seen_since_prev = false;
+            }
+            Some(GameEvent::LocationInventoryRequested(_)) => {
+                inventory_seen_since_prev = true;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{ResolveSpawn, VehicleDestruction};
+    use crate::events::{
+        LocationInventoryRequested, PlanetTerrainLoad, ResolveSpawn, VehicleDestruction,
+    };
     use crate::wire::LogSource;
 
     fn make_envelope(event: GameEvent, idk: &str) -> EventEnvelope {
@@ -311,5 +382,67 @@ mod tests {
             "envA",
         );
         assert!(infer(&[veh], &InferenceConfig::default()).is_empty());
+    }
+
+    fn planet_load(ts: &str, planet: &str, idk: &str) -> EventEnvelope {
+        make_envelope(
+            GameEvent::PlanetTerrainLoad(PlanetTerrainLoad {
+                timestamp: ts.into(),
+                planet: planet.into(),
+            }),
+            idk,
+        )
+    }
+
+    #[test]
+    fn implicit_location_change_emitted_for_new_planet() {
+        let a = planet_load("2026-05-17T14:00:00Z", "OOC_Stanton_1_Hurston", "envA");
+        let b = planet_load("2026-05-17T14:05:00Z", "OOC_Stanton_2b_Daymar", "envB");
+        let out = infer(&[a, b], &InferenceConfig::default());
+        assert_eq!(out.len(), 1);
+        match &out[0].event {
+            GameEvent::LocationChanged(lc) => {
+                assert_eq!(lc.from.as_deref(), Some("OOC_Stanton_1_Hurston"));
+                assert_eq!(lc.to, "OOC_Stanton_2b_Daymar");
+            }
+            other => panic!("expected LocationChanged, got {:?}", other),
+        }
+        assert_eq!(
+            out[0].metadata.rule_id.as_deref(),
+            Some("implicit_location_change")
+        );
+        assert!((out[0].metadata.confidence - 0.70).abs() < 0.001);
+        assert_eq!(out[0].metadata.inference_inputs.len(), 2);
+    }
+
+    #[test]
+    fn implicit_location_change_not_emitted_when_inventory_in_between() {
+        let a = planet_load("2026-05-17T14:00:00Z", "OOC_Stanton_1_Hurston", "envA");
+        let inv = make_envelope(
+            GameEvent::LocationInventoryRequested(LocationInventoryRequested {
+                timestamp: "2026-05-17T14:02:00Z".into(),
+                player: "alice".into(),
+                location: "Stanton1_Lorville".into(),
+            }),
+            "envInv",
+        );
+        let b = planet_load("2026-05-17T14:05:00Z", "OOC_Stanton_2b_Daymar", "envB");
+        let out = infer(&[a, inv, b], &InferenceConfig::default());
+        // Inventory between planets breaks the chain — no LocationChanged
+        // surfaces because the observed inventory request already anchors
+        // the transition.
+        let lcs: Vec<_> = out
+            .iter()
+            .filter(|i| matches!(i.event, GameEvent::LocationChanged(_)))
+            .collect();
+        assert!(lcs.is_empty(), "expected no LocationChanged, got {:?}", lcs);
+    }
+
+    #[test]
+    fn implicit_location_change_not_emitted_for_same_planet() {
+        let a = planet_load("2026-05-17T14:00:00Z", "OOC_Stanton_2b_Daymar", "envA");
+        let b = planet_load("2026-05-17T14:05:00Z", "OOC_Stanton_2b_Daymar", "envB");
+        let out = infer(&[a, b], &InferenceConfig::default());
+        assert!(out.is_empty());
     }
 }
