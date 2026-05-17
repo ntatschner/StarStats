@@ -399,6 +399,7 @@ pub mod test_support {
             Self::default()
         }
 
+        #[allow(dead_code)]
         pub fn snapshot(&self) -> Vec<ShareReport> {
             self.rows.lock().unwrap().clone()
         }
