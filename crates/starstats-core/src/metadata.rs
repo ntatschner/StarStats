@@ -53,7 +53,7 @@ pub enum EntityKind {
 
 /// Snake-case key for an [`EntityKind`]. Used as a cheap component of
 /// `group_key` strings without allocating through `serde_json`.
-pub fn entity_kind_key(kind: EntityKind) -> &'static str {
+pub(crate) fn entity_kind_key(kind: EntityKind) -> &'static str {
     match kind {
         EntityKind::Player => "player",
         EntityKind::Vehicle => "vehicle",
@@ -190,6 +190,27 @@ impl EventMetadata {
 /// share a row rather than fanning out.
 const UNKNOWN_ID: &str = "unknown";
 
+/// Build an [`EntityRef`] that prefers the supplied id and display
+/// name, falling back to [`UNKNOWN_ID`] when both are missing and
+/// reusing the resolved id as the display name when the latter is
+/// absent. Centralises the fallback pattern shared by shop /
+/// commodity / mission-end arms below.
+fn entity_with_fallback(
+    kind: EntityKind,
+    id: Option<&str>,
+    display_name: Option<&str>,
+) -> EntityRef {
+    let id = id.map(str::to_string).unwrap_or_else(|| UNKNOWN_ID.into());
+    let display_name = display_name
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    EntityRef {
+        kind,
+        id,
+        display_name,
+    }
+}
+
 /// Resolve an event to its primary [`EntityRef`].
 ///
 /// `claimed_handle` is the player handle the client claims (already
@@ -261,36 +282,16 @@ pub fn primary_entity_for(event: &GameEvent, claimed_handle: Option<&str>) -> En
             display_name: e.solar_system.clone(),
         },
         GameEvent::ShopBuyRequest(e) => {
-            let id = e.shop_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
-            EntityRef {
-                kind: EntityKind::Shop,
-                id: id.clone(),
-                display_name: id,
-            }
+            entity_with_fallback(EntityKind::Shop, e.shop_id.as_deref(), None)
         }
         GameEvent::ShopFlowResponse(e) => {
-            let id = e.shop_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
-            EntityRef {
-                kind: EntityKind::Shop,
-                id: id.clone(),
-                display_name: id,
-            }
+            entity_with_fallback(EntityKind::Shop, e.shop_id.as_deref(), None)
         }
         GameEvent::CommodityBuyRequest(e) => {
-            let id = e.commodity.clone().unwrap_or_else(|| UNKNOWN_ID.into());
-            EntityRef {
-                kind: EntityKind::Shop,
-                id: id.clone(),
-                display_name: id,
-            }
+            entity_with_fallback(EntityKind::Shop, e.commodity.as_deref(), None)
         }
         GameEvent::CommoditySellRequest(e) => {
-            let id = e.commodity.clone().unwrap_or_else(|| UNKNOWN_ID.into());
-            EntityRef {
-                kind: EntityKind::Shop,
-                id: id.clone(),
-                display_name: id,
-            }
+            entity_with_fallback(EntityKind::Shop, e.commodity.as_deref(), None)
         }
         GameEvent::MissionStart(e) => EntityRef {
             kind: EntityKind::Mission,
@@ -301,12 +302,7 @@ pub fn primary_entity_for(event: &GameEvent, claimed_handle: Option<&str>) -> En
                 .unwrap_or_else(|| e.mission_id.clone()),
         },
         GameEvent::MissionEnd(e) => {
-            let id = e.mission_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
-            EntityRef {
-                kind: EntityKind::Mission,
-                id: id.clone(),
-                display_name: id,
-            }
+            entity_with_fallback(EntityKind::Mission, e.mission_id.as_deref(), None)
         }
         GameEvent::ProcessInit(e) => EntityRef {
             kind: EntityKind::Session,
@@ -416,9 +412,18 @@ pub fn group_key_for(event: &GameEvent, claimed_handle: Option<&str>) -> String 
 ///
 /// Inferred and synthesized metadata are built by their respective
 /// rule pipelines downstream — this helper covers the 99% case.
+///
+/// Composes [`primary_entity_for`] once and reuses its result for
+/// both the `EntityRef` slot and the group key, avoiding the
+/// double-dispatch that calling [`group_key_for`] would incur.
 pub fn stamp(event: &GameEvent, claimed_handle: Option<&str>) -> EventMetadata {
     let primary = primary_entity_for(event, claimed_handle);
-    let group_key = group_key_for(event, claimed_handle);
+    let group_key = format!(
+        "{}:{}:{}",
+        event_type_key(event),
+        entity_kind_key(primary.kind),
+        primary.id,
+    );
     EventMetadata::observed(primary, group_key)
 }
 
