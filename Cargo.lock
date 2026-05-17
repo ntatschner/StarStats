@@ -6389,7 +6389,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starstats-client"
-version = "0.0.5-beta"
+version = "0.0.6-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6423,7 +6423,7 @@ dependencies = [
 
 [[package]]
 name = "starstats-core"
-version = "0.0.5-beta"
+version = "0.0.6-beta"
 dependencies = [
  "chrono",
  "once_cell",
@@ -6438,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "starstats-server"
-version = "0.0.5-beta"
+version = "0.0.6-beta"
 dependencies = [
  "aes-gcm",
  "anyhow",
