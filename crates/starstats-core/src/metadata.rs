@@ -15,6 +15,7 @@
 //! rejected at deserialise time (serde default), which is what we
 //! want for a closed vocabulary.
 
+use crate::events::GameEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -182,9 +183,181 @@ impl EventMetadata {
     }
 }
 
+/// Sentinel used when an event names an entity kind but didn't carry
+/// a usable identifier (e.g. `VehicleDestruction` with no GEID). The
+/// timeline still groups by `(kind, "unknown")`, which is the
+/// intended behaviour — repeated unknown-id events of the same kind
+/// share a row rather than fanning out.
+const UNKNOWN_ID: &str = "unknown";
+
+/// Resolve an event to its primary [`EntityRef`].
+///
+/// `claimed_handle` is the player handle the client claims (already
+/// validated against the bearer token at the route layer). It's used
+/// for events whose entity is "the local player" without the line
+/// itself naming a handle — `PlayerDeath` and `PlayerIncapacitated`
+/// being the canonical cases.
+///
+/// The mapping follows the entity table in the design spec
+/// (`docs/superpowers/specs/2026-05-17-event-handling-improvements-design.md`).
+pub fn primary_entity_for(event: &GameEvent, claimed_handle: Option<&str>) -> EntityRef {
+    match event {
+        GameEvent::PlayerDeath(_) | GameEvent::PlayerIncapacitated(_) => {
+            let handle = claimed_handle.unwrap_or(UNKNOWN_ID).to_string();
+            EntityRef {
+                kind: EntityKind::Player,
+                id: handle.clone(),
+                display_name: handle,
+            }
+        }
+        GameEvent::LegacyLogin(e) => EntityRef {
+            kind: EntityKind::Player,
+            id: e.handle.clone(),
+            display_name: e.handle.clone(),
+        },
+        GameEvent::ActorDeath(e) => EntityRef {
+            kind: EntityKind::Player,
+            id: e.victim.clone(),
+            display_name: e.victim.clone(),
+        },
+        GameEvent::ResolveSpawn(e) => EntityRef {
+            kind: EntityKind::Player,
+            id: e.player_geid.clone(),
+            display_name: e.player_geid.clone(),
+        },
+        GameEvent::VehicleDestruction(e) => EntityRef {
+            kind: EntityKind::Vehicle,
+            id: e.vehicle_id.clone().unwrap_or_else(|| UNKNOWN_ID.into()),
+            display_name: e.vehicle_class.clone(),
+        },
+        GameEvent::VehicleStowed(e) => EntityRef {
+            kind: EntityKind::Vehicle,
+            id: e.vehicle_id.clone(),
+            display_name: e.vehicle_id.clone(),
+        },
+        GameEvent::QuantumTargetSelected(e) => EntityRef {
+            kind: EntityKind::Vehicle,
+            id: e.vehicle_id.clone(),
+            display_name: e.vehicle_class.clone(),
+        },
+        GameEvent::AttachmentReceived(e) => EntityRef {
+            kind: EntityKind::Item,
+            id: e.item_id.clone(),
+            display_name: e.item_class.clone(),
+        },
+        GameEvent::LocationInventoryRequested(e) => EntityRef {
+            kind: EntityKind::Location,
+            id: e.location.clone(),
+            display_name: e.location.clone(),
+        },
+        GameEvent::PlanetTerrainLoad(e) => EntityRef {
+            kind: EntityKind::Location,
+            id: e.planet.clone(),
+            display_name: e.planet.clone(),
+        },
+        GameEvent::SeedSolarSystem(e) => EntityRef {
+            kind: EntityKind::Location,
+            id: e.solar_system.clone(),
+            display_name: e.solar_system.clone(),
+        },
+        GameEvent::ShopBuyRequest(e) => {
+            let id = e.shop_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
+            EntityRef {
+                kind: EntityKind::Shop,
+                id: id.clone(),
+                display_name: id,
+            }
+        }
+        GameEvent::ShopFlowResponse(e) => {
+            let id = e.shop_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
+            EntityRef {
+                kind: EntityKind::Shop,
+                id: id.clone(),
+                display_name: id,
+            }
+        }
+        GameEvent::CommodityBuyRequest(e) => {
+            let id = e.commodity.clone().unwrap_or_else(|| UNKNOWN_ID.into());
+            EntityRef {
+                kind: EntityKind::Shop,
+                id: id.clone(),
+                display_name: id,
+            }
+        }
+        GameEvent::CommoditySellRequest(e) => {
+            let id = e.commodity.clone().unwrap_or_else(|| UNKNOWN_ID.into());
+            EntityRef {
+                kind: EntityKind::Shop,
+                id: id.clone(),
+                display_name: id,
+            }
+        }
+        GameEvent::MissionStart(e) => EntityRef {
+            kind: EntityKind::Mission,
+            id: e.mission_id.clone(),
+            display_name: e
+                .mission_name
+                .clone()
+                .unwrap_or_else(|| e.mission_id.clone()),
+        },
+        GameEvent::MissionEnd(e) => {
+            let id = e.mission_id.clone().unwrap_or_else(|| UNKNOWN_ID.into());
+            EntityRef {
+                kind: EntityKind::Mission,
+                id: id.clone(),
+                display_name: id,
+            }
+        }
+        GameEvent::ProcessInit(e) => EntityRef {
+            kind: EntityKind::Session,
+            id: e.local_session.clone(),
+            display_name: e.local_session.clone(),
+        },
+        GameEvent::JoinPu(e) => EntityRef {
+            kind: EntityKind::Session,
+            id: e.shard.clone(),
+            display_name: e.shard.clone(),
+        },
+        GameEvent::ChangeServer(_) | GameEvent::SessionEnd(_) => EntityRef {
+            kind: EntityKind::Session,
+            id: "session".into(),
+            display_name: "session".into(),
+        },
+        GameEvent::HudNotification(_) => EntityRef {
+            kind: EntityKind::System,
+            id: "hud".into(),
+            display_name: "HUD".into(),
+        },
+        GameEvent::GameCrash(_) => EntityRef {
+            kind: EntityKind::System,
+            id: "crash".into(),
+            display_name: "crash".into(),
+        },
+        GameEvent::LauncherActivity(_) => EntityRef {
+            kind: EntityKind::System,
+            id: "launcher".into(),
+            display_name: "launcher".into(),
+        },
+        GameEvent::RemoteMatch(e) => EntityRef {
+            kind: EntityKind::System,
+            id: e.event_name.clone(),
+            display_name: e.event_name.clone(),
+        },
+        GameEvent::BurstSummary(e) => EntityRef {
+            kind: EntityKind::System,
+            id: e.rule_id.clone(),
+            display_name: e.rule_id.clone(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{
+        AttachmentReceived, GameCrash, GameEvent, LocationInventoryRequested, MissionMarkerKind,
+        MissionStart, PlayerDeath, VehicleDestruction,
+    };
 
     #[test]
     fn entity_kind_serialises_snake_case() {
@@ -339,6 +512,122 @@ mod tests {
         assert!(s.contains("\"source\":\"observed\""));
         assert!(s.contains("\"confidence\":1.0"));
         assert!(s.contains("\"group_key\":\"vehicle_destruction:vehicle:veh-1\""));
+    }
+
+    #[test]
+    fn primary_entity_for_player_death_uses_claimed_handle() {
+        let ev = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "12345".into(),
+            zone: None,
+        });
+        let e = primary_entity_for(&ev, Some("alice"));
+        assert_eq!(e.kind, EntityKind::Player);
+        assert_eq!(e.id, "alice");
+        assert_eq!(e.display_name, "alice");
+
+        // Falls back to "unknown" when handle missing.
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.id, "unknown");
+    }
+
+    #[test]
+    fn primary_entity_for_vehicle_destruction_uses_class_as_display() {
+        let ev = GameEvent::VehicleDestruction(VehicleDestruction {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            vehicle_class: "MISC_Freelancer".into(),
+            vehicle_id: Some("veh-7".into()),
+            destroy_level: 2,
+            caused_by: "unknown".into(),
+            zone: None,
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Vehicle);
+        assert_eq!(e.id, "veh-7");
+        assert_eq!(e.display_name, "MISC_Freelancer");
+
+        // Missing GEID falls back to "unknown" but keeps class as display.
+        let ev2 = GameEvent::VehicleDestruction(VehicleDestruction {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            vehicle_class: "MISC_Freelancer".into(),
+            vehicle_id: None,
+            destroy_level: 2,
+            caused_by: "unknown".into(),
+            zone: None,
+        });
+        let e = primary_entity_for(&ev2, None);
+        assert_eq!(e.id, "unknown");
+        assert_eq!(e.display_name, "MISC_Freelancer");
+    }
+
+    #[test]
+    fn primary_entity_for_attachment_received() {
+        let ev = GameEvent::AttachmentReceived(AttachmentReceived {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            player: "alice".into(),
+            item_class: "klwe_pistol_energy_lh86".into(),
+            item_id: "item-42".into(),
+            status: "Attached".into(),
+            port: "torso".into(),
+            elapsed_seconds: 2.5,
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Item);
+        assert_eq!(e.id, "item-42");
+        assert_eq!(e.display_name, "klwe_pistol_energy_lh86");
+    }
+
+    #[test]
+    fn primary_entity_for_location_inventory_requested() {
+        let ev = GameEvent::LocationInventoryRequested(LocationInventoryRequested {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            player: "alice".into(),
+            location: "Stanton2_Orison".into(),
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Location);
+        assert_eq!(e.id, "Stanton2_Orison");
+        assert_eq!(e.display_name, "Stanton2_Orison");
+    }
+
+    #[test]
+    fn primary_entity_for_mission_start_prefers_name_for_display() {
+        let ev = GameEvent::MissionStart(MissionStart {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            mission_id: "uuid-abc".into(),
+            marker_kind: MissionMarkerKind::Phase,
+            mission_name: Some("Bounty: Septe Boutaa".into()),
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::Mission);
+        assert_eq!(e.id, "uuid-abc");
+        assert_eq!(e.display_name, "Bounty: Septe Boutaa");
+
+        // Falls back to id when name is missing.
+        let ev2 = GameEvent::MissionStart(MissionStart {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            mission_id: "uuid-xyz".into(),
+            marker_kind: MissionMarkerKind::Phase,
+            mission_name: None,
+        });
+        let e = primary_entity_for(&ev2, None);
+        assert_eq!(e.display_name, "uuid-xyz");
+    }
+
+    #[test]
+    fn primary_entity_for_game_crash_uses_fixed_system_id() {
+        let ev = GameEvent::GameCrash(GameCrash {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            channel: "LIVE".into(),
+            crash_dir_name: "2026-05-17-00-00-00".into(),
+            primary_log_name: None,
+            total_size_bytes: 1024,
+        });
+        let e = primary_entity_for(&ev, None);
+        assert_eq!(e.kind, EntityKind::System);
+        assert_eq!(e.id, "crash");
+        assert_eq!(e.display_name, "crash");
     }
 
     #[test]
