@@ -92,3 +92,9 @@ src-tauri/target/
 # regenerates it from the live OpenAPI spec and fails the build if
 # the committed copy is out of sync. Web-side typecheck depends on
 # the committed copy too. Keep this directory tracked.
+
+# --- Claude Code working state ---
+# `.claude/` itself IS committed — it carries the project-shared
+# hooks, skills, and agents. The `.superpowers/` scratch area used
+# by the agent's brainstorming workflow stays local per developer.
+.superpowers/
