@@ -30,7 +30,7 @@ tauri-plugin-process = "2"
 tokio = { workspace = true }
 
 # Filesystem watch
-notify = "7.0"
+notify = "8.2"
 
 # Local storage (bundled SQLite, no system dep)
 rusqlite = { version = "0.32", features = ["bundled"] }
