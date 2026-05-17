@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
+use starstats_core::metadata::EventMetadata;
 use starstats_core::wire::{EventEnvelope, LogSource};
 #[cfg(test)]
 use std::sync::Mutex;
@@ -16,6 +17,13 @@ use uuid::Uuid;
 /// What the server actually stores. Constructed from an
 /// [`EventEnvelope`] plus the authenticated identity (claimed handle
 /// only for now — `user_id` lands when auth does).
+///
+/// `metadata` carries the cross-cutting envelope stamped by the
+/// client (or synthesised server-side for legacy v1 clients). It is
+/// not persisted by the current Postgres `events` table — the schema
+/// would need an additive migration to land a JSONB column — but it
+/// rides along the in-memory path so the ingest handler can verify
+/// synthesis happened, and so the test store can assert on it.
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
     pub id: Uuid,
@@ -27,6 +35,15 @@ pub struct StoredEvent {
     pub source_offset: i64,
     pub raw_line: String,
     pub payload: Value,
+    /// Cross-cutting metadata stamped by the client (or synthesised
+    /// server-side for v1 clients in the ingest handler). Not yet
+    /// persisted by `PostgresStore::insert` — landing it in
+    /// `events` requires an additive migration to add a JSONB
+    /// column. The field rides along so the ingest handler can
+    /// verify synthesis happened and tests can observe it through
+    /// `MemoryStore::snapshot`.
+    #[allow(dead_code)]
+    pub metadata: Option<EventMetadata>,
 }
 
 /// Outcome of inserting one event. Lets the handler report how many
@@ -456,6 +473,7 @@ pub fn from_envelope(env: &EventEnvelope, claimed_handle: &str) -> StoredEvent {
         source_offset: env.source_offset as i64,
         raw_line: env.raw_line.clone(),
         payload,
+        metadata: env.metadata.clone(),
     }
 }
 

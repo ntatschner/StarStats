@@ -19,6 +19,7 @@ use axum::{
 use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use starstats_core::metadata::stamp;
 use starstats_core::wire::IngestBatch;
 use std::sync::Arc;
 use std::time::Instant;
@@ -83,18 +84,22 @@ pub async fn handle<S: EventStore>(
     State(store): State<Arc<S>>,
     Extension(audit): Extension<Arc<dyn AuditLog>>,
     user: AuthenticatedUser,
-    Json(batch): Json<IngestBatch>,
+    Json(mut batch): Json<IngestBatch>,
 ) -> impl IntoResponse {
     let started = Instant::now();
 
-    if batch.schema_version != IngestBatch::CURRENT_SCHEMA_VERSION {
+    // Accept any version in `[1, CURRENT]`. v1 envelopes predate the
+    // `metadata` field on `EventEnvelope`; we synthesise observed
+    // metadata server-side below so downstream consumers see a
+    // uniform shape regardless of client age.
+    if batch.schema_version < 1 || batch.schema_version > IngestBatch::CURRENT_SCHEMA_VERSION {
         counter!("starstats_ingest_batches_rejected", "reason" => "bad_schema").increment(1);
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiErrorBody {
                 error: "unsupported_schema_version".into(),
                 detail: Some(format!(
-                    "got {}, server speaks {}",
+                    "got {}, server speaks 1..={}",
                     batch.schema_version,
                     IngestBatch::CURRENT_SCHEMA_VERSION
                 )),
@@ -137,6 +142,18 @@ pub async fn handle<S: EventStore>(
             }),
         )
             .into_response();
+    }
+
+    // Backfill default Observed metadata for any envelope a legacy
+    // (v1) client uploaded without it. Newer clients stamp on the
+    // wire; the server only synthesises when the field is absent so
+    // we never overwrite explicit producer-supplied metadata.
+    for env in batch.events.iter_mut() {
+        if env.metadata.is_none() {
+            if let Some(ev) = &env.event {
+                env.metadata = Some(stamp(ev, Some(&batch.claimed_handle)));
+            }
+        }
     }
 
     let mut accepted = 0u32;
@@ -371,6 +388,108 @@ mod tests {
         bad.schema_version = 999;
         let (status, _) = post_batch_with(&app, Some(&token), &bad).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rejects_above_window_schema_version() {
+        // 99 is outside [1, CURRENT]; must reject.
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+        let token = sign_token(&env.issuer, HANDLE);
+        let audit = Arc::new(MemoryAuditLog::default());
+        let app = router(store, env.verifier, audit);
+
+        let mut bad = batch(vec![sample_envelope("evt-1")]);
+        bad.schema_version = 99;
+        let (status, _) = post_batch_with(&app, Some(&token), &bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn accepts_legacy_v1_schema_version() {
+        // schema_version=1 predates the metadata field; the server
+        // must still accept it (within the [1, CURRENT] window) and
+        // synthesise metadata server-side. Verified separately below.
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+        let token = sign_token(&env.issuer, HANDLE);
+        let audit = Arc::new(MemoryAuditLog::default());
+        let app = router(store.clone(), env.verifier, audit);
+
+        let mut body = batch(vec![sample_envelope("evt-v1")]);
+        body.schema_version = 1;
+        let (status, _) = post_batch_with(&app, Some(&token), &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(store.snapshot().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingest_synthesises_metadata_for_v1_envelopes_missing_it() {
+        // A v1 client uploads an envelope with `metadata = None`. The
+        // server must backfill default Observed metadata so downstream
+        // consumers see a uniform shape.
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+        let token = sign_token(&env.issuer, HANDLE);
+        let audit = Arc::new(MemoryAuditLog::default());
+        let app = router(store.clone(), env.verifier, audit);
+
+        let envelope = sample_envelope("evt-synth");
+        // Sanity-check the test fixture: it must start without metadata
+        // so the synthesis path is exercised.
+        assert!(envelope.metadata.is_none());
+        let mut body = batch(vec![envelope]);
+        body.schema_version = 1;
+        let (status, _) = post_batch_with(&app, Some(&token), &body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = store.snapshot();
+        assert_eq!(rows.len(), 1);
+        let meta = rows[0]
+            .metadata
+            .as_ref()
+            .expect("server must synthesise metadata for v1 envelopes");
+        assert_eq!(meta.source, starstats_core::metadata::EventSource::Observed);
+        assert!((meta.confidence - 1.0).abs() < f32::EPSILON);
+        // JoinPu's primary entity is its shard string (see
+        // `primary_entity_for` in starstats-core).
+        assert_eq!(
+            meta.primary_entity.kind,
+            starstats_core::metadata::EntityKind::Session
+        );
+        assert_eq!(meta.primary_entity.id, "pub_euw1b");
+    }
+
+    #[tokio::test]
+    async fn ingest_preserves_explicit_metadata_when_present() {
+        // A v2 client uploads an envelope with metadata already
+        // attached. The server must not overwrite it.
+        use starstats_core::metadata::{stamp, EntityKind};
+        let store = Arc::new(MemoryStore::new());
+        let env = test_env();
+        let token = sign_token(&env.issuer, HANDLE);
+        let audit = Arc::new(MemoryAuditLog::default());
+        let app = router(store.clone(), env.verifier, audit);
+
+        let mut envelope = sample_envelope("evt-explicit");
+        let preset = stamp(
+            envelope.event.as_ref().unwrap(),
+            Some("ExplicitlyDifferentHandle"),
+        );
+        let expected_id = preset.primary_entity.id.clone();
+        envelope.metadata = Some(preset);
+        let body = batch(vec![envelope]);
+        let (status, _) = post_batch_with(&app, Some(&token), &body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = store.snapshot();
+        assert_eq!(rows.len(), 1);
+        let meta = rows[0].metadata.as_ref().expect("metadata must round-trip");
+        // The preset entity id wins over the claimed_handle-derived one
+        // — JoinPu maps to its shard not its handle, but the point is
+        // that the server respected the supplied metadata.
+        assert_eq!(meta.primary_entity.id, expected_id);
+        assert_eq!(meta.primary_entity.kind, EntityKind::Session);
     }
 
     #[tokio::test]
