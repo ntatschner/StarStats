@@ -7,6 +7,7 @@
 //! consuming crates.
 
 pub mod events;
+pub mod metadata;
 pub mod parser;
 pub mod parser_defs;
 pub mod templates;
@@ -23,6 +24,7 @@ pub use events::{
     ServerPhase, SessionEnd, SessionEndKind, ShopBuyRequest, ShopFlowResponse, VehicleDestruction,
     VehicleStowed,
 };
+pub use metadata::{EntityKind, EntityRef};
 pub use parser::{
     classify, classify_launcher_message, parse_launcher_line, structural_parse, LauncherLogLine,
     LogLine, ParseStats,
