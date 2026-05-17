@@ -449,7 +449,11 @@ mod tests {
         assert_eq!(audited.len(), 1);
         // Payload contains the key, set to null.
         assert!(
-            audited[0].payload.as_object().unwrap().contains_key("device_id"),
+            audited[0]
+                .payload
+                .as_object()
+                .unwrap()
+                .contains_key("device_id"),
             "device_id key must always be present in the audit payload"
         );
         assert!(audited[0].payload["device_id"].is_null());

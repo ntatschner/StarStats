@@ -186,9 +186,9 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * GET /v1/admin/sharing/overview — real-time active-share
-         *     counters + 30-day audit-log totals + top-20 granters.
-         *     Gated on moderator; admins inherit.
+         * GET /v1/admin/sharing/overview — replaces the audit-window proxy
+         *     that the admin UI used before this endpoint existed. Gated on
+         *     moderator; admins inherit.
          */
         get: operations["get_overview"];
         put?: never;
@@ -207,9 +207,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * GET /v1/admin/sharing/scope-histogram — distribution of
-         *     `scope->>'kind'` across active shares + per-tab usage on
-         *     `kind = 'tabs'` rows. Gated on moderator.
+         * GET /v1/admin/sharing/scope-histogram — distribution of scope
+         *     kinds across active shares. Gated on moderator.
          */
         get: operations["get_scope_histogram"];
         put?: never;
@@ -1688,27 +1687,42 @@ export interface components {
          * @description Response body for `GET /v1/admin/sharing/overview`. The
          *     `active_shares_*` counters come from a snapshot of `share_metadata`;
          *     the `total_*_30d` counters come from a `WHERE occurred_at >
-         *     NOW() - INTERVAL '30 days'` filter on `audit_log`.
+         *     NOW() - INTERVAL '30 days'` filter on `audit_log`. Both shapes are
+         *     flattened into one DTO because the admin UI renders them as a
+         *     single card row — splitting the response into two would force the
+         *     page to make two round-trips for one render.
          */
         AdminSharingOverview: {
             /**
              * Format: int64
-             * @description User-to-user (outbound) active shares.
+             * @description User-to-user (outbound) active shares. `share_metadata` only
+             *     stores user-to-user shares today; org-direction grants live
+             *     in SpiceDB without a side-table row, so this matches `_total`
+             *     until the org table lands.
              */
             active_shares_outbound: number;
             /**
              * Format: int64
-             * @description COUNT(*) from `share_metadata` WHERE `expires_at IS NULL OR expires_at > NOW()`.
+             * @description COUNT(*) from `share_metadata` WHERE `expires_at IS NULL OR
+             *     expires_at > NOW()`. The headline "live shares" number.
              */
             active_shares_total: number;
             /**
              * Format: int64
-             * @description Subset of `active_shares_total` with explicit future expiry.
+             * @description Subset of `_total` where the share has an explicit expiry in
+             *     the future (i.e. excludes legacy "no expiry" rows).
              */
             active_shares_with_expiry: number;
             /**
+             * @description Top owner handles by active-share count, sorted DESC, capped
+             *     at 20. Empty when the table is empty.
+             */
+            top_granters: components["schemas"]["TopGranter"][];
+            /**
              * Format: int64
-             * @description `share.created` audit rows in the last 30 days.
+             * @description `share.created` audit rows in the last 30 days. Time-windowed
+             *     rather than absolute — the audit log doesn't keep "current
+             *     state".
              */
             total_grants_30d: number;
             /**
@@ -1721,11 +1735,6 @@ export interface components {
              * @description `share.viewed` audit rows in the last 30 days.
              */
             total_views_30d: number;
-            /**
-             * @description Top owner handles by active-share count, sorted DESC, capped
-             *     at 20.
-             */
-            top_granters: components["schemas"]["TopGranter"][];
         };
         /**
          * @description Lightweight admin-side view of a user. Skips secrets (password
@@ -2086,9 +2095,9 @@ export interface components {
             /**
              * Format: uuid
              * @description Paired-device id, when the batch was posted by a tray client
-             *     holding a device JWT. `null`/absent on legacy rows (pre-0026)
-             *     and on rows posted via user-scoped tokens. The Devices page
-             *     reads this to filter batches to the active device tab.
+             *     holding a device JWT. `None` on legacy rows (pre-0026) and on
+             *     rows posted via user-scoped tokens. The Devices page reads
+             *     this to filter batches to the active device tab.
              */
             device_id?: string | null;
             /** Format: int64 */
@@ -2595,8 +2604,10 @@ export interface components {
         };
         /**
          * @description Response body for `GET /v1/admin/sharing/scope-histogram`. NULL
-         *     scope rows fold into `full`. `tab_usage` is per-tab counts for
-         *     `kind = 'tabs'` rows.
+         *     scope rows fold into `full` (the legacy default preserved by
+         *     migration 0025). `tab_usage` is per-tab counts for `kind = 'tabs'`
+         *     rows; map keys are stable (BTreeMap) so the wire payload is
+         *     reproducible across requests with the same data.
          */
         ScopeHistogram: {
             /** Format: int64 */
@@ -2604,8 +2615,9 @@ export interface components {
             /** Format: int64 */
             full: number;
             /**
-             * @description Per-tab usage on `kind = 'tabs'` rows. Always present;
-             *     empty `{}` when no tabs-scope rows exist.
+             * @description Per-tab usage on `kind = 'tabs'` rows. Always emitted (empty
+             *     `{}` when no tabs-scope rows exist) so the UI can render the
+             *     card without a presence check.
              */
             tab_usage: {
                 [key: string]: number;
@@ -2895,19 +2907,20 @@ export interface components {
             days: number;
         };
         /**
-         * @description One row of the admin "top granters" leaderboard. Counts come
-         *     off `share_metadata` active rows; "active" means
-         *     `expires_at IS NULL OR expires_at > NOW()`.
+         * @description One row of the "top granters" leaderboard. Mirrors
+         *     [`crate::share_metadata::GranterCount`] but typed for the wire
+         *     (counts narrowed to u64 since they're always non-negative).
          */
         TopGranter: {
             /**
              * Format: int64
-             * @description Number of active share_metadata rows owned by this handle.
+             * @description Number of `share_metadata` rows owned by this handle that are
+             *     still active (no expiry, or expiry in the future).
              */
             active_share_count: number;
             /**
-             * @description Owner handle as stored on the row (case-preserved display
-             *     copy).
+             * @description Owner handle as stored on the underlying row (case-preserved
+             *     display copy). Suitable for direct rendering in the UI.
              */
             handle: string;
         };
@@ -3263,88 +3276,6 @@ export interface operations {
             };
         };
     };
-    get_overview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Sharing overview snapshot */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AdminSharingOverview"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Caller lacks moderator role */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Database error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    get_scope_histogram: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Scope-kind distribution across active shares */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ScopeHistogram"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Caller lacks moderator role */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Database error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     list_orgs_admin: {
         parameters: {
             query?: {
@@ -3557,6 +3488,88 @@ export interface operations {
             };
             /** @description Caller lacks moderator role */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sharing overview snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSharingOverview"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_scope_histogram: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scope-kind distribution across active shares */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScopeHistogram"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5886,13 +5899,12 @@ export interface operations {
                 limit?: number;
                 offset?: number;
                 /**
-                 * Format: uuid
                  * @description Scope the result to a single paired device. Omit for the
-                 *     account-wide stream (current default). Pre-0026 batches
-                 *     have no device_id stamped and are correctly excluded from
-                 *     any device-scoped filter.
+                 *     account-wide stream (current default). Pre-0026 batches have
+                 *     no device_id stamped and are correctly excluded from any
+                 *     device-scoped filter.
                  */
-                device_id?: string | null;
+                device_id?: string;
             };
             header?: never;
             path?: never;

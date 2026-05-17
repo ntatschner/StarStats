@@ -1814,10 +1814,7 @@ mod tests {
     /// tests below — kind="timeline" (so the gate doesn't 404), no
     /// window clamp (handler clamping is covered by the W3 tests),
     /// and the caller-supplied allow/deny lists piped straight through.
-    fn timeline_scope(
-        allow: Option<Vec<String>>,
-        deny: Option<Vec<String>>,
-    ) -> ShareScope {
+    fn timeline_scope(allow: Option<Vec<String>>, deny: Option<Vec<String>>) -> ShareScope {
         ShareScope {
             kind: "timeline".to_string(),
             tabs: None,

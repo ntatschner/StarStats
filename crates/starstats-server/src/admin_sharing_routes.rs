@@ -544,24 +544,12 @@ mod tests {
         meta.upsert("o3", "r3", None, None, Some(&json!({"kind": "full"})))
             .await
             .unwrap();
-        meta.upsert(
-            "o4",
-            "r4",
-            None,
-            None,
-            Some(&json!({"kind": "timeline"})),
-        )
-        .await
-        .unwrap();
-        meta.upsert(
-            "o5",
-            "r5",
-            None,
-            None,
-            Some(&json!({"kind": "aggregates"})),
-        )
-        .await
-        .unwrap();
+        meta.upsert("o4", "r4", None, None, Some(&json!({"kind": "timeline"})))
+            .await
+            .unwrap();
+        meta.upsert("o5", "r5", None, None, Some(&json!({"kind": "aggregates"})))
+            .await
+            .unwrap();
         let past = Utc::now() - ChronoDuration::days(1);
         meta.upsert("o6", "r6", Some(past), None, Some(&json!({"kind": "full"})))
             .await
