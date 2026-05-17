@@ -382,6 +382,7 @@ export const api = {
     invoke<PairOutcome>('pair_device', { apiUrl, code }),
   getParseCoverage: () =>
     invoke<ParseCoverageResponse>('get_parse_coverage'),
+  getSessionSummaryText: () => invoke<string>('get_session_summary_text'),
   getSessionTimeline: (limit?: number) =>
     invoke<TimelineEntry[]>('get_session_timeline', { limit }),
   listTransactions: (limit?: number, windowSecs?: number) =>

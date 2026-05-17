@@ -14,6 +14,7 @@
 use crate::admin_org_routes;
 use crate::admin_reference_routes;
 use crate::admin_routes;
+use crate::admin_sharing_routes;
 use crate::admin_submission_routes;
 use crate::admin_user_routes;
 use crate::api_error;
@@ -147,6 +148,7 @@ impl Modify for SecurityAddon {
         sharing_routes::public_timeline,
         sharing_routes::friend_summary,
         sharing_routes::friend_timeline,
+        sharing_routes::report_share,
         org_routes::create_org,
         org_routes::list_orgs,
         org_routes::get_org,
@@ -165,6 +167,10 @@ impl Modify for SecurityAddon {
         submission_routes::flag,
         submission_routes::withdraw,
         admin_routes::list_audit,
+        admin_sharing_routes::get_overview,
+        admin_sharing_routes::get_scope_histogram,
+        admin_sharing_routes::get_reports,
+        admin_sharing_routes::resolve_report,
         admin_submission_routes::accept,
         admin_submission_routes::reject,
         admin_submission_routes::dismiss_flag,
@@ -241,6 +247,15 @@ impl Modify for SecurityAddon {
         // Admin submission moderation
         admin_routes::AuditEntryDto,
         admin_routes::AuditListResponse,
+        // Admin sharing overview
+        admin_sharing_routes::AdminSharingOverview,
+        admin_sharing_routes::TopGranter,
+        admin_sharing_routes::ScopeHistogram,
+        admin_sharing_routes::ShareReportRowDto,
+        admin_sharing_routes::ShareReportListResponse,
+        admin_sharing_routes::ResolveReportRequest,
+        sharing_routes::ReportShareRequest,
+        sharing_routes::ReportShareResponse,
         admin_user_routes::AdminUserDto,
         admin_user_routes::AdminUserListResponse,
         admin_user_routes::GrantRoleRequest,

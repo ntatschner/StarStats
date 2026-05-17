@@ -178,6 +178,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/sharing/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/admin/sharing/overview — replaces the audit-window proxy
+         *     that the admin UI used before this endpoint existed. Gated on
+         *     moderator; admins inherit.
+         */
+        get: operations["get_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/sharing/reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET `/v1/admin/sharing/reports` — moderator queue page driver.
+         *     Gated on moderator (admins inherit).
+         */
+        get: operations["get_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/sharing/reports/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST `/v1/admin/sharing/reports/{id}/resolve` — moderator triage
+         *     action. Idempotency: a second resolve on the same row returns 409
+         *     (`already_resolved`) so callers can distinguish "your action
+         *     landed" from "someone got there first".
+         */
+        post: operations["resolve_report"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/sharing/scope-histogram": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/admin/sharing/scope-histogram — distribution of scope
+         *     kinds across active shares. Gated on moderator.
+         */
+        get: operations["get_scope_histogram"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/smtp": {
         parameters: {
             query?: never;
@@ -1399,6 +1482,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/share/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST `/v1/share/report` — file a moderation report against a
+         *     specific (owner_handle, recipient_handle) share.
+         * @description Authorization model: the reporter (auth'd user) must be one side
+         *     of the share. Either the recipient flagging the owner ("creep
+         *     shared with me") or the owner flagging the recipient ("recipient
+         *     is doing creepy stuff with my data"). A third party can't report.
+         *
+         *     Rate-limited at the app layer: max `RATE_LIMIT_PER_WINDOW` rows
+         *     per reporter per `rate_limit_window()`. The handler queries the
+         *     store; no Redis dependency. Exceeded -> 429.
+         */
+        post: operations["report_share"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/submissions": {
         parameters: {
             query?: never;
@@ -1641,6 +1752,59 @@ export interface components {
              *     whatever the wiki returns and this passes it through verbatim.
              */
             metadata: Record<string, never>;
+        };
+        /**
+         * @description Response body for `GET /v1/admin/sharing/overview`. The
+         *     `active_shares_*` counters come from a snapshot of `share_metadata`;
+         *     the `total_*_30d` counters come from a `WHERE occurred_at >
+         *     NOW() - INTERVAL '30 days'` filter on `audit_log`. Both shapes are
+         *     flattened into one DTO because the admin UI renders them as a
+         *     single card row — splitting the response into two would force the
+         *     page to make two round-trips for one render.
+         */
+        AdminSharingOverview: {
+            /**
+             * Format: int64
+             * @description User-to-user (outbound) active shares. `share_metadata` only
+             *     stores user-to-user shares today; org-direction grants live
+             *     in SpiceDB without a side-table row, so this matches `_total`
+             *     until the org table lands.
+             */
+            active_shares_outbound: number;
+            /**
+             * Format: int64
+             * @description COUNT(*) from `share_metadata` WHERE `expires_at IS NULL OR
+             *     expires_at > NOW()`. The headline "live shares" number.
+             */
+            active_shares_total: number;
+            /**
+             * Format: int64
+             * @description Subset of `_total` where the share has an explicit expiry in
+             *     the future (i.e. excludes legacy "no expiry" rows).
+             */
+            active_shares_with_expiry: number;
+            /**
+             * @description Top owner handles by active-share count, sorted DESC, capped
+             *     at 20. Empty when the table is empty.
+             */
+            top_granters: components["schemas"]["TopGranter"][];
+            /**
+             * Format: int64
+             * @description `share.created` audit rows in the last 30 days. Time-windowed
+             *     rather than absolute — the audit log doesn't keep "current
+             *     state".
+             */
+            total_grants_30d: number;
+            /**
+             * Format: int64
+             * @description `share.revoked` audit rows in the last 30 days.
+             */
+            total_revocations_30d: number;
+            /**
+             * Format: int64
+             * @description `share.viewed` audit rows in the last 30 days.
+             */
+            total_views_30d: number;
         };
         /**
          * @description Lightweight admin-side view of a user. Skips secrets (password
@@ -1998,6 +2162,14 @@ export interface components {
             /** Format: int64 */
             accepted: number;
             batch_id: string;
+            /**
+             * Format: uuid
+             * @description Paired-device id, when the batch was posted by a tray client
+             *     holding a device JWT. `None` on legacy rows (pre-0026) and on
+             *     rows posted via user-scoped tokens. The Devices page reads
+             *     this to filter batches to the active device tab.
+             */
+            device_id?: string | null;
             /** Format: int64 */
             duplicate: number;
             game_build?: string | null;
@@ -2342,8 +2514,45 @@ export interface components {
         RemoveMemberResponse: {
             removed: boolean;
         };
+        /**
+         * @description Request body for `POST /v1/share/report`. Reporter is the auth'd
+         *     user (NOT a body field) — taking it off the token prevents
+         *     spoofing one user as another.
+         */
+        ReportShareRequest: {
+            /** @description Optional free-text context. Capped at `DETAILS_MAX_LEN` chars. */
+            details?: string | null;
+            /** @description Owner side of the (owner, recipient) pair being reported. */
+            owner_handle: string;
+            /** @description One of `abuse | spam | data_misuse | other`. Other values 400. */
+            reason: string;
+            /** @description Recipient side of the (owner, recipient) pair being reported. */
+            recipient_handle: string;
+        };
+        /**
+         * @description Echo of the created report so the UI can confirm the row landed.
+         *     Tight subset of `ShareReport` — full row is admin-only.
+         */
+        ReportShareResponse: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            status: string;
+        };
         ResendVerificationResponse: {
             sent: boolean;
+        };
+        /**
+         * @description Body for `POST /v1/admin/sharing/reports/:id/resolve`. `outcome`
+         *     must be a resolution variant (not `open`) — open is the starting
+         *     state, not a destination.
+         */
+        ResolveReportRequest: {
+            /** @description Optional moderator note. Capped at `RESOLUTION_NOTE_MAX_LEN`. */
+            note?: string | null;
+            /** @description One of `dismissed | share_revoked | user_suspended`. */
+            outcome: string;
         };
         /**
          * @description One resolved location reading. `planet` and `city` are
@@ -2500,6 +2709,31 @@ export interface components {
             /** @description `true` when the handle is now (or was already) proven. */
             verified: boolean;
         };
+        /**
+         * @description Response body for `GET /v1/admin/sharing/scope-histogram`. NULL
+         *     scope rows fold into `full` (the legacy default preserved by
+         *     migration 0025). `tab_usage` is per-tab counts for `kind = 'tabs'`
+         *     rows; map keys are stable (BTreeMap) so the wire payload is
+         *     reproducible across requests with the same data.
+         */
+        ScopeHistogram: {
+            /** Format: int64 */
+            aggregates: number;
+            /** Format: int64 */
+            full: number;
+            /**
+             * @description Per-tab usage on `kind = 'tabs'` rows. Always emitted (empty
+             *     `{}` when no tabs-scope rows exist) so the UI can render the
+             *     card without a presence check.
+             */
+            tab_usage: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            tabs: number;
+            /** Format: int64 */
+            timeline: number;
+        };
         SessionDto: {
             /** Format: date-time */
             end_at: string;
@@ -2542,6 +2776,33 @@ export interface components {
         };
         ShareOrgResponse: {
             shared_with_org: string;
+        };
+        ShareReportListResponse: {
+            items: components["schemas"]["ShareReportRowDto"][];
+        };
+        /**
+         * @description Wire shape for one report row. Mirrors `share_reports::ShareReport`
+         *     but flattens the enums to their wire strings so the OpenAPI surface
+         *     doesn't drag the Rust-side `#[serde(rename_all)]` machinery into
+         *     the spec.
+         */
+        ShareReportRowDto: {
+            /** Format: date-time */
+            created_at: string;
+            details?: string | null;
+            /** Format: uuid */
+            id: string;
+            owner_handle: string;
+            /** @description One of `abuse | spam | data_misuse | other`. */
+            reason: string;
+            recipient_handle: string;
+            reporter_handle: string;
+            resolution_note?: string | null;
+            /** Format: date-time */
+            resolved_at?: string | null;
+            resolved_by?: string | null;
+            /** @description One of `open | dismissed | share_revoked | user_suspended`. */
+            status: string;
         };
         ShareRequest: {
             /**
@@ -2778,6 +3039,24 @@ export interface components {
             buckets: components["schemas"]["TimelineBucket"][];
             /** Format: int32 */
             days: number;
+        };
+        /**
+         * @description One row of the "top granters" leaderboard. Mirrors
+         *     [`crate::share_metadata::GranterCount`] but typed for the wire
+         *     (counts narrowed to u64 since they're always non-negative).
+         */
+        TopGranter: {
+            /**
+             * Format: int64
+             * @description Number of `share_metadata` rows owned by this handle that are
+             *     still active (no expiry, or expiry in the future).
+             */
+            active_share_count: number;
+            /**
+             * @description Owner handle as stored on the underlying row (case-preserved
+             *     display copy). Suitable for direct rendering in the UI.
+             */
+            handle: string;
         };
         TotpConfirmRequest: {
             code: string;
@@ -3343,6 +3622,215 @@ export interface operations {
             };
             /** @description Caller lacks moderator role */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sharing overview snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSharingOverview"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_reports: {
+        parameters: {
+            query?: {
+                /**
+                 * @description One of `open | dismissed | share_revoked | user_suspended | all`.
+                 *     Defaults to `open`. Unknown values 400.
+                 */
+                status?: string | null;
+                /** @description Page size. 1..=200; defaults to 50. */
+                limit?: number | null;
+                /** @description Page offset. Defaults to 0. */
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reports page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareReportListResponse"];
+                };
+            };
+            /** @description Unknown status value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resolve_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description share_reports.id of the report being resolved */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveReportRequest"];
+            };
+        };
+        responses: {
+            /** @description Report resolved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareReportRowDto"];
+                };
+            };
+            /** @description Invalid outcome / note length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such report */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Report already resolved */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_scope_histogram: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scope-kind distribution across active shares */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScopeHistogram"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5671,6 +6159,13 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: number;
+                /**
+                 * @description Scope the result to a single paired device. Omit for the
+                 *     account-wide stream (current default). Pre-0026 batches have
+                 *     no device_id stamped and are correctly excluded from any
+                 *     device-scoped filter.
+                 */
+                device_id?: string;
             };
             header?: never;
             path?: never;
@@ -7365,6 +7860,73 @@ export interface operations {
                 };
             };
             /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    report_share: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReportShareRequest"];
+            };
+        };
+        responses: {
+            /** @description Report filed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReportShareResponse"];
+                };
+            };
+            /** @description Invalid handle, reason, or details length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller is neither the owner nor recipient of the share */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Reporter rate-limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Database error */
             500: {
                 headers: {
                     [name: string]: unknown;

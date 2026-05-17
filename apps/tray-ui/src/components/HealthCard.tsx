@@ -44,7 +44,7 @@ export function HealthCard({
           const strings = healthStrings(it.params);
           return (
             <li
-              key={`${it.id}:${it.fingerprint}`}
+              key={it.fingerprint}
               style={{
                 display: 'grid',
                 gridTemplateColumns: 'auto 1fr auto auto',

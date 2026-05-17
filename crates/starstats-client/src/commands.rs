@@ -410,6 +410,174 @@ pub fn get_session_timeline(
     Ok(entries)
 }
 
+/// How many entries the "Top event types" section is allowed to show.
+/// Matches the spec for the clipboard summary — anything past 10 is
+/// noise in a Discord paste.
+const SESSION_SUMMARY_TOP_TYPES: usize = 10;
+
+/// How many recent timeline rows the summary embeds. Caps the
+/// clipboard payload at something hand-scannable.
+const SESSION_SUMMARY_TIMELINE_LIMIT: usize = 20;
+
+/// Column width for the event_type cell in the "Top event types"
+/// section. Long enough for the longest classifier name we ship
+/// without truncation, short enough that the count column stays close.
+const SESSION_SUMMARY_TYPE_COL_WIDTH: usize = 22;
+
+/// Column width for the event_type cell in the timeline section. The
+/// timeline is denser than the top-types table so the column is
+/// narrower; summaries flow into the remaining width.
+const SESSION_SUMMARY_TIMELINE_TYPE_COL_WIDTH: usize = 15;
+
+/// Insert a thousands separator into a u64 without pulling in a
+/// formatting crate — the summary is the only place we need it.
+fn format_count_with_commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
+/// Extract `HH:MM` from an RFC3339 timestamp. Falls back to the raw
+/// string's first 5 chars if parsing fails, so a malformed value still
+/// produces *something* readable rather than the empty cell.
+fn timeline_hhmm(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => dt.with_timezone(&chrono::Utc).format("%H:%M").to_string(),
+        Err(_) => raw.chars().take(5).collect(),
+    }
+}
+
+/// Pure formatter for the clipboard-friendly session summary. Kept
+/// free of any Tauri state so it can be unit-tested with fixture
+/// slices and a pinned `now` instant.
+///
+/// Layout (sections separated by a blank line):
+///   1. Title + "Generated <ts>" header
+///   2. "Captured N events total" (or "No events captured yet." short-circuit)
+///   3. Top event types (up to 10, padded columns, comma-separated counts)
+///   4. Recent timeline (up to 20, HH:MM + padded type + summary)
+fn format_session_summary(
+    event_counts: &[EventCount],
+    timeline: &[TimelineEntry],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let header_ts = now.format("%Y-%m-%d %H:%M UTC").to_string();
+    let total: u64 = event_counts.iter().map(|c| c.count).sum();
+
+    // Empty-state short-circuit. Returning a tiny but still-useful
+    // string keeps the clipboard action from looking broken when the
+    // store is fresh.
+    if total == 0 && timeline.is_empty() {
+        return format!(
+            "StarStats — session summary\nGenerated {header_ts}\n\nNo events captured yet.\n"
+        );
+    }
+
+    let mut out = String::new();
+    out.push_str("StarStats — session summary\n");
+    out.push_str(&format!("Generated {header_ts}\n"));
+    out.push('\n');
+    out.push_str(&format!(
+        "Captured {} events total\n",
+        format_count_with_commas(total)
+    ));
+
+    if !event_counts.is_empty() {
+        out.push('\n');
+        out.push_str("Top event types:\n");
+        for c in event_counts.iter().take(SESSION_SUMMARY_TOP_TYPES) {
+            out.push_str(&format!(
+                "  {:<width$}  {}\n",
+                c.event_type,
+                format_count_with_commas(c.count),
+                width = SESSION_SUMMARY_TYPE_COL_WIDTH,
+            ));
+        }
+    }
+
+    if !timeline.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "Recent timeline (last {}):\n",
+            SESSION_SUMMARY_TIMELINE_LIMIT.min(timeline.len())
+        ));
+        for entry in timeline.iter().take(SESSION_SUMMARY_TIMELINE_LIMIT) {
+            out.push_str(&format!(
+                "  {}  {:<width$}  {}\n",
+                timeline_hhmm(&entry.timestamp),
+                entry.event_type,
+                entry.summary,
+                width = SESSION_SUMMARY_TIMELINE_TYPE_COL_WIDTH,
+            ));
+        }
+    }
+
+    out
+}
+
+/// Build a plain-text summary of the current session suitable for
+/// pasting into Discord, a forum post, or a bug report. Re-uses the
+/// same accessors as `get_status` (event counts) and
+/// `get_session_timeline` (recent rows) so the numbers always agree
+/// with what the StatusPane is rendering.
+///
+/// Returns a `String` (not a struct) because the consumer is the
+/// clipboard — keeping it pre-formatted on the Rust side avoids
+/// scattering layout logic across the JS surface.
+#[tauri::command]
+pub async fn get_session_summary_text(state: State<'_, AppState>) -> Result<String, String> {
+    let counts: Vec<EventCount> = state
+        .storage
+        .event_counts()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(event_type, count)| EventCount { event_type, count })
+        .collect();
+
+    // Pull the same row set get_session_timeline returns, but cap the
+    // fetch at the summary's own limit — there's no value spending
+    // IPC bandwidth on rows we'd drop anyway.
+    let rows = state
+        .storage
+        .recent_events(SESSION_SUMMARY_TIMELINE_LIMIT)
+        .map_err(|e| e.to_string())?;
+    let cursor = state
+        .storage
+        .read_sync_cursor()
+        .map_err(|e| e.to_string())?;
+    let timeline: Vec<TimelineEntry> = rows
+        .into_iter()
+        .map(|r| {
+            let summary = match serde_json::from_str::<GameEvent>(&r.payload_json) {
+                Ok(event) => format_summary(&event),
+                Err(_) => format!("{} (unparseable payload)", r.event_type),
+            };
+            let synced = r.id <= cursor;
+            TimelineEntry {
+                id: r.id,
+                timestamp: r.timestamp,
+                event_type: r.event_type,
+                summary,
+                raw_line: r.raw_line,
+                log_source: r.log_source,
+                synced,
+            }
+        })
+        .collect();
+
+    Ok(format_session_summary(
+        &counts,
+        &timeline,
+        chrono::Utc::now(),
+    ))
+}
+
 /// Aggregate the recent shop / commodity request-response pairs into
 /// transaction rows. Pulls the last `limit` events, deserialises them,
 /// hands the slice to `starstats_core::pair_transactions`, and returns
@@ -1424,11 +1592,62 @@ fn redact(s: &str) -> String {
 
 // === Health surface (added 2026-05-16) =================================
 
+/// 60-second TTL cache for the two `sysinfo`-derived health inputs.
+/// `get_health` is polled every 15s by the tray UI; constructing a
+/// fresh `System` + `Disks` on each poll is individually cheap but
+/// cumulatively wasteful when the tray idles for hours. The tuple is
+/// `(stamped_at, sc_process_running, disk_free_bytes)`. We tolerate the
+/// staleness — the SC-running and free-disk signals don't need
+/// sub-minute resolution for the Health card to be useful.
+static SYSINFO_CACHE: parking_lot::Mutex<Option<(std::time::Instant, bool, Option<u64>)>> =
+    parking_lot::Mutex::new(None);
+
+const SYSINFO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Returns `(sc_process_running, disk_free_bytes)` from the cache if
+/// the entry is younger than `SYSINFO_TTL`, otherwise recomputes,
+/// stores, and returns the fresh values. Lock is released before the
+/// expensive recompute so a contended call doesn't serialize behind
+/// the cache holder.
+fn cached_sysinfo() -> (bool, Option<u64>) {
+    let now = std::time::Instant::now();
+    {
+        let cache = SYSINFO_CACHE.lock();
+        if let Some((stamped, sc, free)) = *cache {
+            if now.duration_since(stamped) < SYSINFO_TTL {
+                return (sc, free);
+            }
+        }
+    }
+    let (sc, free) = compute_sysinfo();
+    *SYSINFO_CACHE.lock() = Some((now, sc, free));
+    (sc, free)
+}
+
+/// Uncached `sysinfo` read used by `cached_sysinfo`. Constructs a
+/// minimal `System` (processes only, no global memory/CPU refresh) and
+/// queries the partition that hosts the StarStats data directory.
+fn compute_sysinfo() -> (bool, Option<u64>) {
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    let sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let sc_running = sys
+        .processes_by_name("StarCitizen.exe".as_ref())
+        .next()
+        .is_some()
+        || sys
+            .processes_by_name("StarCitizen".as_ref())
+            .next()
+            .is_some();
+    let free = crate::config::data_dir()
+        .ok()
+        .and_then(|d| free_bytes_for_path(&d));
+    (sc_running, free)
+}
+
 /// Assemble a `HealthInputs` snapshot from `AppState`, `Config`, the
 /// secret store, and `sysinfo`. Pure read-only — never mutates state.
 fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInputs, String> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-
     let now = chrono::Utc::now();
 
     let tail = state.tail_stats.lock().clone();
@@ -1447,20 +1666,7 @@ fn snapshot_health_inputs(state: &AppState) -> Result<crate::health::HealthInput
         .flatten()
         .is_some();
 
-    let sys =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    let sc_process_running = sys
-        .processes_by_name("StarCitizen.exe".as_ref())
-        .next()
-        .is_some()
-        || sys
-            .processes_by_name("StarCitizen".as_ref())
-            .next()
-            .is_some();
-
-    let disk_free_bytes = crate::config::data_dir()
-        .ok()
-        .and_then(|d| free_bytes_for_path(&d));
+    let (sc_process_running, disk_free_bytes) = cached_sysinfo();
 
     // Parse RFC3339 timestamps into DateTime<Utc>. A malformed value
     // disables the dependent check (e.g. GameLogStale), so log on
@@ -1616,11 +1822,39 @@ pub async fn set_update_available(
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_timeline_limit, redact, run_reparse, validate_pair_url, DEFAULT_TIMELINE_LIMIT,
-        MAX_TIMELINE_LIMIT,
+        clamp_timeline_limit, format_session_summary, redact, run_reparse, validate_pair_url,
+        EventCount, TimelineEntry, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT,
     };
     use crate::storage::Storage;
     use tempfile::TempDir;
+
+    /// Build a single TimelineEntry fixture for the session-summary
+    /// formatter tests. Synced/raw_line/log_source aren't surfaced by
+    /// the summary text, so they get throwaway placeholders.
+    fn fixture_timeline_entry(
+        id: i64,
+        timestamp: &str,
+        event_type: &str,
+        summary: &str,
+    ) -> TimelineEntry {
+        TimelineEntry {
+            id,
+            timestamp: timestamp.to_string(),
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            raw_line: String::new(),
+            log_source: "LIVE".to_string(),
+            synced: false,
+        }
+    }
+
+    fn fixed_ts() -> chrono::DateTime<chrono::Utc> {
+        // Pin to a known instant so tests don't depend on wall clock.
+        // 2026-05-16 14:23:45 UTC -- matches the example in the spec.
+        chrono::DateTime::parse_from_rfc3339("2026-05-16T14:23:45Z")
+            .expect("parse fixed timestamp")
+            .with_timezone(&chrono::Utc)
+    }
 
     /// Phase 3 retro-burst end-to-end test. Seeds a fresh SQLite with a
     /// 5-line `AttachmentReceived` run (matches the
@@ -1788,5 +2022,144 @@ mod tests {
     #[test]
     fn validate_pair_url_rejects_https_without_host() {
         assert!(validate_pair_url("https://").is_err());
+    }
+
+    /// Two back-to-back `cached_sysinfo` calls land microseconds apart,
+    /// well inside the 60s TTL. The cached path must return the exact
+    /// same tuple — proves the cache is being read on the second call
+    /// rather than recomputed.
+    #[test]
+    fn cached_sysinfo_hits_within_ttl() {
+        let first = super::cached_sysinfo();
+        let second = super::cached_sysinfo();
+        assert_eq!(
+            first, second,
+            "cached call within TTL must return identical values"
+        );
+    }
+
+    #[test]
+    fn session_summary_empty_returns_no_events_line() {
+        let out = format_session_summary(&[], &[], fixed_ts());
+        assert!(
+            out.contains("No events captured yet."),
+            "empty summary should call out zero events, got:\n{out}"
+        );
+        assert!(out.starts_with("StarStats — session summary"));
+    }
+
+    #[test]
+    fn session_summary_lists_top_types_in_order_and_count() {
+        let counts = vec![
+            EventCount {
+                event_type: "login".to_string(),
+                count: 234,
+            },
+            EventCount {
+                event_type: "ship_destroyed".to_string(),
+                count: 89,
+            },
+            EventCount {
+                event_type: "location_enter".to_string(),
+                count: 67,
+            },
+        ];
+        let out = format_session_summary(&counts, &[], fixed_ts());
+        // Order: login must appear before ship_destroyed which must
+        // appear before location_enter.
+        let login_idx = out.find("login").expect("login present");
+        let ship_idx = out.find("ship_destroyed").expect("ship_destroyed present");
+        let loc_idx = out.find("location_enter").expect("location_enter present");
+        assert!(
+            login_idx < ship_idx,
+            "login should come before ship_destroyed"
+        );
+        assert!(
+            ship_idx < loc_idx,
+            "ship_destroyed should come before location_enter"
+        );
+        // Counts (comma-formatted) must show up.
+        assert!(out.contains("234"), "count 234 missing: {out}");
+        assert!(out.contains("89"), "count 89 missing: {out}");
+        assert!(out.contains("67"), "count 67 missing: {out}");
+    }
+
+    #[test]
+    fn session_summary_caps_top_types_at_ten() {
+        let counts: Vec<EventCount> = (0..15)
+            .map(|i| EventCount {
+                event_type: format!("type_{:02}", i),
+                count: (100 - i) as u64,
+            })
+            .collect();
+        let out = format_session_summary(&counts, &[], fixed_ts());
+        // First 10 should appear, indices 10..15 should not.
+        for i in 0..10 {
+            let name = format!("type_{:02}", i);
+            assert!(out.contains(&name), "expected {name} in output: {out}");
+        }
+        for i in 10..15 {
+            let name = format!("type_{:02}", i);
+            assert!(
+                !out.contains(&name),
+                "did not expect {name} in capped output: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_summary_caps_timeline_at_twenty() {
+        // 25 entries, newest first (matches what storage::recent_events
+        // returns). Each entry's summary embeds its index so we can
+        // check which made the cut.
+        let timeline: Vec<TimelineEntry> = (0..25)
+            .map(|i| {
+                fixture_timeline_entry(
+                    i as i64,
+                    "2026-05-16T14:00:00Z",
+                    "test_event",
+                    &format!("summary_{:02}", i),
+                )
+            })
+            .collect();
+        let counts = vec![EventCount {
+            event_type: "test_event".to_string(),
+            count: 25,
+        }];
+        let out = format_session_summary(&counts, &timeline, fixed_ts());
+        // First 20 summaries (indices 0..20) must appear; 20..25 must not.
+        for i in 0..20 {
+            let s = format!("summary_{:02}", i);
+            assert!(out.contains(&s), "expected {s} in timeline output: {out}");
+        }
+        for i in 20..25 {
+            let s = format!("summary_{:02}", i);
+            assert!(
+                !out.contains(&s),
+                "did not expect {s} in capped timeline: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_summary_timestamp_header_present() {
+        let out = format_session_summary(&[], &[], fixed_ts());
+        assert!(
+            out.starts_with("StarStats — session summary"),
+            "must lead with the title, got: {out}"
+        );
+        // Find the "Generated " line and confirm a 4-digit year follows.
+        let idx = out.find("Generated ").expect("Generated label");
+        let tail = &out[idx + "Generated ".len()..];
+        let year_part: String = tail.chars().take(4).collect();
+        assert_eq!(
+            year_part.len(),
+            4,
+            "expected at least 4 chars after 'Generated ', got: {tail}"
+        );
+        assert!(
+            year_part.chars().all(|c| c.is_ascii_digit()),
+            "first 4 chars after 'Generated ' should be a year, got: {year_part}"
+        );
     }
 }

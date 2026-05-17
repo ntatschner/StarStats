@@ -26,6 +26,8 @@ mod admin_org_routes;
 mod admin_reference_routes;
 #[path = "../admin_routes.rs"]
 mod admin_routes;
+#[path = "../admin_sharing_routes.rs"]
+mod admin_sharing_routes;
 #[path = "../admin_submission_routes.rs"]
 mod admin_submission_routes;
 #[path = "../admin_user_routes.rs"]
@@ -106,6 +108,8 @@ mod rsi_verify;
 mod rsi_verify_routes;
 #[path = "../share_metadata.rs"]
 mod share_metadata;
+#[path = "../share_reports.rs"]
+mod share_reports;
 #[path = "../sharing_routes.rs"]
 mod sharing_routes;
 #[path = "../smtp_admin_routes.rs"]

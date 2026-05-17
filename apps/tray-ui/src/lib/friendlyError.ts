@@ -59,7 +59,7 @@ export function friendlyError(err: unknown): FriendlyError {
       hint: 'Try again in a moment.',
     };
   }
-  if (/cookie|rsi[-_ ]?token/.test(lower)) {
+  if (/rsi[-_ ]?token|rsi cookie|rsi rejected the cookie|no cookie set/i.test(message)) {
     return {
       title: 'No RSI cookie',
       body: 'Paste your RSI cookie to enable hangar sync.',

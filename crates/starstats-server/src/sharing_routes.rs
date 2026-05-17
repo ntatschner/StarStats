@@ -24,6 +24,10 @@ use crate::auth::AuthenticatedUser;
 use crate::orgs::{OrgStore, PostgresOrgStore};
 use crate::repo::{EventQuery, PostgresStore};
 use crate::share_metadata::{ShareMetadataStore, NOTE_MAX_LEN};
+use crate::share_reports::{
+    rate_limit_window, ShareReportError, ShareReportReason, ShareReportStore, DETAILS_MAX_LEN,
+    RATE_LIMIT_PER_WINDOW,
+};
 use crate::spicedb::{ObjectRef, SpicedbClient};
 use crate::users::{PostgresUserStore, UserStore};
 use crate::validation::{build_timeline_buckets, resolve_timeline_days};
@@ -65,7 +69,8 @@ pub fn routes(
     let share_no_state_router: Router = Router::new()
         .route("/v1/me/shares", get(list_shares))
         .route("/v1/me/shared-with-me", get(list_shared_with_me))
-        .route("/v1/me/share/:recipient_handle", delete(delete_share));
+        .route("/v1/me/share/:recipient_handle", delete(delete_share))
+        .route("/v1/share/report", post(report_share));
 
     let share_org_post_router = Router::new()
         .route(
@@ -1344,19 +1349,32 @@ async fn render_timeline<Q: EventQuery>(query: &Q, handle: &str, days: u32) -> R
     render_timeline_scoped(query, handle, days, None).await
 }
 
-/// Scope-aware timeline. Today's clamp is window-only — bucket
-/// counts cannot be filtered by event type without rewriting the
-/// `_shared` repo method to take a type list, which is out of scope
-/// for this slice. The window clamp alone delivers the audit's
-/// headline "7 days only" use case.
+/// Scope-aware timeline. Clamps both the window (`scope.window_days`,
+/// applied upstream via [`clamp_days`]) AND the per-event type stream
+/// (`scope.allow_event_types` / `scope.deny_event_types`, applied
+/// here by routing to the repo's `timeline_shared_filtered`). The
+/// allowlist wins by precedence — types absent from a non-empty
+/// allowlist are dropped before the denylist is consulted, matching
+/// the summary clamp's [`apply_event_type_filter`] semantics. With
+/// no scope or no per-type lists this is identical to the un-scoped
+/// `render_timeline` path.
 async fn render_timeline_scoped<Q: EventQuery>(
     query: &Q,
     handle: &str,
     days: u32,
-    _scope: Option<&ShareScope>,
+    scope: Option<&ShareScope>,
 ) -> Response {
+    let allow = scope.and_then(|s| s.allow_event_types.as_deref());
+    let deny = scope.and_then(|s| s.deny_event_types.as_deref());
     // `_shared` variant — see `render_summary` for the rationale.
-    match query.timeline_shared(handle, days).await {
+    let result = if allow.is_none() && deny.is_none() {
+        query.timeline_shared(handle, days).await
+    } else {
+        query
+            .timeline_shared_filtered(handle, days, allow, deny)
+            .await
+    };
+    match result {
         Ok(rows) => {
             let buckets = build_timeline_buckets(rows, days)
                 .into_iter()
@@ -1589,6 +1607,154 @@ pub async fn friend_timeline<Q: EventQuery>(
     .await
 }
 
+// -- /v1/share/report ------------------------------------------------
+
+/// Request body for `POST /v1/share/report`. Reporter is the auth'd
+/// user (NOT a body field) — taking it off the token prevents
+/// spoofing one user as another.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ReportShareRequest {
+    /// Owner side of the (owner, recipient) pair being reported.
+    pub owner_handle: String,
+    /// Recipient side of the (owner, recipient) pair being reported.
+    pub recipient_handle: String,
+    /// One of `abuse | spam | data_misuse | other`. Other values 400.
+    pub reason: String,
+    /// Optional free-text context. Capped at `DETAILS_MAX_LEN` chars.
+    pub details: Option<String>,
+}
+
+/// Echo of the created report so the UI can confirm the row landed.
+/// Tight subset of `ShareReport` — full row is admin-only.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportShareResponse {
+    pub id: uuid::Uuid,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// POST `/v1/share/report` — file a moderation report against a
+/// specific (owner_handle, recipient_handle) share.
+///
+/// Authorization model: the reporter (auth'd user) must be one side
+/// of the share. Either the recipient flagging the owner ("creep
+/// shared with me") or the owner flagging the recipient ("recipient
+/// is doing creepy stuff with my data"). A third party can't report.
+///
+/// Rate-limited at the app layer: max `RATE_LIMIT_PER_WINDOW` rows
+/// per reporter per `rate_limit_window()`. The handler queries the
+/// store; no Redis dependency. Exceeded -> 429.
+#[utoipa::path(
+    post,
+    path = "/v1/share/report",
+    tag = "sharing",
+    request_body = ReportShareRequest,
+    responses(
+        (status = 200, description = "Report filed", body = ReportShareResponse),
+        (status = 400, description = "Invalid handle, reason, or details length", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is neither the owner nor recipient of the share", body = ApiErrorBody),
+        (status = 429, description = "Reporter rate-limit exceeded", body = ApiErrorBody),
+        (status = 500, description = "Database error", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn report_share(
+    auth: AuthenticatedUser,
+    Extension(reports): Extension<Arc<dyn ShareReportStore>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Json(body): Json<ReportShareRequest>,
+) -> Response {
+    // Validate handles (cheap, same rules as the rest of the file).
+    if !validate_handle(&body.owner_handle) || !validate_handle(&body.recipient_handle) {
+        return err(StatusCode::BAD_REQUEST, "invalid_handle");
+    }
+    let reason = match ShareReportReason::parse(&body.reason) {
+        Some(r) => r,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_reason"),
+    };
+    let details = match body.details.as_deref().map(str::trim) {
+        Some("") => None,
+        Some(s) if s.chars().count() > DETAILS_MAX_LEN => {
+            return err(StatusCode::BAD_REQUEST, "details_too_long")
+        }
+        Some(s) => Some(s.to_string()),
+        None => None,
+    };
+
+    // Authorization gate: reporter must be one side of the share.
+    let reporter = &auth.preferred_username;
+    let is_owner_side = reporter.eq_ignore_ascii_case(&body.owner_handle);
+    let is_recipient_side = reporter.eq_ignore_ascii_case(&body.recipient_handle);
+    if !is_owner_side && !is_recipient_side {
+        return err(StatusCode::FORBIDDEN, "not_a_party_to_the_share");
+    }
+
+    // Rate-limit by reporter. Best-effort: a transient DB hiccup here
+    // shouldn't block a legitimate report, so we log + skip the gate
+    // if the count itself fails.
+    let since = chrono::Utc::now() - rate_limit_window();
+    match reports.count_recent_by_reporter(reporter, since).await {
+        Ok(n) if n >= RATE_LIMIT_PER_WINDOW => {
+            return err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "share_reports rate-limit count failed; skipping gate");
+        }
+    }
+
+    let row = match reports
+        .create(
+            reporter,
+            &body.owner_handle,
+            &body.recipient_handle,
+            reason,
+            details.as_deref(),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(ShareReportError::Database(e)) => {
+            tracing::error!(error = %e, "share_reports.create failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "database_error");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "share_reports.create unexpected");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        }
+    };
+
+    // Best-effort audit emission. Same posture as `share.viewed` —
+    // a hiccup here must not poison the response.
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(reporter.clone()),
+            action: "share.reported".to_string(),
+            payload: serde_json::json!({
+                "report_id": row.id,
+                "owner_handle": row.owner_handle,
+                "recipient_handle": row.recipient_handle,
+                "reason": row.reason.as_str(),
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.reported)");
+    }
+
+    (
+        StatusCode::OK,
+        Json(ReportShareResponse {
+            id: row.id,
+            status: row.status.as_str().to_string(),
+            created_at: row.created_at,
+        }),
+    )
+        .into_response()
+}
+
 // -- Tests -----------------------------------------------------------
 //
 // SpiceDB writes/reads need a live sidecar to round-trip cleanly, and
@@ -1795,6 +1961,122 @@ mod tests {
         let (status, body) = read_body(resp).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "spicedb_unavailable");
+    }
+
+    /// Build a `ShareScope` shaped for the per-event timeline clamp
+    /// tests below — kind="timeline" (so the gate doesn't 404), no
+    /// window clamp (handler clamping is covered by the W3 tests),
+    /// and the caller-supplied allow/deny lists piped straight through.
+    fn timeline_scope(allow: Option<Vec<String>>, deny: Option<Vec<String>>) -> ShareScope {
+        ShareScope {
+            kind: "timeline".to_string(),
+            tabs: None,
+            window_days: None,
+            allow_event_types: allow,
+            deny_event_types: deny,
+        }
+    }
+
+    /// Build a `StoredQueryEvent` for the in-memory query stub. The
+    /// timeline path only inspects `claimed_handle`, `event_type`,
+    /// `event_timestamp`, and `hidden_at`; the rest are filler so the
+    /// tests don't carry pointless `..Default::default()` noise.
+    fn evt(
+        seq: i64,
+        handle: &str,
+        event_type: &str,
+        ts: chrono::DateTime<chrono::Utc>,
+    ) -> crate::repo::StoredQueryEvent {
+        crate::repo::StoredQueryEvent {
+            seq,
+            claimed_handle: handle.to_string(),
+            event_type: event_type.to_string(),
+            event_timestamp: Some(ts),
+            log_source: "live".into(),
+            source_offset: 0,
+            payload: serde_json::Value::Null,
+            hidden_at: None,
+        }
+    }
+
+    /// Sum every bucket in a `PublicTimelineResponse` body. The tests
+    /// don't care which day a bucket landed on (the helper zero-pads
+    /// over the trailing N days) — only the total surviving the
+    /// per-type clamp matters for the precedence assertions.
+    fn total_count(body: &serde_json::Value) -> u64 {
+        body["buckets"]
+            .as_array()
+            .map(|arr| arr.iter().map(|b| b["count"].as_u64().unwrap_or(0)).sum())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn timeline_scope_allow_keeps_only_listed_types() {
+        // Three rows for Alice across two types, all within the
+        // trailing-7d window. allow_event_types=[quantum_target_selected]
+        // should drop the actor_death row and leave the two quantum rows.
+        let now = chrono::Utc::now();
+        let mq = crate::repo::test_support::MemoryQuery::new(vec![
+            evt(1, "Alice", "quantum_target_selected", now),
+            evt(2, "Alice", "quantum_target_selected", now),
+            evt(3, "Alice", "actor_death", now),
+        ]);
+        let scope = timeline_scope(Some(vec!["quantum_target_selected".to_string()]), None);
+        let resp = render_timeline_scoped(&mq, "Alice", 7, Some(&scope)).await;
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["days"], 7);
+        assert_eq!(total_count(&body), 2, "allow-listed types only");
+    }
+
+    #[tokio::test]
+    async fn timeline_scope_deny_excludes_listed_types() {
+        // Mirror of the allow test: denylist for actor_death drops the
+        // single matching row, leaving the two quantum rows.
+        let now = chrono::Utc::now();
+        let mq = crate::repo::test_support::MemoryQuery::new(vec![
+            evt(1, "Alice", "quantum_target_selected", now),
+            evt(2, "Alice", "quantum_target_selected", now),
+            evt(3, "Alice", "actor_death", now),
+        ]);
+        let scope = timeline_scope(None, Some(vec!["actor_death".to_string()]));
+        let resp = render_timeline_scoped(&mq, "Alice", 7, Some(&scope)).await;
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(total_count(&body), 2, "deny-listed type excluded");
+    }
+
+    #[tokio::test]
+    async fn timeline_scope_allow_precedence_over_deny() {
+        // Both lists set: allow=[quantum_target_selected] AND
+        // deny=[quantum_target_selected]. Allow runs first and drops
+        // anything not in its list (so actor_death is gone); the deny
+        // then strips quantum out, leaving zero. This is the
+        // "most restrictive wins" composition we document on the
+        // ShareScope struct.
+        let now = chrono::Utc::now();
+        let mq = crate::repo::test_support::MemoryQuery::new(vec![
+            evt(1, "Alice", "quantum_target_selected", now),
+            evt(2, "Alice", "quantum_target_selected", now),
+            evt(3, "Alice", "actor_death", now),
+        ]);
+        let scope = timeline_scope(
+            Some(vec!["quantum_target_selected".to_string()]),
+            Some(vec!["quantum_target_selected".to_string()]),
+        );
+        let resp = render_timeline_scoped(&mq, "Alice", 7, Some(&scope)).await;
+        let (status, body) = read_body(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(total_count(&body), 0, "contradictory allow+deny strips all");
+
+        // Sanity: allow alone keeps the quantum rows. Without this
+        // companion assertion a regression where allow silently
+        // dropped *everything* would look identical to "deny won".
+        let scope_allow_only =
+            timeline_scope(Some(vec!["quantum_target_selected".to_string()]), None);
+        let resp2 = render_timeline_scoped(&mq, "Alice", 7, Some(&scope_allow_only)).await;
+        let (_, body2) = read_body(resp2).await;
+        assert_eq!(total_count(&body2), 2);
     }
 
     #[tokio::test]

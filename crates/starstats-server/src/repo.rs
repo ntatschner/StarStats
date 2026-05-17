@@ -135,6 +135,12 @@ pub struct IngestBatchRow {
     pub occurred_at: DateTime<Utc>,
     pub batch_id: String,
     pub game_build: Option<String>,
+    /// Pairing-flow device that posted the batch. `None` on legacy
+    /// rows written before migration 0026 (the field was absent from
+    /// the audit payload) and on rows pushed under a user-scoped
+    /// bearer token (no device claim). Populated for every batch
+    /// posted by a paired tray client going forward.
+    pub device_id: Option<Uuid>,
     pub total: i64,
     pub accepted: i64,
     pub duplicate: i64,
@@ -199,6 +205,31 @@ pub trait EventQuery: Send + Sync + 'static {
         days: u32,
     ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
         self.timeline(claimed_handle, days).await
+    }
+
+    /// Scope-aware shared timeline. Same as [`Self::timeline_shared`]
+    /// but additionally clamps the per-event row stream by event_type
+    /// before bucketing. When both `allow_types` and `deny_types` are
+    /// `None` this is exactly `timeline_shared`. When `allow_types` is
+    /// `Some(&[..])` only those types contribute; when `deny_types` is
+    /// `Some(&[..])` those types are excluded. The allowlist wins —
+    /// types absent from a non-empty allowlist are dropped before the
+    /// denylist is consulted, matching the precedence already used by
+    /// the summary `apply_event_type_filter` helper. An empty
+    /// allowlist therefore returns an empty timeline (no types match).
+    ///
+    /// Default impl falls through to `timeline_shared` so a fresh
+    /// in-memory test stub doesn't have to think about the per-type
+    /// clamp; the MemoryQuery + PostgresStore impls below override to
+    /// actually honour the lists.
+    async fn timeline_shared_filtered(
+        &self,
+        claimed_handle: &str,
+        days: u32,
+        _allow_types: Option<&[String]>,
+        _deny_types: Option<&[String]>,
+    ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
+        self.timeline_shared(claimed_handle, days).await
     }
 
     /// Returns (total, [(event_type, count)]).
@@ -266,6 +297,7 @@ pub trait EventQuery: Send + Sync + 'static {
     async fn ingest_history_for_handle(
         &self,
         actor_handle: &str,
+        device_id: Option<Uuid>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<IngestBatchRow>, RepoError>;
@@ -537,6 +569,52 @@ pub mod test_support {
             Ok(counts.into_iter().collect())
         }
 
+        /// In-memory scope-aware timeline. Filters raw rows by the
+        /// allow/deny event-type lists BEFORE bucketing — once rows
+        /// have been GROUPed into daily counts the per-type identity
+        /// is gone, so filtering has to happen on the row stream.
+        /// Mirrors the precedence in `apply_event_type_filter`:
+        /// allowlist first (absent = dropped), then denylist. Also
+        /// honours `hidden_at IS NOT NULL` the same way the production
+        /// `timeline_shared` does so test parity is preserved.
+        async fn timeline_shared_filtered(
+            &self,
+            claimed_handle: &str,
+            days: u32,
+            allow_types: Option<&[String]>,
+            deny_types: Option<&[String]>,
+        ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
+            let since = Utc::now() - chrono::Duration::days(days as i64);
+            let mut counts: std::collections::BTreeMap<NaiveDate, i64> =
+                std::collections::BTreeMap::new();
+            for r in &self.rows {
+                if r.claimed_handle != claimed_handle {
+                    continue;
+                }
+                if r.hidden_at.is_some() {
+                    continue;
+                }
+                let Some(ts) = r.event_timestamp else {
+                    continue;
+                };
+                if ts < since {
+                    continue;
+                }
+                if let Some(allow) = allow_types {
+                    if !allow.iter().any(|t| t == &r.event_type) {
+                        continue;
+                    }
+                }
+                if let Some(deny) = deny_types {
+                    if deny.iter().any(|t| t == &r.event_type) {
+                        continue;
+                    }
+                }
+                *counts.entry(ts.date_naive()).or_default() += 1;
+            }
+            Ok(counts.into_iter().collect())
+        }
+
         async fn summary_for_handle(
             &self,
             claimed_handle: &str,
@@ -641,6 +719,7 @@ pub mod test_support {
         async fn ingest_history_for_handle(
             &self,
             actor_handle: &str,
+            device_id: Option<Uuid>,
             limit: i64,
             offset: i64,
         ) -> Result<Vec<IngestBatchRow>, RepoError> {
@@ -648,6 +727,10 @@ pub mod test_support {
                 .ingest_history
                 .iter()
                 .filter(|(h, _)| h == actor_handle)
+                .filter(|(_, row)| match device_id {
+                    Some(want) => row.device_id == Some(want),
+                    None => true,
+                })
                 .map(|(_, row)| row.clone())
                 .collect();
             rows.sort_by(|a, b| b.seq.cmp(&a.seq));
@@ -986,6 +1069,74 @@ impl EventQuery for PostgresStore {
         Ok(rows)
     }
 
+    /// Scope-aware shared timeline. Adds two optional `event_type`
+    /// predicates to the `timeline_shared` query:
+    ///
+    ///   - `allow_types: Some(&[...])` -> `event_type = ANY($N)`
+    ///   - `deny_types:  Some(&[...])` -> `event_type <> ALL($N)`
+    ///
+    /// Allowlist wins by precedence: when both are set, the allowlist
+    /// is applied first (an "absent from allow" type can never reach
+    /// the deny check), matching the in-memory + summary helper
+    /// semantics. Empty allowlists therefore return zero buckets.
+    /// Bound as Postgres `text[]` so the planner uses the existing
+    /// `events_event_ts_idx` index the same way `latest_location`
+    /// does for its `event_type = ANY($2)` clause.
+    async fn timeline_shared_filtered(
+        &self,
+        claimed_handle: &str,
+        days: u32,
+        allow_types: Option<&[String]>,
+        deny_types: Option<&[String]>,
+    ) -> Result<Vec<(NaiveDate, i64)>, RepoError> {
+        // Fast path: no per-type clamp -> same SQL as `timeline_shared`,
+        // so reuse it instead of duplicating the bind sites.
+        if allow_types.is_none() && deny_types.is_none() {
+            return self.timeline_shared(claimed_handle, days).await;
+        }
+        // Build the WHERE clause + bind list dynamically so a missing
+        // allow/deny doesn't burn a bind slot. `$1` = handle, `$2` =
+        // days; the optional arrays slot in as `$3`/`$4` only when set
+        // and the placeholder index is computed accordingly.
+        let mut sql = String::from(
+            "SELECT (date_trunc('day', event_timestamp) AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(*)::BIGINT
+             FROM events
+             WHERE claimed_handle = $1
+               AND event_timestamp IS NOT NULL
+               AND event_timestamp >= NOW() - make_interval(days => $2)
+               AND hidden_at IS NULL",
+        );
+        let mut next_param: usize = 3;
+        let allow_owned = allow_types.map(<[String]>::to_vec);
+        let deny_owned = deny_types.map(<[String]>::to_vec);
+        if allow_owned.is_some() {
+            sql.push_str(&format!(
+                "\n               AND event_type = ANY(${next_param}::text[])"
+            ));
+            next_param += 1;
+        }
+        if deny_owned.is_some() {
+            sql.push_str(&format!(
+                "\n               AND event_type <> ALL(${next_param}::text[])"
+            ));
+            // next_param += 1; // unused — kept for symmetry / future binds
+        }
+        sql.push_str("\n             GROUP BY day\n             ORDER BY day ASC");
+
+        let mut q = sqlx::query_as::<_, (NaiveDate, i64)>(&sql)
+            .bind(claimed_handle)
+            .bind(days as i32);
+        if let Some(allow) = allow_owned.as_ref() {
+            q = q.bind(allow);
+        }
+        if let Some(deny) = deny_owned.as_ref() {
+            q = q.bind(deny);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
     /// Shared-perspective variant: excludes rows the owner has hidden
     /// from both the total and the by-type breakdown. Friend + public
     /// summary endpoints call this; the owner's `/v1/me/summary`
@@ -1159,6 +1310,7 @@ impl EventQuery for PostgresStore {
     async fn ingest_history_for_handle(
         &self,
         actor_handle: &str,
+        device_id: Option<Uuid>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<IngestBatchRow>, RepoError> {
@@ -1166,45 +1318,75 @@ impl EventQuery for PostgresStore {
         // a missing key yields NULL which we coerce to 0/None below.
         // Defensive — a future schema bump that drops fields shouldn't
         // crash the read endpoint.
-        let rows: Vec<(
-            i64,
-            DateTime<Utc>,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-        )> = sqlx::query_as(
+        //
+        // When `device_id` is set we add a `payload->>'device_id' =
+        // $N` clamp. Pre-0026 rows have no device_id key in their
+        // payload (`->>` yields NULL) so they are correctly excluded
+        // from any device-scoped filter. The partial functional index
+        // from migration 0026 keeps this cheap.
+        let device_filter_sql = if device_id.is_some() {
+            " AND payload->>'device_id' = $4"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT seq,
                     occurred_at,
                     payload->>'batch_id'   AS batch_id,
                     payload->>'game_build' AS game_build,
+                    payload->>'device_id'  AS device_id,
                     NULLIF(payload->>'total','')::BIGINT     AS total,
                     NULLIF(payload->>'accepted','')::BIGINT  AS accepted,
                     NULLIF(payload->>'duplicate','')::BIGINT AS duplicate,
                     NULLIF(payload->>'rejected','')::BIGINT  AS rejected
              FROM audit_log
              WHERE action = 'ingest.batch_processed'
-               AND actor_handle = $1
+               AND actor_handle = $1{device_filter_sql}
              ORDER BY seq DESC
-             LIMIT $2 OFFSET $3",
-        )
+             LIMIT $2 OFFSET $3"
+        );
+        let mut q = sqlx::query_as::<
+            _,
+            (
+                i64,
+                DateTime<Utc>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+            ),
+        >(&sql)
         .bind(actor_handle)
         .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+        .bind(offset);
+        if let Some(d) = device_id {
+            q = q.bind(d.to_string());
+        }
+        let rows = q.fetch_all(&self.pool).await?;
 
         Ok(rows
             .into_iter()
             .map(
-                |(seq, occurred_at, batch_id, game_build, total, accepted, duplicate, rejected)| {
+                |(
+                    seq,
+                    occurred_at,
+                    batch_id,
+                    game_build,
+                    device_id,
+                    total,
+                    accepted,
+                    duplicate,
+                    rejected,
+                )| {
                     IngestBatchRow {
                         seq,
                         occurred_at,
                         batch_id: batch_id.unwrap_or_default(),
                         game_build,
+                        device_id: device_id.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
                         total: total.unwrap_or(0),
                         accepted: accepted.unwrap_or(0),
                         duplicate: duplicate.unwrap_or(0),

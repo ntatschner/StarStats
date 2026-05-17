@@ -317,6 +317,7 @@ fn main() {
             commands::save_config,
             commands::get_discovered_logs,
             commands::get_parse_coverage,
+            commands::get_session_summary_text,
             commands::get_session_timeline,
             commands::list_transactions,
             commands::get_app_version,

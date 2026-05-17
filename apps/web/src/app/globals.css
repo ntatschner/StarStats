@@ -65,6 +65,11 @@ main {
 
 main h1 {
   margin-top: 0;
+  /* Audit v2 §03 type plateau: drop the default browser 2em (~32px)
+     down to 28px so inner pages don't compete with top-of-funnel
+     surfaces. Top-level pages that want the louder 32px set it
+     inline; detail pages can opt into a smaller tier the same way. */
+  font-size: 28px;
 }
 
 .muted {

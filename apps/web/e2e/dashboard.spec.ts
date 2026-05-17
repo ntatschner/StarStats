@@ -31,8 +31,12 @@ test('dashboard_renders_top_types_and_timeline', async ({ page, request }) => {
   await expect(page.getByRole('heading', { name: /Hi, TestPilot/ })).toBeVisible();
   await expect(page.getByText('1,234 events captured')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Top event types' })).toBeVisible();
-  // Top-types card renders each event type as a `<Link className="mono">`.
-  await expect(page.locator('a.mono').filter({ hasText: 'login' }).first()).toBeVisible();
+  // W4 audit (commit 0d557d1) restyled the top-types links — no more
+  // `className="mono"` and the visible label is title-cased via
+  // `formatEventType(...).label`. The raw event-type token is still
+  // carried by the `title` attribute, which is the stable selector
+  // here.
+  await expect(page.locator('a[title="login"]').first()).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last 30 days' })).toBeVisible();
   // 30-day chart is now a CSS-grid heatmap with role="img".
   await expect(page.getByRole('img', { name: /Per-day event counts/ })).toBeVisible();
@@ -59,14 +63,15 @@ test('dashboard_clicking_event_type_drills_down', async ({ page, request }) => {
     }),
   );
 
-  // Top-types card has the type code wrapped in a <Link className="mono">;
-  // clicking the link navigates to /dashboard?type=login.
-  await page.locator('a.mono').filter({ hasText: 'login' }).first().click();
+  // W4 audit (commit 0d557d1) restyled the top-types link and the
+  // active-filter badge. Both still carry the raw type token via
+  // `title=`, which is the stable selector here.
+  await page.locator('a[title="login"]').first().click();
 
   await expect(page).toHaveURL(/\/dashboard\?type=login/);
-  // Active-filter badge announces the current type filter — the inner
-  // mono span renders the literal `type=login` string.
-  await expect(page.locator('span.ss-badge').filter({ hasText: 'type=login' })).toBeVisible();
+  // Active-filter badge — visible text is now "Filter: <glyph> <Label>";
+  // the raw token lives on the title attribute.
+  await expect(page.locator('span.ss-badge[title="login"]')).toBeVisible();
 
   // Verify the server actually issued a filtered listEvents call.
   const calls = await getCalls(request);

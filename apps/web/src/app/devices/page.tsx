@@ -1,7 +1,7 @@
 /**
  * Devices — per-client identity surface. Each paired desktop client gets
  * its own tab; inside the tab we show pairing info plus an Activity
- * section listing recent ingest batches for the account.
+ * section listing recent ingest batches the device posted.
  *
  * The "no raw retention" stance is hard: we show per-batch metadata
  * (counts, build, timestamp) and nothing else. There is no per-line
@@ -13,10 +13,13 @@
  * device's pipeline rather than two parallel global lists. /uploads
  * now redirects here.
  *
- * NB: the ingest-history API does not yet expose device_id, so the
- * Activity section currently shows the account-level batch stream
- * scoped under whichever device tab is active. When the API gains a
- * device_id field on IngestBatchDto we filter here.
+ * Per-device filtering: the ingest handler stamps the device_id off
+ * the bearer token's device claim into the audit payload (migration
+ * 0026), and `getIngestHistory` passes `device_id=<active tab id>` so
+ * the API returns only that device's batches. Legacy rows (pre-0026)
+ * have no device_id and won't appear under any device tab — they're
+ * still visible by hitting the endpoint without the filter, which
+ * isn't surfaced in this UI by design.
  */
 
 import Link from 'next/link';
@@ -238,13 +241,16 @@ export default async function DevicesPage(props: {
   const activeDevice =
     deviceList.find((d) => d.id === selectedParam) ?? deviceList[0] ?? null;
 
-  // Activity feed is account-level today; we only fetch when at least
-  // one device exists (otherwise the section is moot).
+  // Activity feed is scoped to the active device tab via the
+  // `device_id` query param (server-side filter on the audit payload
+  // stamped at ingest time). We only fetch when at least one device
+  // exists (otherwise the section is moot).
   let activity: IngestHistoryResponse | null = null;
   if (activeDevice) {
     try {
       activity = await getIngestHistory(session.token, {
         limit: ACTIVITY_LIMIT,
+        deviceId: activeDevice.id,
       });
     } catch (e) {
       if (e instanceof ApiCallError && e.status === 401) {
@@ -544,7 +550,8 @@ function DeviceActivity({
         </h3>
         <p style={{ margin: '4px 0 0', color: 'var(--fg-dim)', fontSize: 12 }}>
           Per-batch metadata only — raw lines are not retained. Showing the
-          most recent {ACTIVITY_LIMIT} batches for this account.
+          most recent {ACTIVITY_LIMIT} batches from{' '}
+          <span className="mono">{device.label || 'this device'}</span>.
         </p>
       </div>
       {batches.length === 0 ? (

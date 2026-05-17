@@ -23,6 +23,7 @@ use crate::reference_store::ReferenceStore;
 use crate::repo::PostgresStore;
 use crate::rsi_org_store::PostgresRsiOrgStore;
 use crate::share_metadata::PostgresShareMetadataStore;
+use crate::share_reports::PostgresShareReportStore;
 use crate::spicedb::SpicedbClient;
 use crate::staff_roles::{PostgresStaffRoleStore, StaffRoleStore};
 use crate::telemetry::{init_telemetry, TelemetryHandles};
@@ -40,6 +41,7 @@ use std::time::Duration;
 mod admin_org_routes;
 mod admin_reference_routes;
 mod admin_routes;
+mod admin_sharing_routes;
 mod admin_submission_routes;
 mod admin_user_routes;
 mod api_error;
@@ -81,6 +83,7 @@ mod rsi_profile_routes;
 mod rsi_verify;
 mod rsi_verify_routes;
 mod share_metadata;
+mod share_reports;
 mod sharing_routes;
 mod smtp_admin_routes;
 mod smtp_config_store;
@@ -124,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
     let rsi_orgs: Arc<PostgresRsiOrgStore> = Arc::new(PostgresRsiOrgStore::new(pool.clone()));
     let share_metadata: Arc<PostgresShareMetadataStore> =
         Arc::new(PostgresShareMetadataStore::new(pool.clone()));
+    let share_reports: Arc<PostgresShareReportStore> =
+        Arc::new(PostgresShareReportStore::new(pool.clone()));
     let health_pool = pool.clone();
     let devices: Arc<PostgresDeviceStore> = Arc::new(PostgresDeviceStore::new(pool.clone()));
     let hangars: Arc<PostgresHangarStore> = Arc::new(PostgresHangarStore::new(pool.clone()));
@@ -336,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
     let sharing_router = sharing_routes::routes(users.clone(), orgs.clone(), store.clone());
     let share_metadata_dyn: Arc<dyn crate::share_metadata::ShareMetadataStore> =
         share_metadata.clone();
+    let share_reports_dyn: Arc<dyn crate::share_reports::ShareReportStore> = share_reports.clone();
     let rsi_router = rsi_verify_routes::routes(users.clone());
     let profile_router = rsi_profile_routes::routes(users.clone(), profiles.clone());
     let rsi_orgs_router = rsi_org_routes::routes(users.clone(), rsi_orgs.clone());
@@ -356,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(admin_user_routes::router(users.clone()))
         .merge(admin_org_routes::router(orgs.clone()))
         .merge(admin_reference_routes::router(reference_store.clone()))
+        .merge(admin_sharing_routes::router())
         .merge(smtp_admin_routes::router(
             smtp_config_store.clone(),
             users.clone(),
@@ -469,6 +476,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(health_pool))
         .layer(Extension(spicedb))
         .layer(Extension(share_metadata_dyn))
+        .layer(Extension(share_reports_dyn))
         .layer(Extension(audit_query))
         .layer(Extension(minio_mirror))
         .layer(Extension(mailer))
