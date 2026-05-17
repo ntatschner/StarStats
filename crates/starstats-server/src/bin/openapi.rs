@@ -108,6 +108,8 @@ mod rsi_verify;
 mod rsi_verify_routes;
 #[path = "../share_metadata.rs"]
 mod share_metadata;
+#[path = "../share_reports.rs"]
+mod share_reports;
 #[path = "../sharing_routes.rs"]
 mod sharing_routes;
 #[path = "../smtp_admin_routes.rs"]

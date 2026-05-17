@@ -46,6 +46,7 @@ import {
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
+import { reportShareAction } from './actions';
 
 interface SearchParams {
   status?: string;
@@ -1135,7 +1136,11 @@ export default async function SharingPage(props: {
                         }}
                       >
                         {active.map((entry) => (
-                          <InboundPill key={entry.owner_handle} entry={entry} />
+                          <InboundPill
+                            key={entry.owner_handle}
+                            entry={entry}
+                            recipientHandle={session.claimedHandle}
+                          />
                         ))}
                       </div>
                     )}
@@ -1168,6 +1173,7 @@ export default async function SharingPage(props: {
                             <InboundPill
                               key={entry.owner_handle}
                               entry={entry}
+                              recipientHandle={session.claimedHandle}
                             />
                           ))}
                         </div>
@@ -1196,51 +1202,164 @@ export default async function SharingPage(props: {
  * markup in one place is the only way the two sub-lists stay visually
  * aligned as styling evolves.
  */
-function InboundPill({ entry }: { entry: SharedWithMeEntry }) {
+function InboundPill({
+  entry,
+  recipientHandle,
+}: {
+  entry: SharedWithMeEntry;
+  recipientHandle: string;
+}) {
   const expiryLabel = formatExpiry(entry.expires_at);
   return (
-    <div style={{ ...sharePillStyle, flexWrap: 'wrap' }}>
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
-          flex: 1,
-          minWidth: 0,
-        }}
-      >
-        <Link
-          href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
-          className="mono"
-          style={{ color: 'var(--fg)' }}
+    <div
+      style={{
+        ...sharePillStyle,
+        flexWrap: 'wrap',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        gap: 8,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            flex: 1,
+            minWidth: 0,
+          }}
         >
-          @{entry.owner_handle}
-        </Link>
-        {entry.note && (
-          <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
-            {entry.note}
+          <Link
+            href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
+            className="mono"
+            style={{ color: 'var(--fg)' }}
+          >
+            @{entry.owner_handle}
+          </Link>
+          {entry.note && (
+            <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+              {entry.note}
+            </span>
+          )}
+        </div>
+        {expiryLabel && (
+          <span
+            className="ss-badge"
+            title={entry.expires_at ?? undefined}
+            style={
+              expiryLabel === 'expired'
+                ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
+                : { color: 'var(--fg-muted)' }
+            }
+          >
+            {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
           </span>
         )}
-      </div>
-      {expiryLabel && (
-        <span
-          className="ss-badge"
-          title={entry.expires_at ?? undefined}
-          style={
-            expiryLabel === 'expired'
-              ? { borderColor: 'var(--danger)', color: 'var(--danger)' }
-              : { color: 'var(--fg-muted)' }
-          }
+        <Link
+          href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
+          className="ss-btn ss-btn--link"
         >
-          {expiryLabel === 'expired' ? 'expired' : `expires ${expiryLabel}`}
-        </span>
-      )}
-      <Link
-        href={(`/u/${encodeURIComponent(entry.owner_handle)}`) as Route}
-        className="ss-btn ss-btn--link"
-      >
-        View profile
-      </Link>
+          View profile
+        </Link>
+      </div>
+
+      {/* Audit v2 §05 — recipient-facing report affordance. Collapsed
+          by default so the row stays compact; opens an inline form
+          that posts to /v1/share/report via the server action. */}
+      <details>
+        <summary
+          style={{
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--fg-muted)',
+          }}
+        >
+          Report this share
+        </summary>
+        <form
+          action={reportShareAction}
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            marginTop: 8,
+            padding: 10,
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-card)',
+            background: 'var(--bg-sunken)',
+          }}
+        >
+          <input
+            type="hidden"
+            name="owner_handle"
+            value={entry.owner_handle}
+          />
+          <input
+            type="hidden"
+            name="recipient_handle"
+            value={recipientHandle}
+          />
+          <label
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              fontSize: 12,
+            }}
+          >
+            <span style={{ color: 'var(--fg-muted)' }}>Reason</span>
+            <select
+              name="reason"
+              required
+              defaultValue="abuse"
+              style={{
+                padding: 6,
+                background: 'var(--bg-elev)',
+                color: 'var(--fg)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--r-input)',
+                fontSize: 13,
+              }}
+            >
+              <option value="abuse">Abuse</option>
+              <option value="spam">Spam</option>
+              <option value="data_misuse">Data misuse</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              fontSize: 12,
+            }}
+          >
+            <span style={{ color: 'var(--fg-muted)' }}>
+              Details (optional, ≤ 500 chars)
+            </span>
+            <textarea
+              name="details"
+              rows={2}
+              maxLength={500}
+              style={{
+                resize: 'vertical',
+                fontFamily: 'inherit',
+                fontSize: 13,
+                padding: 6,
+                background: 'var(--bg-elev)',
+                color: 'var(--fg)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--r-input)',
+              }}
+            />
+          </label>
+          <button type="submit" className="ss-btn">
+            Submit report
+          </button>
+        </form>
+      </details>
     </div>
   );
 }

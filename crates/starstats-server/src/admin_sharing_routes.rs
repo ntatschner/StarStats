@@ -18,19 +18,24 @@
 //! genuinely time-windowed counters (30-day grants / revokes / views).
 
 use crate::admin_routes::RequireModerator;
-use crate::audit::{AuditFilters, AuditQuery};
+use crate::audit::{AuditEntry, AuditFilters, AuditLog, AuditQuery};
 use crate::share_metadata::ShareMetadataStore;
+use crate::share_reports::{
+    ShareReport, ShareReportError, ShareReportStatus, ShareReportStore, RESOLUTION_NOTE_MAX_LEN,
+};
 use axum::{
+    extract::{Path, Query},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
     Extension, Router,
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 // -- DTOs ------------------------------------------------------------
 
@@ -228,6 +233,225 @@ pub async fn get_scope_histogram(
     (StatusCode::OK, Json(body)).into_response()
 }
 
+// -- /v1/admin/sharing/reports ---------------------------------------
+
+/// Wire shape for one report row. Mirrors `share_reports::ShareReport`
+/// but flattens the enums to their wire strings so the OpenAPI surface
+/// doesn't drag the Rust-side `#[serde(rename_all)]` machinery into
+/// the spec.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ShareReportRowDto {
+    pub id: Uuid,
+    pub reporter_handle: String,
+    pub owner_handle: String,
+    pub recipient_handle: String,
+    /// One of `abuse | spam | data_misuse | other`.
+    pub reason: String,
+    pub details: Option<String>,
+    /// One of `open | dismissed | share_revoked | user_suspended`.
+    pub status: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub resolved_at: Option<chrono::DateTime<Utc>>,
+    pub resolved_by: Option<String>,
+    pub resolution_note: Option<String>,
+}
+
+impl From<ShareReport> for ShareReportRowDto {
+    fn from(r: ShareReport) -> Self {
+        Self {
+            id: r.id,
+            reporter_handle: r.reporter_handle,
+            owner_handle: r.owner_handle,
+            recipient_handle: r.recipient_handle,
+            reason: r.reason.as_str().to_string(),
+            details: r.details,
+            status: r.status.as_str().to_string(),
+            created_at: r.created_at,
+            resolved_at: r.resolved_at,
+            resolved_by: r.resolved_by,
+            resolution_note: r.resolution_note,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ShareReportListResponse {
+    pub items: Vec<ShareReportRowDto>,
+}
+
+/// Query parameters for `GET /v1/admin/sharing/reports`. Defaults
+/// mirror the moderator's "what landed today" mental model: status
+/// `open`, most recent first, 50 rows.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+pub struct ReportsListQuery {
+    /// One of `open | dismissed | share_revoked | user_suspended | all`.
+    /// Defaults to `open`. Unknown values 400.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Page size. 1..=200; defaults to 50.
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Page offset. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+/// GET `/v1/admin/sharing/reports` — moderator queue page driver.
+/// Gated on moderator (admins inherit).
+#[utoipa::path(
+    get,
+    path = "/v1/admin/sharing/reports",
+    tag = "admin",
+    params(ReportsListQuery),
+    responses(
+        (status = 200, description = "Reports page", body = ShareReportListResponse),
+        (status = 400, description = "Unknown status value"),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller lacks moderator role"),
+        (status = 500, description = "Database error"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn get_reports(
+    _: RequireModerator,
+    Extension(reports): Extension<Arc<dyn ShareReportStore>>,
+    Query(q): Query<ReportsListQuery>,
+) -> Response {
+    let status_filter: Option<ShareReportStatus> = match q.status.as_deref() {
+        None | Some("") | Some("open") => Some(ShareReportStatus::Open),
+        Some("dismissed") => Some(ShareReportStatus::Dismissed),
+        Some("share_revoked") => Some(ShareReportStatus::ShareRevoked),
+        Some("user_suspended") => Some(ShareReportStatus::UserSuspended),
+        Some("all") => None,
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_status"})),
+            )
+                .into_response();
+        }
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    match reports.list(status_filter, limit, offset).await {
+        Ok(rows) => {
+            let body = ShareReportListResponse {
+                items: rows.into_iter().map(Into::into).collect(),
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "share_reports.list failed");
+            overview_500()
+        }
+    }
+}
+
+/// Body for `POST /v1/admin/sharing/reports/:id/resolve`. `outcome`
+/// must be a resolution variant (not `open`) — open is the starting
+/// state, not a destination.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ResolveReportRequest {
+    /// One of `dismissed | share_revoked | user_suspended`.
+    pub outcome: String,
+    /// Optional moderator note. Capped at `RESOLUTION_NOTE_MAX_LEN`.
+    pub note: Option<String>,
+}
+
+/// POST `/v1/admin/sharing/reports/{id}/resolve` — moderator triage
+/// action. Idempotency: a second resolve on the same row returns 409
+/// (`already_resolved`) so callers can distinguish "your action
+/// landed" from "someone got there first".
+#[utoipa::path(
+    post,
+    path = "/v1/admin/sharing/reports/{id}/resolve",
+    tag = "admin",
+    request_body = ResolveReportRequest,
+    params(("id" = Uuid, Path, description = "share_reports.id of the report being resolved")),
+    responses(
+        (status = 200, description = "Report resolved", body = ShareReportRowDto),
+        (status = 400, description = "Invalid outcome / note length"),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller lacks moderator role"),
+        (status = 404, description = "No such report"),
+        (status = 409, description = "Report already resolved"),
+        (status = 500, description = "Database error"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn resolve_report(
+    RequireModerator(user): RequireModerator,
+    Extension(reports): Extension<Arc<dyn ShareReportStore>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ResolveReportRequest>,
+) -> Response {
+    let outcome = match ShareReportStatus::parse(&body.outcome) {
+        Some(s) if s.is_resolution() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_outcome"})),
+            )
+                .into_response();
+        }
+    };
+    let note = match body.note.as_deref().map(str::trim) {
+        Some("") => None,
+        Some(s) if s.chars().count() > RESOLUTION_NOTE_MAX_LEN => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "note_too_long"})),
+            )
+                .into_response();
+        }
+        Some(s) => Some(s.to_string()),
+        None => None,
+    };
+
+    let moderator_handle = &user.preferred_username;
+    match reports
+        .resolve(id, moderator_handle, outcome, note.as_deref())
+        .await
+    {
+        Ok(row) => {
+            // Best-effort audit emission. Same posture as the rest of
+            // the sharing surface — never poison the response.
+            if let Err(e) = audit
+                .append(AuditEntry {
+                    actor_sub: Some(user.sub.clone()),
+                    actor_handle: Some(moderator_handle.clone()),
+                    action: "share.report_resolved".to_string(),
+                    payload: serde_json::json!({
+                        "report_id": row.id,
+                        "outcome": row.status.as_str(),
+                        "owner_handle": row.owner_handle,
+                        "recipient_handle": row.recipient_handle,
+                    }),
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "audit log append failed (share.report_resolved)");
+            }
+            (StatusCode::OK, Json(ShareReportRowDto::from(row))).into_response()
+        }
+        Err(ShareReportError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not_found"})),
+        )
+            .into_response(),
+        Err(ShareReportError::AlreadyResolved) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "already_resolved"})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "share_reports.resolve failed");
+            overview_500()
+        }
+    }
+}
+
 // -- Helpers ---------------------------------------------------------
 
 /// 500 envelope used by both handlers — kept local because the
@@ -277,6 +501,11 @@ pub fn router() -> Router {
         .route(
             "/v1/admin/sharing/scope-histogram",
             get(get_scope_histogram),
+        )
+        .route("/v1/admin/sharing/reports", get(get_reports))
+        .route(
+            "/v1/admin/sharing/reports/:id/resolve",
+            post(resolve_report),
         )
 }
 

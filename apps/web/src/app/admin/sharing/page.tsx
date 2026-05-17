@@ -371,6 +371,13 @@ export default async function AdminSharingOverviewPage() {
         >
           Sharing audit log →
         </Link>
+        <Link
+          href={'/admin/sharing/reports' as Route}
+          className="ss-btn ss-btn--ghost"
+          style={{ textDecoration: 'none' }}
+        >
+          Reports queue →
+        </Link>
       </nav>
     </div>
   );

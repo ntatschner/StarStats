@@ -199,6 +199,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/sharing/reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET `/v1/admin/sharing/reports` — moderator queue page driver.
+         *     Gated on moderator (admins inherit).
+         */
+        get: operations["get_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/sharing/reports/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST `/v1/admin/sharing/reports/{id}/resolve` — moderator triage
+         *     action. Idempotency: a second resolve on the same row returns 409
+         *     (`already_resolved`) so callers can distinguish "your action
+         *     landed" from "someone got there first".
+         */
+        post: operations["resolve_report"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/sharing/scope-histogram": {
         parameters: {
             query?: never;
@@ -1440,6 +1482,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/share/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST `/v1/share/report` — file a moderation report against a
+         *     specific (owner_handle, recipient_handle) share.
+         * @description Authorization model: the reporter (auth'd user) must be one side
+         *     of the share. Either the recipient flagging the owner ("creep
+         *     shared with me") or the owner flagging the recipient ("recipient
+         *     is doing creepy stuff with my data"). A third party can't report.
+         *
+         *     Rate-limited at the app layer: max `RATE_LIMIT_PER_WINDOW` rows
+         *     per reporter per `rate_limit_window()`. The handler queries the
+         *     store; no Redis dependency. Exceeded -> 429.
+         */
+        post: operations["report_share"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/submissions": {
         parameters: {
             query?: never;
@@ -2444,8 +2514,45 @@ export interface components {
         RemoveMemberResponse: {
             removed: boolean;
         };
+        /**
+         * @description Request body for `POST /v1/share/report`. Reporter is the auth'd
+         *     user (NOT a body field) — taking it off the token prevents
+         *     spoofing one user as another.
+         */
+        ReportShareRequest: {
+            /** @description Optional free-text context. Capped at `DETAILS_MAX_LEN` chars. */
+            details?: string | null;
+            /** @description Owner side of the (owner, recipient) pair being reported. */
+            owner_handle: string;
+            /** @description One of `abuse | spam | data_misuse | other`. Other values 400. */
+            reason: string;
+            /** @description Recipient side of the (owner, recipient) pair being reported. */
+            recipient_handle: string;
+        };
+        /**
+         * @description Echo of the created report so the UI can confirm the row landed.
+         *     Tight subset of `ShareReport` — full row is admin-only.
+         */
+        ReportShareResponse: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            status: string;
+        };
         ResendVerificationResponse: {
             sent: boolean;
+        };
+        /**
+         * @description Body for `POST /v1/admin/sharing/reports/:id/resolve`. `outcome`
+         *     must be a resolution variant (not `open`) — open is the starting
+         *     state, not a destination.
+         */
+        ResolveReportRequest: {
+            /** @description Optional moderator note. Capped at `RESOLUTION_NOTE_MAX_LEN`. */
+            note?: string | null;
+            /** @description One of `dismissed | share_revoked | user_suspended`. */
+            outcome: string;
         };
         /**
          * @description One resolved location reading. `planet` and `city` are
@@ -2669,6 +2776,33 @@ export interface components {
         };
         ShareOrgResponse: {
             shared_with_org: string;
+        };
+        ShareReportListResponse: {
+            items: components["schemas"]["ShareReportRowDto"][];
+        };
+        /**
+         * @description Wire shape for one report row. Mirrors `share_reports::ShareReport`
+         *     but flattens the enums to their wire strings so the OpenAPI surface
+         *     doesn't drag the Rust-side `#[serde(rename_all)]` machinery into
+         *     the spec.
+         */
+        ShareReportRowDto: {
+            /** Format: date-time */
+            created_at: string;
+            details?: string | null;
+            /** Format: uuid */
+            id: string;
+            owner_handle: string;
+            /** @description One of `abuse | spam | data_misuse | other`. */
+            reason: string;
+            recipient_handle: string;
+            reporter_handle: string;
+            resolution_note?: string | null;
+            /** Format: date-time */
+            resolved_at?: string | null;
+            resolved_by?: string | null;
+            /** @description One of `open | dismissed | share_revoked | user_suspended`. */
+            status: string;
         };
         ShareRequest: {
             /**
@@ -3522,6 +3656,133 @@ export interface operations {
             };
             /** @description Caller lacks moderator role */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_reports: {
+        parameters: {
+            query?: {
+                /**
+                 * @description One of `open | dismissed | share_revoked | user_suspended | all`.
+                 *     Defaults to `open`. Unknown values 400.
+                 */
+                status?: string | null;
+                /** @description Page size. 1..=200; defaults to 50. */
+                limit?: number | null;
+                /** @description Page offset. Defaults to 0. */
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reports page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareReportListResponse"];
+                };
+            };
+            /** @description Unknown status value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Database error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resolve_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description share_reports.id of the report being resolved */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveReportRequest"];
+            };
+        };
+        responses: {
+            /** @description Report resolved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareReportRowDto"];
+                };
+            };
+            /** @description Invalid outcome / note length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller lacks moderator role */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such report */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Report already resolved */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7599,6 +7860,73 @@ export interface operations {
                 };
             };
             /** @description Server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    report_share: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReportShareRequest"];
+            };
+        };
+        responses: {
+            /** @description Report filed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReportShareResponse"];
+                };
+            };
+            /** @description Invalid handle, reason, or details length */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Caller is neither the owner nor recipient of the share */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Reporter rate-limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Database error */
             500: {
                 headers: {
                     [name: string]: unknown;

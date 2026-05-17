@@ -752,6 +752,16 @@ export type AdminSharingOverview =
   apiSchema['schemas']['AdminSharingOverview'];
 export type TopGranter = apiSchema['schemas']['TopGranter'];
 export type ScopeHistogram = apiSchema['schemas']['ScopeHistogram'];
+export type ReportShareRequest =
+  apiSchema['schemas']['ReportShareRequest'];
+export type ReportShareResponse =
+  apiSchema['schemas']['ReportShareResponse'];
+export type ShareReportRowDto =
+  apiSchema['schemas']['ShareReportRowDto'];
+export type ShareReportListResponse =
+  apiSchema['schemas']['ShareReportListResponse'];
+export type ResolveReportRequest =
+  apiSchema['schemas']['ResolveReportRequest'];
 
 export type SubmissionStatus =
   | 'review'
@@ -1077,6 +1087,66 @@ export async function getAdminSharingScopeHistogram(
     'GET',
     '/v1/admin/sharing/scope-histogram',
     undefined,
+    bearer,
+  );
+}
+
+/**
+ * File a moderation report against a specific (owner, recipient)
+ * share. Reporter is taken off the bearer token by the server —
+ * the request body does not (and must not) include a reporter
+ * field, so spoofing is impossible from the client.
+ *
+ * Authorization: the auth'd user must be EITHER the owner or the
+ * recipient of the share. A third party gets 403.
+ * Rate-limited at the server: 5 reports per reporter per 24h.
+ */
+export async function reportShare(
+  bearer: string,
+  body: ReportShareRequest,
+): Promise<ReportShareResponse> {
+  return request<ReportShareResponse>(
+    'POST',
+    '/v1/share/report',
+    body,
+    bearer,
+  );
+}
+
+/**
+ * Moderator queue feed. Defaults to `status=open` server-side, so
+ * passing no filter returns the unresolved triage queue. Pass
+ * `status='all'` for the audit-style view.
+ */
+export async function getAdminSharingReports(
+  bearer: string,
+  opts?: { status?: string; limit?: number; offset?: number },
+): Promise<ShareReportListResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.status) qs.set('status', opts.status);
+  if (opts?.limit != null) qs.set('limit', String(opts.limit));
+  if (opts?.offset != null) qs.set('offset', String(opts.offset));
+  const path = qs.toString()
+    ? `/v1/admin/sharing/reports?${qs.toString()}`
+    : '/v1/admin/sharing/reports';
+  return request<ShareReportListResponse>('GET', path, undefined, bearer);
+}
+
+/**
+ * Moderator triage action. `outcome` must be one of
+ * `dismissed | share_revoked | user_suspended`. A second resolve
+ * on the same row returns 409 (`already_resolved`) — handle the
+ * race by refreshing the queue.
+ */
+export async function resolveShareReport(
+  bearer: string,
+  id: string,
+  body: ResolveReportRequest,
+): Promise<ShareReportRowDto> {
+  return request<ShareReportRowDto>(
+    'POST',
+    `/v1/admin/sharing/reports/${encodeURIComponent(id)}/resolve`,
+    body,
     bearer,
   );
 }

@@ -24,6 +24,10 @@ use crate::auth::AuthenticatedUser;
 use crate::orgs::{OrgStore, PostgresOrgStore};
 use crate::repo::{EventQuery, PostgresStore};
 use crate::share_metadata::{ShareMetadataStore, NOTE_MAX_LEN};
+use crate::share_reports::{
+    rate_limit_window, ShareReportError, ShareReportReason, ShareReportStore, DETAILS_MAX_LEN,
+    RATE_LIMIT_PER_WINDOW,
+};
 use crate::spicedb::{ObjectRef, SpicedbClient};
 use crate::users::{PostgresUserStore, UserStore};
 use crate::validation::{build_timeline_buckets, resolve_timeline_days};
@@ -65,7 +69,8 @@ pub fn routes(
     let share_no_state_router: Router = Router::new()
         .route("/v1/me/shares", get(list_shares))
         .route("/v1/me/shared-with-me", get(list_shared_with_me))
-        .route("/v1/me/share/:recipient_handle", delete(delete_share));
+        .route("/v1/me/share/:recipient_handle", delete(delete_share))
+        .route("/v1/share/report", post(report_share));
 
     let share_org_post_router = Router::new()
         .route(
@@ -1600,6 +1605,154 @@ pub async fn friend_timeline<Q: EventQuery>(
         render_timeline_scoped(query.as_ref(), &handle, clamped_days, scope.as_ref()).await
     })
     .await
+}
+
+// -- /v1/share/report ------------------------------------------------
+
+/// Request body for `POST /v1/share/report`. Reporter is the auth'd
+/// user (NOT a body field) — taking it off the token prevents
+/// spoofing one user as another.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ReportShareRequest {
+    /// Owner side of the (owner, recipient) pair being reported.
+    pub owner_handle: String,
+    /// Recipient side of the (owner, recipient) pair being reported.
+    pub recipient_handle: String,
+    /// One of `abuse | spam | data_misuse | other`. Other values 400.
+    pub reason: String,
+    /// Optional free-text context. Capped at `DETAILS_MAX_LEN` chars.
+    pub details: Option<String>,
+}
+
+/// Echo of the created report so the UI can confirm the row landed.
+/// Tight subset of `ShareReport` — full row is admin-only.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportShareResponse {
+    pub id: uuid::Uuid,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// POST `/v1/share/report` — file a moderation report against a
+/// specific (owner_handle, recipient_handle) share.
+///
+/// Authorization model: the reporter (auth'd user) must be one side
+/// of the share. Either the recipient flagging the owner ("creep
+/// shared with me") or the owner flagging the recipient ("recipient
+/// is doing creepy stuff with my data"). A third party can't report.
+///
+/// Rate-limited at the app layer: max `RATE_LIMIT_PER_WINDOW` rows
+/// per reporter per `rate_limit_window()`. The handler queries the
+/// store; no Redis dependency. Exceeded -> 429.
+#[utoipa::path(
+    post,
+    path = "/v1/share/report",
+    tag = "sharing",
+    request_body = ReportShareRequest,
+    responses(
+        (status = 200, description = "Report filed", body = ReportShareResponse),
+        (status = 400, description = "Invalid handle, reason, or details length", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is neither the owner nor recipient of the share", body = ApiErrorBody),
+        (status = 429, description = "Reporter rate-limit exceeded", body = ApiErrorBody),
+        (status = 500, description = "Database error", body = ApiErrorBody),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn report_share(
+    auth: AuthenticatedUser,
+    Extension(reports): Extension<Arc<dyn ShareReportStore>>,
+    Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Json(body): Json<ReportShareRequest>,
+) -> Response {
+    // Validate handles (cheap, same rules as the rest of the file).
+    if !validate_handle(&body.owner_handle) || !validate_handle(&body.recipient_handle) {
+        return err(StatusCode::BAD_REQUEST, "invalid_handle");
+    }
+    let reason = match ShareReportReason::parse(&body.reason) {
+        Some(r) => r,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_reason"),
+    };
+    let details = match body.details.as_deref().map(str::trim) {
+        Some("") => None,
+        Some(s) if s.chars().count() > DETAILS_MAX_LEN => {
+            return err(StatusCode::BAD_REQUEST, "details_too_long")
+        }
+        Some(s) => Some(s.to_string()),
+        None => None,
+    };
+
+    // Authorization gate: reporter must be one side of the share.
+    let reporter = &auth.preferred_username;
+    let is_owner_side = reporter.eq_ignore_ascii_case(&body.owner_handle);
+    let is_recipient_side = reporter.eq_ignore_ascii_case(&body.recipient_handle);
+    if !is_owner_side && !is_recipient_side {
+        return err(StatusCode::FORBIDDEN, "not_a_party_to_the_share");
+    }
+
+    // Rate-limit by reporter. Best-effort: a transient DB hiccup here
+    // shouldn't block a legitimate report, so we log + skip the gate
+    // if the count itself fails.
+    let since = chrono::Utc::now() - rate_limit_window();
+    match reports.count_recent_by_reporter(reporter, since).await {
+        Ok(n) if n >= RATE_LIMIT_PER_WINDOW => {
+            return err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "share_reports rate-limit count failed; skipping gate");
+        }
+    }
+
+    let row = match reports
+        .create(
+            reporter,
+            &body.owner_handle,
+            &body.recipient_handle,
+            reason,
+            details.as_deref(),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(ShareReportError::Database(e)) => {
+            tracing::error!(error = %e, "share_reports.create failed");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "database_error");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "share_reports.create unexpected");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        }
+    };
+
+    // Best-effort audit emission. Same posture as `share.viewed` —
+    // a hiccup here must not poison the response.
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(reporter.clone()),
+            action: "share.reported".to_string(),
+            payload: serde_json::json!({
+                "report_id": row.id,
+                "owner_handle": row.owner_handle,
+                "recipient_handle": row.recipient_handle,
+                "reason": row.reason.as_str(),
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (share.reported)");
+    }
+
+    (
+        StatusCode::OK,
+        Json(ReportShareResponse {
+            id: row.id,
+            status: row.status.as_str().to_string(),
+            created_at: row.created_at,
+        }),
+    )
+        .into_response()
 }
 
 // -- Tests -----------------------------------------------------------
