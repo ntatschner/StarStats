@@ -1556,6 +1556,45 @@ export async function getPublicTimeline(
   );
 }
 
+/**
+ * Audit v2.1 §B1 — owner-side preview of own data through a
+ * given scope clamp. Returns the same shape as the public summary
+ * endpoint so the preview page can reuse public-render components.
+ * `scopeJson` is the URL-encoded JSON body of `ShareScope`; empty
+ * = full manifest (no clamp).
+ */
+export async function previewShareSummary(
+  bearer: string,
+  scopeJson: string | null,
+): Promise<PublicSummaryResponse> {
+  const qs = new URLSearchParams();
+  if (scopeJson) qs.set('scope', scopeJson);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<PublicSummaryResponse>(
+    'GET',
+    `/v1/me/preview-share/summary${suffix}`,
+    undefined,
+    bearer,
+  );
+}
+
+export async function previewShareTimeline(
+  bearer: string,
+  scopeJson: string | null,
+  days?: number,
+): Promise<PublicTimelineResponse> {
+  const qs = new URLSearchParams();
+  if (scopeJson) qs.set('scope', scopeJson);
+  if (days !== undefined) qs.set('days', String(days));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<PublicTimelineResponse>(
+    'GET',
+    `/v1/me/preview-share/timeline${suffix}`,
+    undefined,
+    bearer,
+  );
+}
+
 export async function getFriendSummary(
   bearer: string,
   handle: string,

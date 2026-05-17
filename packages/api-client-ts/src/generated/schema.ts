@@ -1034,6 +1034,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/preview-share/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/preview-share/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_timeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me/profile": {
         parameters: {
             query?: never;
@@ -6495,6 +6527,89 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApiErrorBody"];
                 };
+            };
+        };
+    };
+    preview_summary: {
+        parameters: {
+            query?: {
+                /**
+                 * @description URL-encoded JSON of a [`ShareScope`]. Missing/blank = render
+                 *     without any scope clamp (equivalent to a full-manifest preview).
+                 */
+                scope?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Owner summary clamped by the supplied scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicSummaryResponse"];
+                };
+            };
+            /** @description Scope JSON failed to parse */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preview_timeline: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Timeline window in days; same semantics as
+                 *     [`PublicTimelineParams::days`]. Clamped against `scope.window_days`
+                 *     if both are set.
+                 */
+                days?: number | null;
+                /** @description URL-encoded JSON of a [`ShareScope`]. */
+                scope?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Owner timeline clamped by the supplied scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicTimelineResponse"];
+                };
+            };
+            /** @description Scope JSON failed to parse or days out of range */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

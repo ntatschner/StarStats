@@ -52,6 +52,7 @@ import {
   reportShareAction,
 } from './actions';
 import { ScopePresets } from './_components/ScopePresets';
+import { PreviewButton } from './_components/PreviewButton';
 
 interface SearchParams {
   status?: string;
@@ -976,6 +977,9 @@ export default async function SharingPage(props: {
                   <button type="submit" className="ss-btn ss-btn--primary">
                     {isEditing ? 'Save changes' : 'Grant access'}
                   </button>
+                  {/* Audit v2.1 §B1 — preview opens a new tab with the
+                      owner's own data run through the current scope. */}
+                  <PreviewButton />
                   {isEditing && (
                     <Link
                       href={'/sharing' as Route}

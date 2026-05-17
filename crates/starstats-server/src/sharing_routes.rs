@@ -99,6 +99,16 @@ pub fn routes(
             "/v1/u/:handle/timeline",
             get(friend_timeline::<PostgresStore>),
         )
+        // Audit v2.1 §B1 — owner-side preview of own data through a
+        // scope clamp. No SpiceDB check, no audit emission.
+        .route(
+            "/v1/me/preview-share/summary",
+            get(preview_summary::<PostgresStore>),
+        )
+        .route(
+            "/v1/me/preview-share/timeline",
+            get(preview_timeline::<PostgresStore>),
+        )
         .with_state(store);
 
     share_user_router
@@ -1753,6 +1763,131 @@ pub async fn report_share(
         }),
     )
         .into_response()
+}
+
+// -- /v1/me/preview-share/* ------------------------------------------
+//
+// Audit v2.1 §B1 — "Preview as @handle" — simulated render path.
+//
+// The owner configures a scope, hits Preview, and gets a new tab
+// showing their OWN data run through that scope's filter. No
+// SpiceDB check (the owner is reading their own data — no friend
+// gate to satisfy). No audit row (this is a simulation, not a real
+// view). The recipient handle is purely cosmetic for the banner
+// the frontend renders — server-side it doesn't shape the response.
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct PreviewSummaryParams {
+    /// URL-encoded JSON of a [`ShareScope`]. Missing/blank = render
+    /// without any scope clamp (equivalent to a full-manifest preview).
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct PreviewTimelineParams {
+    /// Timeline window in days; same semantics as
+    /// [`PublicTimelineParams::days`]. Clamped against `scope.window_days`
+    /// if both are set.
+    pub days: Option<u32>,
+    /// URL-encoded JSON of a [`ShareScope`].
+    pub scope: Option<String>,
+}
+
+fn parse_scope_param(raw: Option<&str>) -> Result<Option<ShareScope>, Response> {
+    let Some(s) = raw else { return Ok(None) };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str::<ShareScope>(trimmed) {
+        Ok(scope) => Ok(Some(scope)),
+        Err(_) => Err(err(StatusCode::BAD_REQUEST, "invalid_scope")),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/me/preview-share/summary",
+    tag = "sharing",
+    params(PreviewSummaryParams),
+    responses(
+        (status = 200, description = "Owner summary clamped by the supplied scope", body = PublicSummaryResponse),
+        (status = 400, description = "Scope JSON failed to parse"),
+        (status = 401, description = "Missing or invalid bearer token"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn preview_summary<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    auth: AuthenticatedUser,
+    Query(params): Query<PreviewSummaryParams>,
+) -> Response {
+    let scope = match parse_scope_param(params.scope.as_deref()) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    if let Some(s) = scope.as_ref() {
+        if !scope_allows_aggregates(s) {
+            // For preview, return an empty 200 rather than 404 so the
+            // page can render the banner + an explanatory empty state.
+            return (
+                StatusCode::OK,
+                Json(PublicSummaryResponse {
+                    claimed_handle: auth.preferred_username.clone(),
+                    total: 0,
+                    by_type: vec![],
+                }),
+            )
+                .into_response();
+        }
+    }
+    render_summary_scoped(query.as_ref(), &auth.preferred_username, scope.as_ref()).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/me/preview-share/timeline",
+    tag = "sharing",
+    params(PreviewTimelineParams),
+    responses(
+        (status = 200, description = "Owner timeline clamped by the supplied scope", body = PublicTimelineResponse),
+        (status = 400, description = "Scope JSON failed to parse or days out of range"),
+        (status = 401, description = "Missing or invalid bearer token"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn preview_timeline<Q: EventQuery>(
+    State(query): State<Arc<Q>>,
+    auth: AuthenticatedUser,
+    Query(params): Query<PreviewTimelineParams>,
+) -> Response {
+    let scope = match parse_scope_param(params.scope.as_deref()) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let Ok(days) = resolve_timeline_days(params.days) else {
+        return err(StatusCode::BAD_REQUEST, "invalid_days");
+    };
+    let days = clamp_days(days, scope.as_ref());
+    if let Some(s) = scope.as_ref() {
+        if !scope_allows_timeline(s) {
+            return (
+                StatusCode::OK,
+                Json(PublicTimelineResponse {
+                    days,
+                    buckets: vec![],
+                }),
+            )
+                .into_response();
+        }
+    }
+    render_timeline_scoped(
+        query.as_ref(),
+        &auth.preferred_username,
+        days,
+        scope.as_ref(),
+    )
+    .await
 }
 
 // -- Tests -----------------------------------------------------------

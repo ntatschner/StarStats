@@ -148,6 +148,8 @@ impl Modify for SecurityAddon {
         sharing_routes::public_timeline,
         sharing_routes::friend_summary,
         sharing_routes::friend_timeline,
+        sharing_routes::preview_summary,
+        sharing_routes::preview_timeline,
         sharing_routes::report_share,
         org_routes::create_org,
         org_routes::list_orgs,
