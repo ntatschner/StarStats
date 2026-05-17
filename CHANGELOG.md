@@ -32,6 +32,68 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 - (nothing yet)
 
+## [0.0.7-beta]
+
+### Added
+
+- **Audit v2.1 §B1 — "Preview as @handle".** Owners can simulate a
+  recipient's view of their own data through a candidate scope before
+  granting the share. New `/v1/me/preview-share/{summary,timeline}`
+  endpoints render the owner's own data through the proposed scope
+  clamp (no SpiceDB check, no audit row — it's a simulation). New
+  `/sharing/preview` server-rendered page with a sticky simulation
+  banner and empty states for scope-excluded surfaces.
+- **Audit v2.1 §C — per-user sharing context.** New admin sub-tab
+  surfaces a user's outbound shares, inbound shares, reports filed,
+  and reports filed against them, all in one place. Backed by
+  `/v1/admin/sharing/by-user/:handle`.
+- **Audit v2.1 §C — abuse-signal detection.** `add_share` now checks
+  for a rapid-grant cluster (≥15 grants/24h → 429
+  `rate_limited_rapid_grant` + `share.signal_rapid_grant` audit row).
+  `report_share` checks for a cross-report cluster (≥3 reports
+  against one owner/72h → `share.signal_cluster_pause` audit row).
+- **Audit v2.1 §C — auto-pause closure.** When the cross-report
+  cluster threshold fires, the owner's `users.shares_paused_until` is
+  stamped with a 24h ban. `add_share` gates on it up-front: paused
+  owners get 403 `shares_paused` before any recipient lookup or
+  SpiceDB write. Migration 0028 lands the column (additive, NULL
+  default, partial index).
+- **Audit v2.1 Wave A — sharing presets + bulk ops.** Three scope-
+  preset chips on the share editor (Friend / Org / Public) and a
+  bulk-ops row above the outbound list (revoke-expired,
+  reset-scope-on-all-active).
+- **Events v2 metadata envelope.** `EventEnvelope` now carries an
+  optional `EventMetadata` field (`source`, `entity_refs`,
+  `provenance`, `event_type_key`, `group_key`). v1 batches still
+  accepted — server synthesises observed metadata for legacy clients
+  via `stamp()`. `IngestBatch::CURRENT_SCHEMA_VERSION` bumped to 2.
+- **Type-plateau pass (audit v2 §03).** `main h1` baseline set to
+  28px in globals.css; top-level pages opt to 32px inline, deep
+  detail pages can opt to 24px. HangarCard refresh affordance
+  reframed as "Updated via tray · open Devices →" — honest framing
+  for the server-holds-zero-credentials architecture.
+- **Project automation seed.** `.claude/` tree with two hooks
+  (rustfmt-on-edit, protect-migrations), two skills (regen-openapi,
+  new-store), and two reviewer agents (migration-safety-reviewer,
+  api-contract-reviewer). Project memory tree (CLAUDE.md +
+  memory/MEMORY.md).
+
+### Changed
+
+- **Sharing dashboard load is partial-failure tolerant.** The
+  `/sharing` page now uses `Promise.allSettled` across its four
+  underlying API calls, logs each rejection with `call=<label>`, and
+  surfaces SpiceDB-unavailable as a banner rather than blanking the
+  whole render.
+
+### Fixed
+
+- **`/sharing` no longer blanks on a single endpoint hiccup.** The
+  previous `Promise.all` race meant any one of `getVisibility`,
+  `listShares`, `listSharedWithMe`, or `listOrgs` returning a
+  non-2xx wiped the entire page with "Couldn't load your sharing
+  state."
+
 ## [0.0.5-beta] — 2026-05-16
 
 ### Added
