@@ -657,6 +657,7 @@ pub async fn add_share<U: UserStore>(
     Extension(spicedb): Extension<Arc<Option<SpicedbClient>>>,
     Extension(meta): Extension<Arc<dyn ShareMetadataStore>>,
     Extension(audit): Extension<Arc<dyn AuditLog>>,
+    Extension(audit_query): Extension<Arc<dyn AuditQuery>>,
     auth: AuthenticatedUser,
     Json(req): Json<ShareRequest>,
 ) -> Response {
@@ -671,6 +672,15 @@ pub async fn add_share<U: UserStore>(
 
     if recipient.eq_ignore_ascii_case(&auth.preferred_username) {
         return err(StatusCode::BAD_REQUEST, "cannot_share_with_self");
+    }
+
+    // Audit v2.1 §C abuse-signal: rapid-grant rate-limit. Soft-fail
+    // posture — a hiccup in the audit query degrades to "no check"
+    // rather than blocking a legitimate share. The signal row gives
+    // moderators visibility even if the rate-limit doesn't fire on
+    // this specific request.
+    if let Some(resp) = check_rapid_grant(audit_query.as_ref(), audit.as_ref(), &auth).await {
+        return resp;
     }
 
     // Validate optional metadata up-front so we don't write a
@@ -1754,6 +1764,15 @@ pub async fn report_share(
         tracing::warn!(error = %e, "audit log append failed (share.reported)");
     }
 
+    // Audit v2.1 §C abuse-signal: cross-report cluster. Once the
+    // owner accumulates >= CLUSTER_REPORT_THRESHOLD reports inside
+    // CLUSTER_WINDOW, emit a signal row so moderators see the
+    // pattern in the audit log. The audit's "auto-pause new
+    // outbound shares" is deferred — it needs a users.shares_paused
+    // column we haven't added yet; signal-only is the safe starting
+    // point ("tune after a week of production data").
+    check_cross_report_cluster(reports.as_ref(), audit.as_ref(), &row.owner_handle).await;
+
     (
         StatusCode::OK,
         Json(ReportShareResponse {
@@ -1763,6 +1782,120 @@ pub async fn report_share(
         }),
     )
         .into_response()
+}
+
+// -- Audit v2.1 §C — abuse-signal helpers ----------------------------
+
+/// Soft cap on `share.created` rows the same actor may write inside
+/// the RAPID_GRANT_WINDOW. Crossing the threshold returns 429 to the
+/// caller AND emits a `share.signal_rapid_grant` audit row so
+/// moderators see the pattern. Audit v2.1 §C documents these as
+/// "starting values — tune after a week of production data".
+const RAPID_GRANT_THRESHOLD: usize = 15;
+const RAPID_GRANT_WINDOW_HOURS: i64 = 24;
+
+/// Cross-report cluster: same number of reports against one owner
+/// inside CLUSTER_WINDOW emits a signal row. The audit's
+/// "auto-pause new outbound shares" is documented as a follow-up
+/// once we have a users.shares_paused column; this ships the
+/// detection so moderators have the breadcrumb even without the
+/// enforcement.
+const CLUSTER_REPORT_THRESHOLD: usize = 3;
+const CLUSTER_WINDOW_HOURS: i64 = 72;
+
+async fn check_rapid_grant(
+    audit_query: &dyn AuditQuery,
+    audit: &dyn AuditLog,
+    auth: &AuthenticatedUser,
+) -> Option<Response> {
+    let since = Utc::now() - chrono::Duration::hours(RAPID_GRANT_WINDOW_HOURS);
+    // Limit just past the threshold — `.len()` is the count we care
+    // about and we don't need to page the whole window.
+    let rows = match audit_query
+        .list(crate::audit::AuditFilters {
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: Some("share.created".to_string()),
+            since: Some(since),
+            until: None,
+            limit: (RAPID_GRANT_THRESHOLD as i64) + 1,
+            offset: 0,
+        })
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "rapid-grant check failed; skipping gate");
+            return None;
+        }
+    };
+    if rows.len() < RAPID_GRANT_THRESHOLD {
+        return None;
+    }
+    // Threshold crossed — emit the signal row, then return 429.
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: Some(auth.sub.clone()),
+            actor_handle: Some(auth.preferred_username.clone()),
+            action: "share.signal_rapid_grant".to_string(),
+            payload: serde_json::json!({
+                "window_hours": RAPID_GRANT_WINDOW_HOURS,
+                "threshold": RAPID_GRANT_THRESHOLD,
+                "observed_count": rows.len(),
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (signal_rapid_grant)");
+    }
+    Some(err(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited_rapid_grant",
+    ))
+}
+
+async fn check_cross_report_cluster(
+    reports: &dyn ShareReportStore,
+    audit: &dyn AuditLog,
+    owner_handle: &str,
+) {
+    let since = Utc::now() - chrono::Duration::hours(CLUSTER_WINDOW_HOURS);
+    // No by-subject filter on the store — list the recent population
+    // and filter in memory. At homelab volume the 500-row cap is a
+    // comfortable upper bound; same posture as the by-user admin
+    // endpoint.
+    let all = match reports.list(None, 500, 0).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "cluster check list failed; skipping");
+            return;
+        }
+    };
+    let owner_lc = owner_handle.to_ascii_lowercase();
+    let n = all
+        .iter()
+        .filter(|r| r.owner_handle.to_ascii_lowercase() == owner_lc)
+        .filter(|r| r.created_at >= since)
+        .count();
+    if n < CLUSTER_REPORT_THRESHOLD {
+        return;
+    }
+    if let Err(e) = audit
+        .append(AuditEntry {
+            actor_sub: None,
+            actor_handle: Some(owner_handle.to_string()),
+            action: "share.signal_cluster_pause".to_string(),
+            payload: serde_json::json!({
+                "window_hours": CLUSTER_WINDOW_HOURS,
+                "threshold": CLUSTER_REPORT_THRESHOLD,
+                "observed_count": n,
+                "auto_pause_applied": false,
+                "note": "Detection only; auto-pause deferred until users.shares_paused column lands.",
+            }),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "audit log append failed (signal_cluster_pause)");
+    }
 }
 
 // -- /v1/me/preview-share/* ------------------------------------------

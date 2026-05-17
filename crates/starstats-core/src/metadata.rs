@@ -16,6 +16,7 @@
 //! want for a closed vocabulary.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Categorical kind of the primary entity an event is about.
 ///
@@ -128,6 +129,57 @@ pub enum FieldProvenance {
         source_event_ids: Vec<String>,
         rule_id: String,
     },
+}
+
+/// Cross-cutting metadata stamped on every event in the wire
+/// envelope. See module docs for the design rationale.
+///
+/// `confidence` is a `f32` in `[0.0, 1.0]`. Observed events anchor at
+/// `1.0`; inferred events carry a rule-supplied score; synthesized
+/// events typically sit at `1.0` since they describe themselves.
+///
+/// `group_key` is a precomputed string the timeline uses to collapse
+/// near-duplicates within a session. The format is
+/// `"{event_type}:{entity_kind}:{entity_id}"` — see
+/// [`group_key_for`].
+///
+/// The optional / map fields (`field_provenance`, `inference_inputs`,
+/// `rule_id`) default to empty and are skipped at serialise time, so
+/// the wire form for a plain Observed event stays as compact as
+/// possible — only the four required fields appear.
+///
+/// `Eq` is not derived because `confidence` is an `f32`. Matches the
+/// pattern already established by `GameEvent` (skips `Eq` due to
+/// `AttachmentReceived.elapsed_seconds: f64`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventMetadata {
+    pub primary_entity: EntityRef,
+    pub source: EventSource,
+    pub confidence: f32,
+    pub group_key: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub field_provenance: BTreeMap<String, FieldProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inference_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+}
+
+impl EventMetadata {
+    /// Build metadata for an observed event — the common case. Sets
+    /// `source = Observed`, `confidence = 1.0`, and leaves the
+    /// optional provenance / inference fields empty.
+    pub fn observed(primary_entity: EntityRef, group_key: String) -> Self {
+        Self {
+            primary_entity,
+            source: EventSource::Observed,
+            confidence: 1.0,
+            group_key,
+            field_provenance: BTreeMap::new(),
+            inference_inputs: Vec::new(),
+            rule_id: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +297,75 @@ mod tests {
         assert!(s.contains("\"rule_id\":\"fuel_out_to_spawn\""));
         let back: FieldProvenance = serde_json::from_str(&s).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn event_metadata_observed_builder_sets_defaults() {
+        let m = EventMetadata::observed(
+            EntityRef {
+                kind: EntityKind::Player,
+                id: "TheCodeSaiyan".into(),
+                display_name: "TheCodeSaiyan".into(),
+            },
+            "player_death:player:TheCodeSaiyan".into(),
+        );
+        assert_eq!(m.source, EventSource::Observed);
+        assert!((m.confidence - 1.0).abs() < f32::EPSILON);
+        assert!(m.field_provenance.is_empty());
+        assert!(m.inference_inputs.is_empty());
+        assert_eq!(m.rule_id, None);
+        assert_eq!(m.group_key, "player_death:player:TheCodeSaiyan");
+        assert_eq!(m.primary_entity.kind, EntityKind::Player);
+    }
+
+    #[test]
+    fn event_metadata_observed_omits_empty_optionals_on_wire() {
+        let m = EventMetadata::observed(
+            EntityRef {
+                kind: EntityKind::Vehicle,
+                id: "veh-1".into(),
+                display_name: "MISC Freelancer".into(),
+            },
+            "vehicle_destruction:vehicle:veh-1".into(),
+        );
+        let s = serde_json::to_string(&m).unwrap();
+        // skip_serializing_if must elide the three optional fields so a
+        // plain Observed event stays cheap on the wire.
+        assert!(!s.contains("field_provenance"));
+        assert!(!s.contains("inference_inputs"));
+        assert!(!s.contains("rule_id"));
+        // Required fields are present.
+        assert!(s.contains("\"primary_entity\""));
+        assert!(s.contains("\"source\":\"observed\""));
+        assert!(s.contains("\"confidence\":1.0"));
+        assert!(s.contains("\"group_key\":\"vehicle_destruction:vehicle:veh-1\""));
+    }
+
+    #[test]
+    fn event_metadata_round_trips_with_provenance() {
+        let mut provenance = BTreeMap::new();
+        provenance.insert(
+            "zone".to_string(),
+            FieldProvenance::InferredFrom {
+                source_event_ids: vec!["evt-9".into()],
+                rule_id: "zone_from_terrain".into(),
+            },
+        );
+        let m = EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "alice".into(),
+                display_name: "alice".into(),
+            },
+            source: EventSource::Inferred,
+            confidence: 0.75,
+            group_key: "player_death:player:alice".into(),
+            field_provenance: provenance,
+            inference_inputs: vec!["evt-9".into()],
+            rule_id: Some("zone_from_terrain".into()),
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        let back: EventMetadata = serde_json::from_str(&s).unwrap();
+        assert_eq!(m, back);
     }
 }
