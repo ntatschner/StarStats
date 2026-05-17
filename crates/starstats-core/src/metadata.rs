@@ -84,6 +84,52 @@ pub struct EntityRef {
     pub display_name: String,
 }
 
+/// Where an event came from: did we see it directly in a log line, or
+/// did we infer / synthesize it from surrounding signals?
+///
+/// - `Observed` — parsed straight off a real log line (or a synthetic
+///   event the client produced from a directly-observed signal like a
+///   crash dir). Default for everything classify currently emits.
+/// - `Inferred` — the engine never wrote this event, but a downstream
+///   rule deduced it from observed events (e.g. fuel-out → forced
+///   spawn). Carries a provenance trail back to its source events.
+/// - `Synthesized` — produced wholesale by the system without
+///   observed-event ancestry (e.g. heartbeat / lifecycle markers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSource {
+    Observed,
+    Inferred,
+    Synthesized,
+}
+
+/// Per-field provenance — records, for a specific field on the event,
+/// whether the value was read from the log line as-is or derived from
+/// other observed events.
+///
+/// Serialised as an externally-tagged enum on a `type` field with
+/// snake_case discriminators, so the wire form for an inferred field
+/// looks like:
+///
+/// ```json
+/// { "type": "inferred_from",
+///   "source_event_ids": ["evt-1", "evt-2"],
+///   "rule_id": "fuel_out_to_spawn" }
+/// ```
+///
+/// The variant-level discriminator (not internally tagged on a
+/// payload struct) keeps the JSON cheap to parse and matches the
+/// existing convention used by `GameEvent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FieldProvenance {
+    Observed,
+    InferredFrom {
+        source_event_ids: Vec<String>,
+        rule_id: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +194,56 @@ mod tests {
         assert!(s.contains("\"kind\":\"player\""));
         assert!(s.contains("\"id\":\"TheCodeSaiyan\""));
         assert!(s.contains("\"display_name\":\"TheCodeSaiyan\""));
+    }
+
+    #[test]
+    fn event_source_serialises_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EventSource::Observed).unwrap(),
+            "\"observed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EventSource::Inferred).unwrap(),
+            "\"inferred\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EventSource::Synthesized).unwrap(),
+            "\"synthesized\""
+        );
+    }
+
+    #[test]
+    fn event_source_round_trips() {
+        for src in [
+            EventSource::Observed,
+            EventSource::Inferred,
+            EventSource::Synthesized,
+        ] {
+            let s = serde_json::to_string(&src).unwrap();
+            let back: EventSource = serde_json::from_str(&s).unwrap();
+            assert_eq!(src, back);
+        }
+    }
+
+    #[test]
+    fn field_provenance_observed_serialises_as_tagged_variant() {
+        let s = serde_json::to_string(&FieldProvenance::Observed).unwrap();
+        assert_eq!(s, "{\"type\":\"observed\"}");
+        let back: FieldProvenance = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, FieldProvenance::Observed);
+    }
+
+    #[test]
+    fn field_provenance_inferred_from_round_trips() {
+        let p = FieldProvenance::InferredFrom {
+            source_event_ids: vec!["evt-1".into(), "evt-2".into()],
+            rule_id: "fuel_out_to_spawn".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"type\":\"inferred_from\""));
+        assert!(s.contains("\"source_event_ids\":[\"evt-1\",\"evt-2\"]"));
+        assert!(s.contains("\"rule_id\":\"fuel_out_to_spawn\""));
+        let back: FieldProvenance = serde_json::from_str(&s).unwrap();
+        assert_eq!(p, back);
     }
 }
