@@ -333,6 +333,10 @@ fn build_batch(claimed_handle: &str, events: &[UnsentEvent]) -> IngestBatch {
                 event,
                 source: parse_source(&e.log_source),
                 source_offset: e.source_offset,
+                // Per Phase 1.A: metadata stamping happens in a later
+                // task; envelopes shipped today carry None and the
+                // server back-fills observed metadata server-side.
+                metadata: None,
             }
         })
         .collect();

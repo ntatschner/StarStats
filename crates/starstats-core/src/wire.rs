@@ -6,6 +6,7 @@
 //! breaking changes (none planned for v1).
 
 use crate::events::GameEvent;
+use crate::metadata::EventMetadata;
 use serde::{Deserialize, Serialize};
 
 /// Single event with the metadata the server needs for dedupe and
@@ -35,6 +36,13 @@ pub struct EventEnvelope {
     /// Byte offset within the source file. Lets the server reconstruct
     /// ordering even across out-of-order batch arrivals.
     pub source_offset: u64,
+
+    /// Cross-cutting metadata stamped by the client (or by the server
+    /// during the schema-v1 grace window). Optional on the wire so
+    /// envelopes produced by pre-v2 clients still deserialise; the
+    /// server back-fills a default observed metadata in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EventMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +78,10 @@ pub struct IngestBatch {
 }
 
 impl IngestBatch {
-    pub const CURRENT_SCHEMA_VERSION: u16 = 1;
+    /// Bumped to 2 when `EventEnvelope.metadata` was added. The server
+    /// accepts both v1 (no metadata, synthesised server-side) and v2
+    /// during the grace window described in the design spec.
+    pub const CURRENT_SCHEMA_VERSION: u16 = 2;
 }
 
 /// One owned ship pulled from RSI's hangar / pledges page.
@@ -131,7 +142,8 @@ pub struct UserPreferences {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{GameEvent, JoinPu};
+    use crate::events::{GameEvent, JoinPu, PlayerDeath};
+    use crate::metadata::{stamp, EntityKind};
 
     #[test]
     fn round_trips_through_json() {
@@ -152,11 +164,54 @@ mod tests {
                 })),
                 source: LogSource::Live,
                 source_offset: 0,
+                metadata: None,
             }],
         };
         let s = serde_json::to_string(&batch).unwrap();
         let parsed: IngestBatch = serde_json::from_str(&s).unwrap();
         assert_eq!(batch, parsed);
+    }
+
+    #[test]
+    fn envelope_with_metadata_round_trips() {
+        let ev = GameEvent::PlayerDeath(PlayerDeath {
+            timestamp: "2026-05-17T00:00:00.000Z".into(),
+            body_class: "body_01_noMagicPocket".into(),
+            body_id: "1".into(),
+            zone: None,
+        });
+        let env = EventEnvelope {
+            idempotency_key: "evt-1".into(),
+            raw_line: "<...>".into(),
+            event: Some(ev.clone()),
+            source: LogSource::Live,
+            source_offset: 0,
+            metadata: Some(stamp(&ev, Some("alice"))),
+        };
+        let s = serde_json::to_string(&env).unwrap();
+        let parsed: EventEnvelope = serde_json::from_str(&s).unwrap();
+        assert_eq!(env, parsed);
+        let metadata = parsed.metadata.expect("metadata must survive round-trip");
+        assert_eq!(metadata.primary_entity.kind, EntityKind::Player);
+    }
+
+    #[test]
+    fn envelope_without_metadata_still_deserialises() {
+        // Wire form produced by a pre-v2 client: no `metadata` key.
+        let legacy = r#"{
+            "idempotency_key": "evt-1",
+            "raw_line": "<...>",
+            "event": null,
+            "source": "live",
+            "source_offset": 0
+        }"#;
+        let parsed: EventEnvelope = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.metadata.is_none());
+    }
+
+    #[test]
+    fn schema_version_bumped_to_two() {
+        assert_eq!(IngestBatch::CURRENT_SCHEMA_VERSION, 2);
     }
 
     #[test]

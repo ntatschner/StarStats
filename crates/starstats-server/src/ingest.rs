@@ -277,6 +277,7 @@ mod tests {
             })),
             source: LogSource::Live,
             source_offset: 1234,
+            metadata: None,
         }
     }
 
