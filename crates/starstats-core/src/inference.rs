@@ -751,6 +751,82 @@ mod tests {
         assert!(inferred_deaths[0].superseded_by.is_none());
     }
 
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    /// Strategy: monotonic-timestamped envelopes drawn from the event
+    /// kinds the inference pass actually inspects. Keeps the search
+    /// space small so the test stays fast — exhaustive coverage isn't
+    /// the goal, varied combinations are.
+    fn arb_event_stream() -> impl Strategy<Value = Vec<EventEnvelope>> {
+        // 0..6 → pick which event kind. Each picks reuses the same
+        // index for the idempotency_key so successive shrinks produce
+        // stable, distinct keys.
+        prop_vec(0u8..6, 1..20usize).prop_map(|kinds| {
+            kinds
+                .into_iter()
+                .enumerate()
+                .map(|(i, kind)| {
+                    // Monotonic seconds-offset timestamps. The same
+                    // index drives both the timestamp and the
+                    // idempotency_key so the input is deterministic
+                    // for any sampled kind sequence.
+                    let ts = format!("2026-05-17T14:00:{:02}Z", (i % 60) as u32);
+                    let idk = format!("env{i}");
+                    let event = match kind {
+                        0 => GameEvent::VehicleDestruction(VehicleDestruction {
+                            timestamp: ts,
+                            vehicle_class: "Cutlass".into(),
+                            vehicle_id: Some("v1".into()),
+                            destroy_level: 2,
+                            caused_by: "self".into(),
+                            zone: None,
+                        }),
+                        1 => GameEvent::ResolveSpawn(ResolveSpawn {
+                            timestamp: ts,
+                            player_geid: "Jim".into(),
+                            fallback: false,
+                        }),
+                        2 => GameEvent::PlanetTerrainLoad(PlanetTerrainLoad {
+                            timestamp: ts,
+                            planet: format!("planet_{}", i % 3),
+                        }),
+                        3 => GameEvent::ShopBuyRequest(ShopBuyRequest {
+                            timestamp: ts,
+                            shop_id: Some("kiosk_1".into()),
+                            item_class: Some("rsi_rifle".into()),
+                            quantity: None,
+                            raw: "r".into(),
+                        }),
+                        4 => GameEvent::ShopFlowResponse(ShopFlowResponse {
+                            timestamp: ts,
+                            shop_id: Some("kiosk_1".into()),
+                            success: Some(true),
+                            raw: "r".into(),
+                        }),
+                        _ => GameEvent::PlayerDeath(PlayerDeath {
+                            timestamp: ts,
+                            body_class: "body_01_noMagicPocket".into(),
+                            body_id: format!("body_{i}"),
+                            zone: None,
+                        }),
+                    };
+                    make_envelope(event, &idk)
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn infer_is_idempotent_on_same_input(events in arb_event_stream()) {
+            let cfg = InferenceConfig::default();
+            let r1 = infer(&events, &cfg);
+            let r2 = infer(&events, &cfg);
+            prop_assert_eq!(r1, r2);
+        }
+    }
+
     #[test]
     fn implicit_shop_request_timeout_emitted_when_response_too_late() {
         let req = shop_buy(
