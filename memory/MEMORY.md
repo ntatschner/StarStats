@@ -6,16 +6,19 @@
 - Triage 2 moderate Dependabot alerts on default branch.
 
 ## Current Status
-- **Workspace version:** 0.0.6-beta.
-- **Migration tip:** 0027 (share_reports).
-- **Server tests:** 297/297 passing.
+- **Workspace version:** 0.0.7-beta (bumped `bff9107`, 2026-05-17).
+- **Migration tip:** 0028 (users.shares_paused_until).
+- **Server tests:** 299/299 passing (added 2 pause-gate tests in Wave 4).
 - **Active branch:** main. Wave work merges directly; `feat/tray-followups` already merged via PR #22.
 - **Audit v2 waves landed (most recent first):**
+  - `5b4a3ab` — Audit v2.1 §C auto-pause closure: migration 0028 + UserStore methods + add_share gate + cluster-fire stamps column
+  - `7441f22` — events v2: server synthesises EventMetadata for legacy v1 clients
+  - `7759935` — Audit v2.1 §C: per-user sharing context admin sub-tab
+  - `13084cf` — Audit v2.1 §B1: Preview as @handle (simulated)
+  - `0a33160` — Audit v2.1 Wave A: scope-preset chips + bulk ops
   - `8fdb566` — fix(sharing): tolerate partial-failure on the 4-call dashboard load
   - `0e91cbf` — Wave C tail: h1 type plateau (28px baseline) + HangarCard reframe
   - `989fbac` — Wave B2: share-reports moderation queue (store + 3 endpoints + reporter affordance + admin queue page)
-  - `a29037e` — Wave B1 (admin sharing overview) + C3 (warp dim on table-heavy routes)
-  - `c5c1949` — Wave A: device_id on batches + per-event share scope filter
 
 ## Technical Environment
 - Windows 11 + PowerShell + WSL. Project at `D:\git\RSIStarCitizenTools\StarStats`.
