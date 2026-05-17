@@ -98,3 +98,8 @@ src-tauri/target/
 # hooks, skills, and agents. The `.superpowers/` scratch area used
 # by the agent's brainstorming workflow stays local per developer.
 .superpowers/
+
+# Top-level design-bundle landing dir (separate from the
+# design/**/_fetched/ pattern above — Claude Code drops fresh
+# fetches here when working on an audit).
+/_fetched/

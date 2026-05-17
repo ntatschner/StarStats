@@ -46,11 +46,22 @@ import {
 } from '@/lib/api';
 import { logger } from '@/lib/logger';
 import { getSession } from '@/lib/session';
-import { reportShareAction } from './actions';
+import {
+  bulkResetScopeAction,
+  bulkRevokeExpiredAction,
+  reportShareAction,
+} from './actions';
+import { ScopePresets } from './_components/ScopePresets';
 
 interface SearchParams {
   status?: string;
   error?: string;
+  /**
+   * Counter carried by bulk-op redirects so the success banner can
+   * say "Revoked 3 expired shares" instead of "Revoked." Audit
+   * v2.1 §A3.
+   */
+  n?: string;
   /** Pre-populate the add-handle field — set by per-profile "Share back" CTA. */
   handle?: string;
   /**
@@ -108,13 +119,44 @@ const formRowStyle: React.CSSProperties = {
   flexWrap: 'wrap',
 };
 
-const STATUS_MESSAGES: Record<string, { text: string; tone: 'ok' | 'danger' }> = {
+/**
+ * Status banner copy. `text` may be a function when the message
+ * needs to interpolate a counter (bulk-op results carry one in the
+ * `n` query param). Static-text entries use the literal shape.
+ */
+const STATUS_MESSAGES: Record<
+  string,
+  { text: string | ((n: number) => string); tone: 'ok' | 'danger' }
+> = {
   visibility_public: { text: 'Profile is now public.', tone: 'ok' },
   visibility_private: { text: 'Profile is now private.', tone: 'ok' },
   share_added: { text: 'Share granted.', tone: 'ok' },
   share_revoked: { text: 'Share revoked.', tone: 'ok' },
   org_share_added: { text: 'Org share granted.', tone: 'ok' },
   org_share_revoked: { text: 'Org share revoked.', tone: 'ok' },
+  // Audit v2.1 §A3 — bulk-op outcomes.
+  bulk_revoked: {
+    text: (n) =>
+      n === 0
+        ? 'No expired shares were left to revoke.'
+        : `Revoked ${n} expired share${n === 1 ? '' : 's'}.`,
+    tone: 'ok',
+  },
+  bulk_scope_reset: {
+    text: (n) =>
+      n === 0
+        ? 'No active outbound shares to update.'
+        : `Reset scope on ${n} share${n === 1 ? '' : 's'}.`,
+    tone: 'ok',
+  },
+  bulk_revoke_failed: {
+    text: "Couldn't load shares to revoke. Try again shortly.",
+    tone: 'danger',
+  },
+  bulk_scope_reset_failed: {
+    text: "Couldn't reset scopes. Try again shortly.",
+    tone: 'danger',
+  },
 };
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -504,7 +546,11 @@ export default async function SharingPage(props: {
           }`}
           style={{ alignSelf: 'flex-start' }}
         >
-          {STATUS_MESSAGES[status].text}
+          {typeof STATUS_MESSAGES[status].text === 'function'
+            ? STATUS_MESSAGES[status].text(
+                Number.parseInt(params.n ?? '0', 10) || 0,
+              )
+            : STATUS_MESSAGES[status].text}
         </div>
       )}
       {errorCode && (
@@ -653,6 +699,106 @@ export default async function SharingPage(props: {
               <h2 style={cardTitleStyle}>Shared with specific handles</h2>
             </header>
             <div style={cardBodyStyle}>
+              {(() => {
+                // Audit v2.1 §A3 — bulk-ops row above the outbound list.
+                // Render only the buttons whose preconditions are met;
+                // an empty row is uglier than just hiding it.
+                const now = Date.now();
+                const expiredCount = (shares?.shares ?? []).filter(
+                  (s) =>
+                    s.expires_at && new Date(s.expires_at).getTime() <= now,
+                ).length;
+                const activeCount = (shares?.shares ?? []).filter(
+                  (s) =>
+                    !s.expires_at ||
+                    new Date(s.expires_at).getTime() > now,
+                ).length;
+                if (expiredCount === 0 && activeCount === 0) return null;
+                return (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 8,
+                      marginBottom: 12,
+                      paddingBottom: 12,
+                      borderBottom: '1px solid var(--border)',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{ fontSize: 11, color: 'var(--fg-dim)' }}
+                    >
+                      Bulk:
+                    </span>
+                    {expiredCount > 0 && (
+                      <form
+                        action={bulkRevokeExpiredAction}
+                        style={{ margin: 0 }}
+                      >
+                        <button
+                          type="submit"
+                          className="ss-btn ss-btn--link"
+                          style={{ color: 'var(--danger)' }}
+                          title={`Revoke ${expiredCount} expired share${
+                            expiredCount === 1 ? '' : 's'
+                          }`}
+                        >
+                          Revoke {expiredCount} expired
+                        </button>
+                      </form>
+                    )}
+                    {activeCount > 0 && (
+                      <form
+                        action={bulkResetScopeAction}
+                        style={{
+                          margin: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        <label
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--fg-muted)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                          }}
+                        >
+                          Reset all to
+                          <select
+                            name="scope_kind"
+                            defaultValue="aggregates"
+                            style={{
+                              fontSize: 12,
+                              padding: '4px 6px',
+                              background: 'var(--bg-elev)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 'var(--r-sm)',
+                              color: 'var(--fg)',
+                            }}
+                          >
+                            <option value="full">full</option>
+                            <option value="timeline">timeline</option>
+                            <option value="aggregates">aggregates</option>
+                          </select>
+                        </label>
+                        <button
+                          type="submit"
+                          className="ss-btn ss-btn--link"
+                          title={`Reset scope on ${activeCount} active share${
+                            activeCount === 1 ? '' : 's'
+                          }`}
+                        >
+                          Apply
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                );
+              })()}
               {shares && shares.shares.length > 0 ? (
                 <div
                   style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
@@ -855,6 +1001,11 @@ export default async function SharingPage(props: {
                     color: 'var(--fg)',
                   }}
                 />
+                {/* Audit v2.1 §A2 — quick-start presets above the
+                    detailed picker. Pure client-side; chips write
+                    into the same scope_* fields the server action
+                    reads. */}
+                <ScopePresets />
                 {/* Scope picker (audit §05.1) — hidden behind a
                     `<details>` so the existing two-line grant form
                     stays the default. Pure native HTML so the page
