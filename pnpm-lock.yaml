@@ -48,6 +48,9 @@ importers:
       '@tauri-apps/plugin-updater':
         specifier: ^2.10.1
         version: 2.10.1
+      api-client-ts:
+        specifier: workspace:*
+        version: link:../../packages/api-client-ts
       react:
         specifier: 19.0.0
         version: 19.0.0
