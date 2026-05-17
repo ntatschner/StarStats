@@ -27,8 +27,8 @@ pub use events::{
 };
 pub use inference::{infer, InferenceConfig, InferredEvent};
 pub use metadata::{
-    event_type_key, group_key_for, primary_entity_for, stamp, EntityKind, EntityRef, EventMetadata,
-    EventSource, FieldProvenance,
+    event_type_key, group_key_for, primary_entity_for, provenance_for_inferred_field, stamp,
+    EntityKind, EntityRef, EventMetadata, EventSource, FieldProvenance,
 };
 pub use parser::{
     classify, classify_launcher_message, classify_with_metadata, parse_launcher_line,

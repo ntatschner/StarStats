@@ -754,6 +754,13 @@ fn run_reparse(
         // Best-effort zone enrichment for death-related events.
         // Classify always returns `zone: None`; the enrichment pass
         // injects whatever last_zone has accumulated.
+        //
+        // TODO(Phase 3 follow-up): record per-field provenance for the
+        // `zone` field via `starstats_core::provenance_for_inferred_field`
+        // so the inference trail is visible alongside the value. Needs
+        // the source `PlanetTerrainLoad` / `LocationInventoryRequested`
+        // envelope's idempotency_key threaded through `last_zone`, which
+        // is a wider refactor than the inference-engine wave.
         let new_event = match new_event {
             GameEvent::PlayerDeath(mut d) if d.zone.is_none() => {
                 d.zone = last_zone.clone();

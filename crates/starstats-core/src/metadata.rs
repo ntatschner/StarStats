@@ -416,6 +416,37 @@ pub fn group_key_for(event: &GameEvent, claimed_handle: Option<&str>) -> String 
     )
 }
 
+/// Build a [`FieldProvenance::InferredFrom`] entry for a field whose
+/// value was derived from a set of observed source envelopes.
+///
+/// `field` names the field (e.g. `"zone"`) and drives the rule_id
+/// via a stable convention — `inferred_<field>_from_sources` — so
+/// every call site producing the same field's provenance round-trips
+/// to the same `rule_id`. Callers that need a tighter rule_id should
+/// construct the variant directly rather than going through this
+/// helper.
+///
+/// Returns `FieldProvenance::Observed` when `sources` is empty — that
+/// signals "the value came from the line itself", not from a
+/// derivation, and we don't fabricate a rule_id for an empty trail.
+///
+/// Use site: zone-enrichment in `starstats-client::commands` (the
+/// only enrichment pass live as of Phase 3). Wired up in a follow-up
+/// once the enrichment call site is refactored to thread metadata
+/// through.
+pub fn provenance_for_inferred_field(
+    field: &str,
+    sources: &[&crate::wire::EventEnvelope],
+) -> FieldProvenance {
+    if sources.is_empty() {
+        return FieldProvenance::Observed;
+    }
+    FieldProvenance::InferredFrom {
+        source_event_ids: sources.iter().map(|e| e.idempotency_key.clone()).collect(),
+        rule_id: format!("inferred_{field}_from_sources"),
+    }
+}
+
 /// One-shot builder: produce Observed metadata for an event in a
 /// single call. The common path the classifier takes for every line
 /// it parses straight off `Game.log`.
@@ -1070,6 +1101,47 @@ mod tests {
         assert!(m.field_provenance.is_empty());
         assert!(m.inference_inputs.is_empty());
         assert_eq!(m.rule_id, None);
+    }
+
+    #[test]
+    fn provenance_for_inferred_field_returns_inferred_from_with_source_ids() {
+        use crate::wire::{EventEnvelope, LogSource};
+        let envs = [
+            EventEnvelope {
+                idempotency_key: "evt-a".into(),
+                raw_line: "x".into(),
+                event: None,
+                source: LogSource::Live,
+                source_offset: 0,
+                metadata: None,
+            },
+            EventEnvelope {
+                idempotency_key: "evt-b".into(),
+                raw_line: "y".into(),
+                event: None,
+                source: LogSource::Live,
+                source_offset: 1,
+                metadata: None,
+            },
+        ];
+        let refs: Vec<&EventEnvelope> = envs.iter().collect();
+        let p = provenance_for_inferred_field("zone", &refs);
+        match p {
+            FieldProvenance::InferredFrom {
+                source_event_ids,
+                rule_id,
+            } => {
+                assert_eq!(source_event_ids, vec!["evt-a", "evt-b"]);
+                assert_eq!(rule_id, "inferred_zone_from_sources");
+            }
+            other => panic!("expected InferredFrom, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn provenance_for_inferred_field_returns_observed_when_no_sources() {
+        let p = provenance_for_inferred_field("zone", &[]);
+        assert_eq!(p, FieldProvenance::Observed);
     }
 
     #[test]
