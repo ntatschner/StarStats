@@ -36,5 +36,5 @@ pub use parser_defs::{
     apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,
 };
 pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
-pub use validators::{validate_event, ValidationError};
+pub use validators::{validate_event, validate_metadata, ValidationError};
 pub use wire::{EventEnvelope, IngestBatch};

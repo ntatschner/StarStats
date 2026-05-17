@@ -6,6 +6,8 @@
 //! pipeline).
 
 use crate::events::GameEvent;
+use crate::metadata::{EventMetadata, EventSource};
+use crate::wire::EventEnvelope;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -18,10 +20,27 @@ pub enum ValidationError {
     EmptyField(&'static str),
     #[error("port {0} is out of plausible range")]
     BadPort(u16),
+    #[error("invalid metadata: {reason}")]
+    InvalidMetadata { reason: String },
 }
 
 /// Lightweight validity check. Cheap to call on every ingested event.
-pub fn validate_event(event: &GameEvent) -> Result<(), ValidationError> {
+///
+/// Validates the parsed `GameEvent` payload (when present) and any
+/// attached `EventMetadata`. Envelopes with `event = None` (lines the
+/// client recognised structurally but could not classify) pass the
+/// payload check; metadata, when present, is still validated.
+pub fn validate_event(envelope: &EventEnvelope) -> Result<(), ValidationError> {
+    if let Some(event) = &envelope.event {
+        validate_game_event(event)?;
+    }
+    if let Some(meta) = envelope.metadata.as_ref() {
+        validate_metadata(meta)?;
+    }
+    Ok(())
+}
+
+fn validate_game_event(event: &GameEvent) -> Result<(), ValidationError> {
     let ts = match event {
         GameEvent::ProcessInit(e) => &e.timestamp,
         GameEvent::LegacyLogin(e) => &e.timestamp,
@@ -98,6 +117,47 @@ pub fn validate_event(event: &GameEvent) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Enforce the cross-field invariants documented on [`EventMetadata`].
+///
+/// Rules:
+/// - `confidence` must lie in `[0.0, 1.0]`.
+/// - `Observed` events anchor at `confidence = 1.0` with no
+///   `inference_inputs`. Anything else is a producer bug.
+/// - `Inferred` events must carry a sub-1.0 confidence and name at
+///   least one `inference_inputs` ancestor so the provenance trail is
+///   followable.
+/// - `Synthesized` is unconstrained here — synthetic markers
+///   (heartbeats, lifecycle events) describe themselves; no extra
+///   invariant fits cleanly across that vocabulary.
+pub fn validate_metadata(meta: &EventMetadata) -> Result<(), ValidationError> {
+    if !(0.0..=1.0).contains(&meta.confidence) {
+        return Err(ValidationError::InvalidMetadata {
+            reason: "confidence out of range".into(),
+        });
+    }
+    match meta.source {
+        EventSource::Observed => {
+            if (meta.confidence - 1.0).abs() > f32::EPSILON || !meta.inference_inputs.is_empty() {
+                return Err(ValidationError::InvalidMetadata {
+                    reason: "observed event must have confidence=1.0 and no inference_inputs"
+                        .into(),
+                });
+            }
+        }
+        EventSource::Inferred => {
+            if meta.confidence >= 1.0 || meta.inference_inputs.is_empty() {
+                return Err(ValidationError::InvalidMetadata {
+                    reason:
+                        "inferred event must have confidence<1.0 and at least one inference input"
+                            .into(),
+                });
+            }
+        }
+        EventSource::Synthesized => {}
+    }
+    Ok(())
+}
+
 fn check_timestamp(ts: &str) -> Result<(), ValidationError> {
     if ts.is_empty() {
         return Err(ValidationError::EmptyTimestamp);
@@ -128,44 +188,88 @@ fn check_timestamp(ts: &str) -> Result<(), ValidationError> {
 mod tests {
     use super::*;
     use crate::events::JoinPu;
+    use crate::metadata::{EntityKind, EntityRef};
+    use crate::wire::LogSource;
+    use std::collections::BTreeMap;
+
+    /// Build a minimal valid envelope wrapping a canonical JoinPu
+    /// event. Callers patch fields (event, metadata) as needed for
+    /// the case under test.
+    fn make_valid_envelope() -> EventEnvelope {
+        EventEnvelope {
+            idempotency_key: "evt-1".into(),
+            raw_line: "<...>".into(),
+            event: Some(GameEvent::JoinPu(JoinPu {
+                timestamp: "2026-05-02T21:14:23.189Z".into(),
+                address: "1.2.3.4".into(),
+                port: 64300,
+                shard: "pub_euw1b".into(),
+                location_id: "1".into(),
+            })),
+            source: LogSource::Live,
+            source_offset: 0,
+            metadata: None,
+        }
+    }
+
+    fn make_envelope_without_metadata() -> EventEnvelope {
+        make_valid_envelope()
+    }
+
+    fn make_minimal_envelope_with_metadata(meta: EventMetadata) -> EventEnvelope {
+        let mut env = make_valid_envelope();
+        env.metadata = Some(meta);
+        env
+    }
+
+    fn envelope_with_event(event: GameEvent) -> EventEnvelope {
+        EventEnvelope {
+            idempotency_key: "evt-1".into(),
+            raw_line: "<...>".into(),
+            event: Some(event),
+            source: LogSource::Live,
+            source_offset: 0,
+            metadata: None,
+        }
+    }
 
     #[test]
     fn rejects_empty_shard() {
-        let event = GameEvent::JoinPu(JoinPu {
+        let env = envelope_with_event(GameEvent::JoinPu(JoinPu {
             timestamp: "2026-05-02T21:14:23.189Z".into(),
             address: "1.2.3.4".into(),
             port: 64300,
             shard: String::new(),
             location_id: "1".into(),
-        });
+        }));
         assert_eq!(
-            validate_event(&event),
+            validate_event(&env),
             Err(ValidationError::EmptyField("shard"))
         );
     }
 
     #[test]
     fn accepts_valid_join_pu() {
-        let event = GameEvent::JoinPu(JoinPu {
+        let env = envelope_with_event(GameEvent::JoinPu(JoinPu {
             timestamp: "2026-05-02T21:14:23.189Z".into(),
             address: "1.2.3.4".into(),
             port: 64300,
             shard: "pub_euw1b".into(),
             location_id: "1".into(),
-        });
-        assert_eq!(validate_event(&event), Ok(()));
+        }));
+        assert_eq!(validate_event(&env), Ok(()));
     }
 
     #[test]
     fn rejects_bad_timestamp() {
-        let event = GameEvent::JoinPu(JoinPu {
+        let env = envelope_with_event(GameEvent::JoinPu(JoinPu {
             timestamp: "not-a-date".into(),
             address: "1.2.3.4".into(),
             port: 64300,
             shard: "pub".into(),
             location_id: "1".into(),
-        });
-        assert_eq!(validate_event(&event), Err(ValidationError::BadTimestamp));
+        }));
+        assert_eq!(validate_event(&env), Err(ValidationError::BadTimestamp));
     }
 
     #[test]
@@ -173,27 +277,129 @@ mod tests {
         // GameCrash events carry timestamps from chrono's `to_rfc3339()`,
         // which renders UTC as `+00:00` not `Z`. The validator must
         // not reject these.
-        let event = GameEvent::JoinPu(JoinPu {
+        let env = envelope_with_event(GameEvent::JoinPu(JoinPu {
             timestamp: "2026-05-04T21:10:12+00:00".into(),
             address: "1.2.3.4".into(),
             port: 64300,
             shard: "pub".into(),
             location_id: "1".into(),
-        });
-        assert_eq!(validate_event(&event), Ok(()));
+        }));
+        assert_eq!(validate_event(&env), Ok(()));
     }
 
     #[test]
     fn accepts_launcher_space_separated_form() {
         // LauncherActivity carries `YYYY-MM-DD HH:MM:SS.mmm` — space
         // separator, no offset. Also acceptable.
-        let event = GameEvent::JoinPu(JoinPu {
+        let env = envelope_with_event(GameEvent::JoinPu(JoinPu {
             timestamp: "2026-05-06 12:34:56.789".into(),
             address: "1.2.3.4".into(),
             port: 64300,
             shard: "pub".into(),
             location_id: "1".into(),
+        }));
+        assert_eq!(validate_event(&env), Ok(()));
+    }
+
+    #[test]
+    fn validator_rejects_confidence_out_of_range() {
+        let env = make_minimal_envelope_with_metadata(EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "x".into(),
+                display_name: "x".into(),
+            },
+            source: EventSource::Observed,
+            confidence: 1.5,
+            group_key: "k".into(),
+            field_provenance: BTreeMap::new(),
+            inference_inputs: vec![],
+            rule_id: None,
         });
-        assert_eq!(validate_event(&event), Ok(()));
+        let err = validate_event(&env).unwrap_err();
+        let s = format!("{err:?}");
+        assert!(s.contains("confidence"), "got: {s}");
+    }
+
+    #[test]
+    fn validator_rejects_observed_with_confidence_below_one() {
+        let env = make_minimal_envelope_with_metadata(EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "x".into(),
+                display_name: "x".into(),
+            },
+            source: EventSource::Observed,
+            confidence: 0.8,
+            group_key: "k".into(),
+            field_provenance: BTreeMap::new(),
+            inference_inputs: vec![],
+            rule_id: None,
+        });
+        let err = validate_event(&env).unwrap_err();
+        let s = format!("{err:?}");
+        assert!(s.contains("observed"), "got: {s}");
+    }
+
+    #[test]
+    fn validator_rejects_inferred_without_inputs() {
+        let env = make_minimal_envelope_with_metadata(EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "x".into(),
+                display_name: "x".into(),
+            },
+            source: EventSource::Inferred,
+            confidence: 0.85,
+            group_key: "k".into(),
+            field_provenance: BTreeMap::new(),
+            inference_inputs: vec![],
+            rule_id: None,
+        });
+        let err = validate_event(&env).unwrap_err();
+        let s = format!("{err:?}");
+        assert!(s.contains("inferred"), "got: {s}");
+    }
+
+    #[test]
+    fn validator_accepts_inferred_with_inputs_and_sub_one_confidence() {
+        let env = make_minimal_envelope_with_metadata(EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "x".into(),
+                display_name: "x".into(),
+            },
+            source: EventSource::Inferred,
+            confidence: 0.85,
+            group_key: "k".into(),
+            field_provenance: BTreeMap::new(),
+            inference_inputs: vec!["evt-source".into()],
+            rule_id: Some("rule_a".into()),
+        });
+        assert_eq!(validate_event(&env), Ok(()));
+    }
+
+    #[test]
+    fn validator_accepts_absent_metadata_for_legacy_clients() {
+        let env = make_envelope_without_metadata();
+        assert!(validate_event(&env).is_ok());
+    }
+
+    #[test]
+    fn validator_accepts_observed_with_default_confidence() {
+        let env = make_minimal_envelope_with_metadata(EventMetadata {
+            primary_entity: EntityRef {
+                kind: EntityKind::Player,
+                id: "x".into(),
+                display_name: "x".into(),
+            },
+            source: EventSource::Observed,
+            confidence: 1.0,
+            group_key: "k".into(),
+            field_provenance: BTreeMap::new(),
+            inference_inputs: vec![],
+            rule_id: None,
+        });
+        assert_eq!(validate_event(&env), Ok(()));
     }
 }
