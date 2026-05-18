@@ -26,6 +26,7 @@ use crate::health;
 use crate::ingest;
 use crate::magic_link_routes;
 use crate::org_routes;
+use crate::parser_submissions;
 use crate::preferences_routes;
 use crate::query;
 use crate::reference_data;
@@ -168,6 +169,7 @@ impl Modify for SecurityAddon {
         submission_routes::vote,
         submission_routes::flag,
         submission_routes::withdraw,
+        parser_submissions::submit,
         admin_routes::list_audit,
         admin_sharing_routes::get_overview,
         admin_sharing_routes::get_scope_histogram,
@@ -252,6 +254,11 @@ impl Modify for SecurityAddon {
         submission_routes::FlagRequest,
         submission_routes::FlagResponse,
         submission_routes::WithdrawResponse,
+        // Parser submissions (tray-promoted unknown-line submissions)
+        parser_submissions::ContextExampleSchema,
+        parser_submissions::ParserSubmissionSchema,
+        parser_submissions::ParserSubmissionBatchSchema,
+        parser_submissions::ParserSubmissionResponseSchema,
         // Admin submission moderation
         admin_routes::AuditEntryDto,
         admin_routes::AuditListResponse,
@@ -408,6 +415,7 @@ impl Modify for SecurityAddon {
         (name = "reference", description = "Star Citizen vehicle/item reference data (community-API-sourced)"),
         (name = "supporter", description = "Donate-status surface (read-only)"),
         (name = "donate", description = "Revolut hosted-checkout donate flow"),
+        (name = "parser-submissions", description = "Tray-promoted unknown-line submissions for rule-author review"),
         (name = "admin", description = "Site-wide staff endpoints (moderator/admin role required)"),
     )
 )]

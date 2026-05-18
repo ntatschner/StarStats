@@ -74,6 +74,8 @@ mod orders;
 mod org_routes;
 #[path = "../orgs.rs"]
 mod orgs;
+#[path = "../parser_submissions.rs"]
+mod parser_submissions;
 #[path = "../preferences_routes.rs"]
 mod preferences_routes;
 #[path = "../preferences_store.rs"]

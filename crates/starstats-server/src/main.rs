@@ -66,6 +66,7 @@ mod orders;
 mod org_routes;
 mod orgs;
 mod parser_def_routes;
+mod parser_submissions;
 mod preferences_routes;
 mod preferences_store;
 mod profile_store;
@@ -464,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(org_router)
         .merge(reference_router)
         .merge(parser_def_routes::routes())
+        .merge(parser_submissions::routes(pool.clone()))
         .merge(submission_router)
         .merge(admin_router)
         .merge(supporter_router)
