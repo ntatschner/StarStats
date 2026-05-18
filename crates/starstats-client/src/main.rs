@@ -344,6 +344,7 @@ fn main() {
             commands::count_unknown_lines,
             commands::dismiss_unknown_line,
             commands::submit_unknown_lines,
+            commands::client_anon_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

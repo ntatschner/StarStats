@@ -142,7 +142,17 @@ pub async fn refresh_account_info(state: State<'_, AppState>) -> Result<AccountS
 
 #[tauri::command]
 pub fn get_config() -> Result<Config, String> {
-    config::load().map_err(|e| e.to_string())
+    let mut cfg = config::load().map_err(|e| e.to_string())?;
+    // Resolve web_origin server-side before the TS sees it. When the
+    // user hasn't explicitly configured it, the derived value
+    // (`api.<host>` → `<host>`) is what the "Open on web" affordance
+    // should use. The on-disk config still stores None — we're only
+    // hydrating the returned shape so the TS has a single value to
+    // read instead of duplicating the resolution logic.
+    if cfg.web_origin.is_none() {
+        cfg.web_origin = cfg.effective_web_origin();
+    }
+    Ok(cfg)
 }
 
 /// Outcome of a Rust-side updater check. Mirrors the JS `UpdateInfo`
@@ -1842,6 +1852,47 @@ pub async fn set_update_available(
 /// Lower scores stay cached for diagnostics but don't get promoted.
 const UNKNOWN_LINE_REVIEW_THRESHOLD: u8 = 50;
 
+/// Return the persisted per-install anonymous ID for parser submissions,
+/// generating one on first call. Format: `anon_<uuid v4 simple>` (the
+/// `anon_` prefix keeps the value visually distinguishable from device
+/// IDs, batch IDs, etc. in logs without leaking install identity).
+///
+/// The server requires `client_anon_id` to be non-empty; this helper is
+/// the only producer client-side, so empty values can never reach the
+/// wire. Safe to call repeatedly — the second call onwards is a config
+/// read.
+fn get_or_create_client_anon_id() -> anyhow::Result<String> {
+    let mut cfg = config::load()?;
+    let (id, dirty) = resolve_client_anon_id(cfg.client_anon_id.as_deref());
+    if dirty {
+        cfg.client_anon_id = Some(id.clone());
+        config::save(&cfg)?;
+    }
+    Ok(id)
+}
+
+/// Pure helper carved out for testability: given the persisted value
+/// (if any), return `(id, dirty)` where `dirty == true` means the
+/// caller should write the new id back to disk. Empty / whitespace
+/// values are treated as missing so a corrupted config still self-heals.
+fn resolve_client_anon_id(existing: Option<&str>) -> (String, bool) {
+    if let Some(existing) = existing {
+        if !existing.trim().is_empty() {
+            return (existing.to_string(), false);
+        }
+    }
+    (format!("anon_{}", uuid::Uuid::new_v4().simple()), true)
+}
+
+/// Tauri command exposing the stable per-install anon ID to the UI.
+/// Today only used for diagnostics — the submission path generates and
+/// injects the value server-side so the frontend can't impersonate
+/// another install.
+#[tauri::command]
+pub fn client_anon_id() -> Result<String, String> {
+    get_or_create_client_anon_id().map_err(|e| e.to_string())
+}
+
 /// List every non-dismissed unknown shape worth reviewing (score >=
 /// `UNKNOWN_LINE_REVIEW_THRESHOLD`). Ordered by the storage layer:
 /// interest desc, occurrence desc, last_seen desc.
@@ -1896,6 +1947,20 @@ pub async fn submit_unknown_lines(
             ids: Vec::new(),
         });
     }
+
+    // Stamp the anon ID server-side rather than trusting whatever the
+    // frontend put in `client_anon_id`. This both fixes the bug where
+    // the UI was sending `""` (which the server rejects with 400) and
+    // closes the impersonation gap where one install could submit
+    // under another install's ID by editing the JS payload.
+    let anon_id = get_or_create_client_anon_id().map_err(|e| e.to_string())?;
+    let payloads: Vec<starstats_core::ParserSubmission> = payloads
+        .into_iter()
+        .map(|p| starstats_core::ParserSubmission {
+            client_anon_id: anon_id.clone(),
+            ..p
+        })
+        .collect();
 
     let cfg = config::load().map_err(|e| e.to_string())?;
     let api_url = cfg
@@ -1967,8 +2032,8 @@ pub async fn submit_unknown_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_timeline_limit, format_session_summary, redact, run_reparse, validate_pair_url,
-        EventCount, TimelineEntry, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT,
+        clamp_timeline_limit, format_session_summary, redact, resolve_client_anon_id, run_reparse,
+        validate_pair_url, EventCount, TimelineEntry, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT,
     };
     use crate::storage::Storage;
     use tempfile::TempDir;
@@ -2306,5 +2371,45 @@ mod tests {
             year_part.chars().all(|c| c.is_ascii_digit()),
             "first 4 chars after 'Generated ' should be a year, got: {year_part}"
         );
+    }
+
+    #[test]
+    fn resolve_client_anon_id_returns_existing_when_set() {
+        // Stable: the same persisted value comes back, no dirty flag,
+        // no rewrite of config.toml on subsequent calls.
+        let (id, dirty) = resolve_client_anon_id(Some("anon_existing_abc"));
+        assert_eq!(id, "anon_existing_abc");
+        assert!(!dirty, "existing id should not flag the config dirty");
+    }
+
+    #[test]
+    fn resolve_client_anon_id_generates_when_missing() {
+        // First-call path: produces a fresh anon_<uuid simple> string
+        // and flags the config as dirty so the caller persists it.
+        let (id, dirty) = resolve_client_anon_id(None);
+        assert!(dirty, "missing id must flag the config dirty");
+        assert!(
+            id.starts_with("anon_"),
+            "id should be prefixed with anon_, got: {id}"
+        );
+        // uuid simple is 32 hex chars.
+        let hex = id.strip_prefix("anon_").unwrap();
+        assert_eq!(hex.len(), 32, "expected 32-char uuid simple, got: {hex}");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "id tail should be hex, got: {hex}"
+        );
+    }
+
+    #[test]
+    fn resolve_client_anon_id_regenerates_when_blank() {
+        // A corrupted / blank config should self-heal rather than send
+        // an empty string to the server (which the route rejects with
+        // 400 `invalid_client_anon_id`).
+        for blank in ["", "   ", "\n\t"] {
+            let (id, dirty) = resolve_client_anon_id(Some(blank));
+            assert!(dirty, "blank id ({blank:?}) must trigger regeneration");
+            assert!(id.starts_with("anon_"), "regenerated id: {id}");
+        }
     }
 }

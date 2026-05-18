@@ -15,9 +15,12 @@ pub struct Config {
     /// Sync to the remote StarStats API server.
     pub remote_sync: RemoteSyncConfig,
     /// Web UI origin — used to deep-link the user back to the website
-    /// (e.g. for email verification). Falls back to `api_url` (with a
-    /// best-effort `api.` → `app.` rewrite, if applicable) when unset
-    /// so most users don't need to configure it.
+    /// (e.g. for email verification, "Open on web"). When unset, the
+    /// effective value is derived from `remote_sync.api_url` by
+    /// stripping a leading `api.` from the hostname (see
+    /// `Config::effective_web_origin`), so most users don't need to
+    /// configure it. Self-hosted setups with a non-`api.` host should
+    /// set this explicitly.
     pub web_origin: Option<String>,
     /// Automatically check for updates on startup. Defaults to true;
     /// the Updates card in Settings exposes a toggle. Disabled users
@@ -53,6 +56,15 @@ pub struct Config {
     /// dismissible — the rule is enforced Rust-side in `health.rs`.
     #[serde(default)]
     pub dismissed_health: Vec<crate::health::DismissedHealth>,
+    /// Stable per-install anonymous ID for parser submissions. The
+    /// server uses `(shape_hash, client_anon_id)` as the dedupe key
+    /// so repeated submissions from the same install fold into one
+    /// row. Lazily generated on first call to
+    /// `get_or_create_client_anon_id()` and persisted from then on.
+    /// `Option` so existing config.toml files survive the upgrade
+    /// without a migration.
+    #[serde(default)]
+    pub client_anon_id: Option<String>,
 }
 
 impl Default for Config {
@@ -66,8 +78,66 @@ impl Default for Config {
             debug_logging: false,
             theme: Theme::default(),
             dismissed_health: Vec::new(),
+            client_anon_id: None,
         }
     }
+}
+
+impl Config {
+    /// Resolve the effective web origin for deep-link affordances
+    /// (e.g. the tray's "Open on web" button).
+    ///
+    /// Priority order:
+    /// 1. Explicit `web_origin` from config.toml — honoured verbatim.
+    /// 2. Derived from `remote_sync.api_url` by stripping a leading
+    ///    `api.` from the hostname (e.g. `https://api.starstats.app`
+    ///    → `https://starstats.app`). The rewrite preserves scheme,
+    ///    port, and path; only the host is touched.
+    /// 3. `None` when neither is usable.
+    ///
+    /// Returning the API URL unmodified is never correct: the API
+    /// subdomain serves JSON, not HTML, so `/u/<handle>` 404s. The
+    /// old TS-side fallback chain (App.tsx) did exactly that — the
+    /// fix is to move the resolution Rust-side so the contract is a
+    /// single source of truth.
+    pub fn effective_web_origin(&self) -> Option<String> {
+        if let Some(origin) = self.web_origin.as_deref() {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.trim_end_matches('/').to_string());
+            }
+        }
+        derive_web_origin_from_api_url(self.remote_sync.api_url.as_deref()?)
+    }
+}
+
+/// Best-effort `api.<rest>` → `<rest>` host rewrite. Returns `None`
+/// for unparseable URLs or hosts that don't start with `api.`.
+/// Preserves scheme and the host's port suffix; the path is
+/// discarded (we want an origin, not a deep link).
+///
+/// String-parsing rather than a `url::Url` round-trip on purpose —
+/// avoids pulling the `url` crate into the client just for this
+/// single helper, and the input shape is well-constrained
+/// (`scheme://host[:port][/...]`).
+fn derive_web_origin_from_api_url(api_url: &str) -> Option<String> {
+    let trimmed = api_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = trimmed.split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    // `rest` is `host[:port][/path][?query]`. Strip the path/query
+    // first so a path segment containing `api.` can't trip the host
+    // rewrite (would-be `https://example.com/api.bar` is left alone).
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let new_authority = authority.strip_prefix("api.")?;
+    if new_authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{new_authority}"))
 }
 
 /// User-selectable visual theme. Each variant matches one of the four
@@ -345,6 +415,147 @@ mod tests {
         let toml_text = "[remote_sync]\nenabled = true\n";
         let cfg: Config = toml::from_str(toml_text).unwrap();
         assert_eq!(cfg.remote_sync.api_url.as_deref(), Some(DEFAULT_API_URL));
+    }
+
+    // -- effective_web_origin / derive_web_origin_from_api_url -------
+    //
+    // Regression coverage for the "Open on web takes you to the API
+    // subdomain" bug. The TS code used to fall back to api_url raw —
+    // the fix moved the rewrite Rust-side so there's one resolution
+    // path and one place to test it.
+
+    #[test]
+    fn effective_web_origin_prefers_explicit_value() {
+        let cfg = Config {
+            web_origin: Some("https://custom.example".to_string()),
+            remote_sync: RemoteSyncConfig {
+                api_url: Some("https://api.starstats.app".to_string()),
+                ..RemoteSyncConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.effective_web_origin().as_deref(),
+            Some("https://custom.example")
+        );
+    }
+
+    #[test]
+    fn effective_web_origin_strips_trailing_slashes_from_explicit_value() {
+        let cfg = Config {
+            web_origin: Some("https://custom.example///".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.effective_web_origin().as_deref(),
+            Some("https://custom.example")
+        );
+    }
+
+    #[test]
+    fn effective_web_origin_treats_blank_explicit_value_as_unset() {
+        let cfg = Config {
+            web_origin: Some("   ".to_string()),
+            remote_sync: RemoteSyncConfig {
+                api_url: Some("https://api.starstats.app".to_string()),
+                ..RemoteSyncConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.effective_web_origin().as_deref(),
+            Some("https://starstats.app")
+        );
+    }
+
+    #[test]
+    fn effective_web_origin_derives_from_api_url_when_unset() {
+        let cfg = Config::default(); // ships DEFAULT_API_URL
+        assert_eq!(
+            cfg.effective_web_origin().as_deref(),
+            Some("https://starstats.app")
+        );
+    }
+
+    #[test]
+    fn effective_web_origin_returns_none_when_both_unset() {
+        let cfg = Config {
+            remote_sync: RemoteSyncConfig {
+                api_url: None,
+                ..RemoteSyncConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(cfg.effective_web_origin().is_none());
+    }
+
+    #[test]
+    fn derive_web_origin_strips_api_prefix_from_hostname() {
+        assert_eq!(
+            derive_web_origin_from_api_url("https://api.starstats.app"),
+            Some("https://starstats.app".to_string())
+        );
+        assert_eq!(
+            derive_web_origin_from_api_url("https://api.starstats.app/"),
+            Some("https://starstats.app".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_web_origin_preserves_scheme_and_port() {
+        assert_eq!(
+            derive_web_origin_from_api_url("http://api.example.test:8080/v1"),
+            Some("http://example.test:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_web_origin_discards_path() {
+        // Origin = scheme + authority; the deep-link path comes from
+        // the caller, never from the api_url.
+        assert_eq!(
+            derive_web_origin_from_api_url("https://api.starstats.app/v1/healthz"),
+            Some("https://starstats.app".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_web_origin_ignores_api_in_path_segment() {
+        // The `api.` prefix only counts on the HOST, not anywhere in
+        // the URL. A user pointing api_url at a path under a non-api
+        // host should not silently rewrite.
+        assert_eq!(
+            derive_web_origin_from_api_url("https://example.com/api.bar"),
+            None
+        );
+    }
+
+    #[test]
+    fn derive_web_origin_returns_none_for_hosts_without_api_prefix() {
+        // Self-hosted users on `localhost`, raw IPs, or custom
+        // hostnames get None — the rewrite is best-effort, not magical.
+        // The "Open on web" affordance renders disabled in that case.
+        assert_eq!(
+            derive_web_origin_from_api_url("http://localhost:8080"),
+            None
+        );
+        assert_eq!(
+            derive_web_origin_from_api_url("http://127.0.0.1:3000"),
+            None
+        );
+        assert_eq!(derive_web_origin_from_api_url("https://example.com"), None);
+    }
+
+    #[test]
+    fn derive_web_origin_rejects_malformed_inputs() {
+        assert_eq!(derive_web_origin_from_api_url(""), None);
+        assert_eq!(derive_web_origin_from_api_url("   "), None);
+        assert_eq!(derive_web_origin_from_api_url("not-a-url"), None);
+        assert_eq!(derive_web_origin_from_api_url("://no-scheme.example"), None);
+        // host == "api." with nothing after → would yield empty
+        // authority; the helper returns None rather than handing back
+        // `https://`.
+        assert_eq!(derive_web_origin_from_api_url("https://api."), None);
     }
 
     #[test]

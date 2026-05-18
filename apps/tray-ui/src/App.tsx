@@ -135,9 +135,7 @@ function AppInner() {
             (status ? (
               <StatusPane
                 status={status}
-                webOrigin={
-                  config?.web_origin ?? config?.remote_sync.api_url ?? null
-                }
+                webOrigin={config?.web_origin ?? null}
                 onGoToSettings={onGoToSettings}
               />
             ) : (
