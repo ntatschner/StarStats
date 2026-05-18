@@ -13,6 +13,7 @@ pub mod parser;
 pub mod parser_defs;
 pub mod templates;
 pub mod transactions;
+pub mod unknown_lines;
 pub mod validators;
 pub mod wire;
 
@@ -38,5 +39,6 @@ pub use parser_defs::{
     apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,
 };
 pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
+pub use unknown_lines::{shape_hash, shape_of, PiiKind, PiiToken, UnknownLine};
 pub use validators::{validate_event, validate_metadata, ValidationError};
 pub use wire::{EventEnvelope, IngestBatch};
