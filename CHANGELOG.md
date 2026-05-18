@@ -26,7 +26,14 @@ Tag-suffix → release-channel mapping (see `release-manifests/`):
 
 ### Fixed
 
-- (nothing yet)
+- **Tray "Open on web" no longer opens the API subdomain.** The
+  tray's profile-link button was falling back to `remote_sync.api_url`
+  when `web_origin` was unset, which on the public install opens
+  `https://api.starstats.app/u/<handle>` (JSON 404) instead of the
+  apex site. Resolution moved Rust-side via
+  `Config::effective_web_origin()` — strips a leading `api.` from the
+  API host. Self-hosted users on a non-`api.` host can still set
+  `web_origin` explicitly to override.
 
 ### Security
 
