@@ -86,3 +86,41 @@ CREATE TABLE IF NOT EXISTS parser_def_manifest (
     fetched_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     payload_json  TEXT    NOT NULL
 );
+
+-- Phase 4.B local cache of `UnknownLine` records produced by
+-- `classify_or_capture`. Dedupe key is `shape_hash` — collapsing
+-- value-varying lines (timestamps, GEIDs, UUIDs, etc.) onto one row so
+-- a chatty unknown doesn't spam the review queue. `raw_examples_json`
+-- stores up to 5 raw line samples (newest at the end, oldest dropped
+-- when a sixth arrives) so a reviewer can compare the original strings
+-- against the shape template. PII detection results, partial parsed
+-- fields, and surrounding context are all JSON blobs because they're
+-- read whole on the review screen and never queried inside SQL.
+--
+-- `dismissed = 1` hides the row from `list_unknown_lines` without
+-- deleting it (so a future re-open doesn't re-surface the same
+-- pattern). `submitted_at` is set by `mark_submitted` once the user
+-- ships the row to the moderation queue; presence of a timestamp also
+-- implies the row should stop accruing more raw samples.
+CREATE TABLE IF NOT EXISTS unknown_lines (
+    id                       TEXT    PRIMARY KEY,
+    shape_hash               TEXT    NOT NULL UNIQUE,
+    raw_examples_json        TEXT    NOT NULL,
+    partial_structured_json  TEXT    NOT NULL,
+    shell_tag                TEXT,
+    context_before_json      TEXT    NOT NULL,
+    context_after_json       TEXT    NOT NULL,
+    game_build               TEXT,
+    channel                  TEXT    NOT NULL,
+    interest_score           INTEGER NOT NULL,
+    occurrence_count         INTEGER NOT NULL DEFAULT 1,
+    first_seen               TEXT    NOT NULL,
+    last_seen                TEXT    NOT NULL,
+    detected_pii_json        TEXT    NOT NULL,
+    dismissed                INTEGER NOT NULL DEFAULT 0,
+    submitted_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS unknown_lines_interest
+    ON unknown_lines(dismissed, interest_score DESC, occurrence_count DESC);
+CREATE INDEX IF NOT EXISTS unknown_lines_shape
+    ON unknown_lines(shape_hash);

@@ -3,8 +3,23 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+use starstats_core::unknown_lines::UnknownLine;
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Surfacing threshold matching the spec — lines below this never make
+/// it into the review queue by default. Callers can pass a lower (or
+/// zero) cutoff if they want to inspect everything that was captured.
+/// Exposed so the eventual Tauri command + UI badge agree on the cutoff
+/// without each importing the literal `50`.
+#[allow(dead_code)]
+pub const UNKNOWN_LINE_MIN_INTEREST: u8 = 50;
+
+/// Cap on `raw_examples_json` entries. Keep this tight: reviewers only
+/// need a handful of concrete samples to sanity-check a shape, and the
+/// JSON blob is read whole on every upsert.
+#[allow(dead_code)]
+const RAW_EXAMPLES_CAP: usize = 5;
 
 const SCHEMA: &str = include_str!("../sql/schema.sql");
 
@@ -600,6 +615,239 @@ impl Storage {
             Ok(None)
         }
     }
+
+    /// Upsert one captured `UnknownLine` keyed by `shape_hash`. New
+    /// rows insert verbatim; existing rows bump `occurrence_count`,
+    /// refresh `last_seen`, and append `line.raw_line` to the cached
+    /// raw-examples buffer — dropping the oldest entry when the cap is
+    /// exceeded so the buffer stays bounded. Other fields on a
+    /// duplicate (interest score, partial_structured, context) are
+    /// left untouched; the first capture sets the canonical record.
+    #[allow(dead_code)]
+    pub fn cache_unknown_line(&self, line: &UnknownLine) -> Result<()> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let existing: rusqlite::Result<(i64, String)> = conn.query_row(
+            "SELECT occurrence_count, raw_examples_json
+             FROM unknown_lines
+             WHERE shape_hash = ?",
+            params![line.shape_hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
+
+        match existing {
+            Ok((count, raw_json)) => {
+                let mut samples: Vec<String> = serde_json::from_str(&raw_json)
+                    .context("decode raw_examples_json on upsert")?;
+                samples.push(line.raw_line.clone());
+                while samples.len() > RAW_EXAMPLES_CAP {
+                    samples.remove(0);
+                }
+                let new_raw = serde_json::to_string(&samples)
+                    .context("encode raw_examples_json on upsert")?;
+                conn.execute(
+                    "UPDATE unknown_lines SET
+                        occurrence_count = ?,
+                        last_seen = ?,
+                        raw_examples_json = ?
+                     WHERE shape_hash = ?",
+                    params![count + 1, line.last_seen, new_raw, line.shape_hash],
+                )?;
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let raw_examples = serde_json::to_string(&vec![line.raw_line.clone()])
+                    .context("encode raw_examples_json on insert")?;
+                let partial = serde_json::to_string(&line.partial_structured)
+                    .context("encode partial_structured_json")?;
+                let context_before = serde_json::to_string(&line.context_before)
+                    .context("encode context_before_json")?;
+                let context_after = serde_json::to_string(&line.context_after)
+                    .context("encode context_after_json")?;
+                let pii = serde_json::to_string(&line.detected_pii)
+                    .context("encode detected_pii_json")?;
+                let channel = serde_json::to_value(line.channel)
+                    .context("encode channel")?
+                    .as_str()
+                    .map(str::to_string)
+                    .context("channel serialises to a string")?;
+                conn.execute(
+                    "INSERT INTO unknown_lines (
+                        id, shape_hash, raw_examples_json, partial_structured_json,
+                        shell_tag, context_before_json, context_after_json,
+                        game_build, channel, interest_score, occurrence_count,
+                        first_seen, last_seen, detected_pii_json, dismissed, submitted_at
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    params![
+                        line.id,
+                        line.shape_hash,
+                        raw_examples,
+                        partial,
+                        line.shell_tag,
+                        context_before,
+                        context_after,
+                        line.game_build,
+                        channel,
+                        line.interest_score as i64,
+                        line.occurrence_count as i64,
+                        line.first_seen,
+                        line.last_seen,
+                        pii,
+                        if line.dismissed { 1_i64 } else { 0_i64 },
+                    ],
+                )?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
+    /// Surface every non-dismissed unknown line whose interest score
+    /// meets `min_interest`. Ordered by interest desc, occurrence_count
+    /// desc, last_seen desc so the most actionable shapes float to the
+    /// top of the review pane. `min_interest = 50` matches the spec
+    /// default; callers can lower the bar for diagnostic views.
+    #[allow(dead_code)]
+    pub fn list_unknown_lines(&self, min_interest: u8) -> Result<Vec<UnknownLine>> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, shape_hash, raw_examples_json, partial_structured_json,
+                    shell_tag, context_before_json, context_after_json,
+                    game_build, channel, interest_score, occurrence_count,
+                    first_seen, last_seen, detected_pii_json, dismissed, submitted_at
+             FROM unknown_lines
+             WHERE dismissed = 0 AND interest_score >= ?
+             ORDER BY interest_score DESC, occurrence_count DESC, last_seen DESC",
+        )?;
+        let rows = stmt.query_map(params![min_interest as i64], decode_unknown_line)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count non-dismissed unknown lines at or above the given
+    /// interest cutoff. Tray badge calls this on a timer so it stays
+    /// cheap — the dedicated index on `(dismissed, interest_score)`
+    /// keeps the scan small.
+    #[allow(dead_code)]
+    pub fn count_unknown_lines(&self, min_interest: u8) -> Result<u32> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM unknown_lines
+             WHERE dismissed = 0 AND interest_score >= ?",
+            params![min_interest as i64],
+            |row| row.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    /// Mark a shape as dismissed so it never resurfaces in
+    /// `list_unknown_lines`. The row is kept (not deleted) so a future
+    /// re-capture of the same shape doesn't re-trigger the badge.
+    #[allow(dead_code)]
+    pub fn dismiss_unknown_line(&self, shape_hash: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        conn.execute(
+            "UPDATE unknown_lines SET dismissed = 1 WHERE shape_hash = ?",
+            params![shape_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a shape with its submission timestamp once the row has
+    /// been shipped to the server's moderation queue. The caller owns
+    /// the timestamp format (ISO-8601 by convention) so this method
+    /// stays a thin write.
+    #[allow(dead_code)]
+    pub fn mark_submitted(&self, shape_hash: &str, submitted_at: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        conn.execute(
+            "UPDATE unknown_lines SET submitted_at = ? WHERE shape_hash = ?",
+            params![submitted_at, shape_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Test/debug helper — return just the cached raw-line samples for
+    /// a given shape. Used by the `raw_examples_cap_at_five` test to
+    /// inspect the buffer without depending on `UnknownLine.raw_line`.
+    #[cfg(test)]
+    pub fn list_raw_examples(&self, shape_hash: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let raw: String = conn.query_row(
+            "SELECT raw_examples_json FROM unknown_lines WHERE shape_hash = ?",
+            params![shape_hash],
+            |row| row.get(0),
+        )?;
+        let samples: Vec<String> =
+            serde_json::from_str(&raw).context("decode raw_examples_json")?;
+        Ok(samples)
+    }
+}
+
+/// Decode one `unknown_lines` row back into an `UnknownLine`. Kept as
+/// a free function so both `list_unknown_lines` and any future
+/// single-row reader can share the column order.
+#[allow(dead_code)]
+fn decode_unknown_line(row: &rusqlite::Row<'_>) -> rusqlite::Result<UnknownLine> {
+    let partial_json: String = row.get(3)?;
+    let context_before_json: String = row.get(5)?;
+    let context_after_json: String = row.get(6)?;
+    let detected_pii_json: String = row.get(13)?;
+    let channel_str: String = row.get(8)?;
+    let dismissed_i: i64 = row.get(14)?;
+
+    let partial = serde_json::from_str(&partial_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let context_before = serde_json::from_str(&context_before_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let context_after = serde_json::from_str(&context_after_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let detected_pii = serde_json::from_str(&detected_pii_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let channel = serde_json::from_value(serde_json::Value::String(channel_str)).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+
+    let interest_i: i64 = row.get(9)?;
+    let occurrence_i: i64 = row.get(10)?;
+
+    Ok(UnknownLine {
+        id: row.get(0)?,
+        shape_hash: row.get(1)?,
+        // The `raw_line` field on the returned UnknownLine reflects
+        // the MOST RECENT sample we've stashed for this shape — the
+        // canonical buffer is `raw_examples_json` on disk, but
+        // callers that only want one example expect the freshest.
+        raw_line: {
+            let raw_examples_json: String = row.get(2)?;
+            let samples: Vec<String> = serde_json::from_str(&raw_examples_json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            samples.last().cloned().unwrap_or_default()
+        },
+        timestamp: None,
+        shell_tag: row.get(4)?,
+        partial_structured: partial,
+        context_before,
+        context_after,
+        game_build: row.get(7)?,
+        channel,
+        interest_score: interest_i.clamp(0, u8::MAX as i64) as u8,
+        occurrence_count: occurrence_i.max(0) as u32,
+        first_seen: row.get(11)?,
+        last_seen: row.get(12)?,
+        detected_pii,
+        dismissed: dismissed_i != 0,
+    })
 }
 
 #[cfg(test)]
@@ -740,5 +988,148 @@ mod tests {
             assert_eq!(row.event_name, "Foo");
             assert_eq!(row.occurrences, 1);
         }
+    }
+
+    // ─── Phase 4.B unknown_lines cache ─────────────────────────────
+
+    use starstats_core::unknown_lines::UnknownLine;
+    use starstats_core::wire::LogSource;
+    use std::collections::BTreeMap;
+
+    fn make_unknown_line(shape_hash: &str, interest_score: u8) -> UnknownLine {
+        UnknownLine {
+            id: format!("id-{shape_hash}"),
+            raw_line: format!("raw for {shape_hash}"),
+            timestamp: None,
+            shell_tag: Some("ShellTag".to_string()),
+            partial_structured: BTreeMap::new(),
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+            game_build: None,
+            channel: LogSource::Live,
+            interest_score,
+            shape_hash: shape_hash.to_string(),
+            occurrence_count: 1,
+            first_seen: "2026-05-17T14:02:30Z".to_string(),
+            last_seen: "2026-05-17T14:02:30Z".to_string(),
+            detected_pii: Vec::new(),
+            dismissed: false,
+        }
+    }
+
+    #[test]
+    fn upsert_increments_count_on_same_shape() {
+        let (storage, _tmp) = fresh_storage();
+        let line = make_unknown_line("shape_a", 60);
+        storage.cache_unknown_line(&line).unwrap();
+        storage.cache_unknown_line(&line).unwrap();
+        let rows = storage.list_unknown_lines(50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].occurrence_count, 2);
+    }
+
+    #[test]
+    fn raw_examples_cap_at_five() {
+        let (storage, _tmp) = fresh_storage();
+        let mut line = make_unknown_line("shape_a", 60);
+        for i in 0..7 {
+            line.raw_line = format!("line {i}");
+            storage.cache_unknown_line(&line).unwrap();
+        }
+        let raws = storage.list_raw_examples("shape_a").unwrap();
+        assert!(raws.len() <= 5);
+        assert!(raws.last().unwrap().contains("line 6"));
+    }
+
+    #[test]
+    fn list_filters_by_threshold_and_dismissed() {
+        let (storage, _tmp) = fresh_storage();
+        storage
+            .cache_unknown_line(&make_unknown_line("a", 80))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("b", 30))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("c", 90))
+            .unwrap();
+        storage.dismiss_unknown_line("c").unwrap();
+        let rows = storage.list_unknown_lines(50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].shape_hash, "a");
+    }
+
+    #[test]
+    fn mark_submitted_sets_timestamp() {
+        let (storage, _tmp) = fresh_storage();
+        storage
+            .cache_unknown_line(&make_unknown_line("shape_x", 70))
+            .unwrap();
+        storage
+            .mark_submitted("shape_x", "2026-05-17T15:00:00Z")
+            .unwrap();
+
+        // Read back the raw submitted_at column to verify it landed —
+        // the public list path doesn't surface submitted_at on
+        // UnknownLine because the wire type predates persistence.
+        let conn = storage.conn.lock().unwrap();
+        let submitted: Option<String> = conn
+            .query_row(
+                "SELECT submitted_at FROM unknown_lines WHERE shape_hash = ?",
+                params!["shape_x"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(submitted.as_deref(), Some("2026-05-17T15:00:00Z"));
+    }
+
+    #[test]
+    fn count_unknown_lines_returns_dismissed_filtered_count() {
+        let (storage, _tmp) = fresh_storage();
+        storage
+            .cache_unknown_line(&make_unknown_line("a", 80))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("b", 60))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("c", 30))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("d", 90))
+            .unwrap();
+        storage.dismiss_unknown_line("d").unwrap();
+
+        // 2 rows above threshold AND not dismissed: a (80) and b (60).
+        // c is below threshold; d is dismissed.
+        assert_eq!(storage.count_unknown_lines(50).unwrap(), 2);
+        // Drop the threshold — c counts but d still doesn't.
+        assert_eq!(storage.count_unknown_lines(0).unwrap(), 3);
+    }
+
+    #[test]
+    fn list_orders_by_interest_then_occurrence() {
+        let (storage, _tmp) = fresh_storage();
+        // Upsert "a" once with score 60.
+        storage
+            .cache_unknown_line(&make_unknown_line("a", 60))
+            .unwrap();
+        // Upsert "b" twice with score 60 — same interest, higher count.
+        storage
+            .cache_unknown_line(&make_unknown_line("b", 60))
+            .unwrap();
+        storage
+            .cache_unknown_line(&make_unknown_line("b", 60))
+            .unwrap();
+        // Upsert "c" once with score 90 — highest interest wins.
+        storage
+            .cache_unknown_line(&make_unknown_line("c", 90))
+            .unwrap();
+
+        let rows = storage.list_unknown_lines(50).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].shape_hash, "c");
+        assert_eq!(rows[1].shape_hash, "b");
+        assert_eq!(rows[2].shape_hash, "a");
     }
 }
