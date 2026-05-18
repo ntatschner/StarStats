@@ -22,6 +22,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use uuid::Uuid;
 
 /// One pre-existing-shape-normalised candidate.
 ///
@@ -248,6 +249,90 @@ pub fn detect_pii(line: &str, own_handle: &str, known_friends: &[String]) -> Vec
     tokens
 }
 
+// ─── Capture entry point ────────────────────────────────────────────
+
+/// Owned-string capture context. Built by the caller (typically the
+/// tray, threaded through from the live runtime cache). Holds all the
+/// inputs needed to score, redact, and stamp a raw line into an
+/// [`UnknownLine`].
+///
+/// `channel` defaults to [`LogSource::Other`] because `LogSource`
+/// itself does not implement `Default` (the wire type insists on an
+/// explicit value at every other call site).
+#[derive(Debug)]
+pub struct CaptureContextDefault {
+    pub own_handle: String,
+    pub known_friends: Vec<String>,
+    pub known_shell_tags: HashSet<String>,
+    pub known_rule_tags: HashSet<String>,
+    pub session_occurrence_count: u32,
+    pub multi_session: bool,
+    pub already_remote_matched: bool,
+    pub game_build: Option<String>,
+    pub channel: LogSource,
+    pub context_before: Vec<String>,
+}
+
+impl Default for CaptureContextDefault {
+    fn default() -> Self {
+        Self {
+            own_handle: String::new(),
+            known_friends: Vec::new(),
+            known_shell_tags: HashSet::new(),
+            known_rule_tags: HashSet::new(),
+            session_occurrence_count: 0,
+            multi_session: false,
+            already_remote_matched: false,
+            game_build: None,
+            channel: LogSource::Other,
+            context_before: Vec::new(),
+        }
+    }
+}
+
+/// Build a captured record from one raw line + surrounding context.
+/// `occurrence_count` starts at 1; the tray's SQLite layer bumps it
+/// when a later line collapses to the same `shape_hash`.
+pub fn capture(
+    line: &str,
+    shell_tag: Option<&str>,
+    ctx: &CaptureContextDefault,
+    now_rfc3339: &str,
+) -> UnknownLine {
+    let ictx = InterestContext {
+        known_shell_tags: &ctx.known_shell_tags,
+        known_rule_tags: &ctx.known_rule_tags,
+        session_occurrence_count: ctx.session_occurrence_count,
+        multi_session: ctx.multi_session,
+        already_remote_matched: ctx.already_remote_matched,
+    };
+    let interest = interest_score(line, shell_tag, &ictx);
+    let pii = detect_pii(line, &ctx.own_handle, &ctx.known_friends);
+    UnknownLine {
+        id: Uuid::new_v4().to_string(),
+        raw_line: line.into(),
+        timestamp: extract_timestamp(line),
+        shell_tag: shell_tag.map(String::from),
+        partial_structured: BTreeMap::new(),
+        context_before: ctx.context_before.clone(),
+        context_after: Vec::new(),
+        game_build: ctx.game_build.clone(),
+        channel: ctx.channel,
+        interest_score: interest,
+        shape_hash: shape_hash(line),
+        occurrence_count: 1,
+        first_seen: now_rfc3339.to_string(),
+        last_seen: now_rfc3339.to_string(),
+        detected_pii: pii,
+        dismissed: false,
+    }
+}
+
+/// Pull an ISO-8601 prefix out of the line if it's present. Best-effort.
+fn extract_timestamp(line: &str) -> Option<String> {
+    TS_RE.find(line).map(|m| m.as_str().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +542,46 @@ mod tests {
         assert!(kinds.contains(&PiiKind::IpPort));
         assert!(kinds.contains(&PiiKind::ShardId));
         assert!(kinds.contains(&PiiKind::Geid));
+    }
+
+    // ─── Capture entry point ─────────────────────────────────────────
+
+    #[test]
+    fn capture_records_shape_and_surfacing_score() {
+        let ctx = CaptureContextDefault::default();
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMystery> body with id [54324]";
+        let captured = capture(line, Some("NewMystery"), &ctx, "2026-05-17T14:02:30Z");
+        assert!(captured.interest_score >= 50);
+        assert!(captured.shape_hash.starts_with("sh_"));
+        assert_eq!(captured.shell_tag.as_deref(), Some("NewMystery"));
+        assert_eq!(captured.occurrence_count, 1);
+        assert!(!captured.dismissed);
+    }
+
+    #[test]
+    fn capture_scores_zero_when_already_remote_matched() {
+        let ctx = CaptureContextDefault {
+            already_remote_matched: true,
+            ..CaptureContextDefault::default()
+        };
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMystery> body with id [54324]";
+        let captured = capture(line, Some("NewMystery"), &ctx, "2026-05-17T14:02:30Z");
+        assert_eq!(captured.interest_score, 0);
+    }
+
+    #[test]
+    fn capture_extracts_timestamp_when_present() {
+        let ctx = CaptureContextDefault::default();
+        let line = "<2026-05-17T14:02:30Z> [Notice] <Foo> body";
+        let captured = capture(line, Some("Foo"), &ctx, "2026-05-17T14:02:30Z");
+        assert_eq!(captured.timestamp.as_deref(), Some("2026-05-17T14:02:30Z"));
+    }
+
+    #[test]
+    fn capture_returns_no_timestamp_for_timestampless_line() {
+        let ctx = CaptureContextDefault::default();
+        let line = "no timestamp here at all";
+        let captured = capture(line, None, &ctx, "2026-05-17T14:02:30Z");
+        assert!(captured.timestamp.is_none());
     }
 }

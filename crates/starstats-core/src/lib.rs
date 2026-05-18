@@ -40,8 +40,8 @@ pub use parser_defs::{
 };
 pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
 pub use unknown_lines::{
-    detect_pii, interest_score, shape_hash, shape_of, InterestContext, PiiKind, PiiToken,
-    UnknownLine,
+    capture, detect_pii, interest_score, shape_hash, shape_of, CaptureContextDefault,
+    InterestContext, PiiKind, PiiToken, UnknownLine,
 };
 pub use validators::{validate_event, validate_metadata, ValidationError};
 pub use wire::{EventEnvelope, IngestBatch};
