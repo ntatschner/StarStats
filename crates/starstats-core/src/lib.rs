@@ -39,6 +39,8 @@ pub use parser_defs::{
     apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,
 };
 pub use transactions::{pair_transactions, Transaction, TransactionKind, TransactionStatus};
-pub use unknown_lines::{shape_hash, shape_of, PiiKind, PiiToken, UnknownLine};
+pub use unknown_lines::{
+    interest_score, shape_hash, shape_of, InterestContext, PiiKind, PiiToken, UnknownLine,
+};
 pub use validators::{validate_event, validate_metadata, ValidationError};
 pub use wire::{EventEnvelope, IngestBatch};

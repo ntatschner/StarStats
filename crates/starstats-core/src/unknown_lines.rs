@@ -21,7 +21,7 @@ use crate::wire::LogSource;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// One pre-existing-shape-normalised candidate.
 ///
@@ -109,6 +109,69 @@ pub fn shape_hash(line: &str) -> String {
     format!("sh_{:016x}", h.finish())
 }
 
+// ─── Interest score ─────────────────────────────────────────────────
+
+/// Borrowed context for [`interest_score`]. Caller owns the HashSets;
+/// this struct keeps the function signature short and lets us add new
+/// inputs later without breaking call sites that build from a
+/// long-lived runtime cache.
+pub struct InterestContext<'a> {
+    /// Shell tags the parser has built-in or remote rules for.
+    pub known_shell_tags: &'a HashSet<String>,
+    /// Subset of known shell tags that have at least one remote rule
+    /// targeting them. Tags in `known_shell_tags` but not here are
+    /// tags the parser knows about but doesn't classify (yet).
+    pub known_rule_tags: &'a HashSet<String>,
+    pub session_occurrence_count: u32,
+    pub multi_session: bool,
+    pub already_remote_matched: bool,
+}
+
+/// Heuristic 0..=100 for how likely a line carries useful event
+/// signal. The UI surfaces lines above a configurable threshold
+/// (default 50). Tuning knobs:
+///
+/// * Unknown shell tag → +40 (strongest single signal).
+/// * Known shell tag with no remote rule → +30 (gap in coverage).
+/// * GEID-shaped digit cluster in body → +15.
+/// * Body keywords (`OOC_`, `body_`, `_class`) → +10.
+/// * Repeated this session → +10, multi-session → +20 (sustained, not
+///   one-off noise).
+/// * Extremely short or long → −30 (not an event we can usefully
+///   parse).
+/// * `already_remote_matched` short-circuits to 0 — a matched line is
+///   not unknown.
+pub fn interest_score(line: &str, shell_tag: Option<&str>, ctx: &InterestContext) -> u8 {
+    if ctx.already_remote_matched {
+        return 0;
+    }
+    let mut score: i32 = 0;
+    if let Some(tag) = shell_tag {
+        if !ctx.known_shell_tags.contains(tag) {
+            score += 40;
+        } else if !ctx.known_rule_tags.contains(tag) {
+            score += 30;
+        }
+    }
+    if line.contains('[') && line.chars().filter(|c| c.is_ascii_digit()).count() >= 5 {
+        score += 15;
+    }
+    if line.contains("OOC_") || line.contains("body_") || line.contains("_class") {
+        score += 10;
+    }
+    if ctx.session_occurrence_count >= 3 {
+        score += 10;
+    }
+    if ctx.multi_session {
+        score += 20;
+    }
+    let len = line.len();
+    if !(20..=2000).contains(&len) {
+        score -= 30;
+    }
+    score.clamp(0, 100) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +210,103 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.contains("<IPPORT>"));
         assert!(a.contains("\"<STR>\""));
+    }
+
+    // ─── Interest score ──────────────────────────────────────────────
+
+    fn known_tags(tags: &[&str]) -> HashSet<String> {
+        tags.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn ctx_with<'a>(
+        known_shell: &'a HashSet<String>,
+        known_rule: &'a HashSet<String>,
+    ) -> InterestContext<'a> {
+        InterestContext {
+            known_shell_tags: known_shell,
+            known_rule_tags: known_rule,
+            session_occurrence_count: 0,
+            multi_session: false,
+            already_remote_matched: false,
+        }
+    }
+
+    #[test]
+    fn unknown_shell_tag_surfaces_above_threshold() {
+        let known_shell = HashSet::new();
+        let known_rule = HashSet::new();
+        let ctx = ctx_with(&known_shell, &known_rule);
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMystery> body with id [54324]";
+        let score = interest_score(line, Some("NewMystery"), &ctx);
+        // +40 unknown shell, +15 GEID-like cluster = 55, comfortably > 50.
+        assert!(score >= 50, "expected surfacing score, got {score}");
+    }
+
+    #[test]
+    fn known_tag_without_rule_scores_below_unknown() {
+        let known_shell = known_tags(&["PartiallyKnown"]);
+        let known_rule = HashSet::new();
+        let ctx = ctx_with(&known_shell, &known_rule);
+        // No '[' in the line so the GEID bonus doesn't fire — isolate the
+        // +30 gap-in-coverage contribution.
+        let line = "<2026-05-17T14:02:30Z> Notice PartiallyKnown short text";
+        let score = interest_score(line, Some("PartiallyKnown"), &ctx);
+        assert_eq!(score, 30);
+    }
+
+    #[test]
+    fn already_remote_matched_short_circuits_to_zero() {
+        let known_shell = HashSet::new();
+        let known_rule = HashSet::new();
+        let mut ctx = ctx_with(&known_shell, &known_rule);
+        ctx.already_remote_matched = true;
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMystery> body with id [54324]";
+        assert_eq!(interest_score(line, Some("NewMystery"), &ctx), 0);
+    }
+
+    #[test]
+    fn fully_classified_tag_scores_zero() {
+        let known_shell = known_tags(&["FullyKnown"]);
+        let known_rule = known_tags(&["FullyKnown"]);
+        let ctx = ctx_with(&known_shell, &known_rule);
+        // No '[' in the line, no GEID bonus — isolate the fully-classified case.
+        let line = "<2026-05-17T14:02:30Z> Notice FullyKnown some short body";
+        assert_eq!(interest_score(line, Some("FullyKnown"), &ctx), 0);
+    }
+
+    #[test]
+    fn repeated_lines_score_higher() {
+        let known_shell = HashSet::new();
+        let known_rule = HashSet::new();
+        let mut ctx = ctx_with(&known_shell, &known_rule);
+        ctx.session_occurrence_count = 5;
+        ctx.multi_session = true;
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMystery> body with id [54324]";
+        let score = interest_score(line, Some("NewMystery"), &ctx);
+        // +40 unknown +15 GEID +10 repeats +20 multi-session = 85.
+        assert_eq!(score, 85);
+    }
+
+    #[test]
+    fn keyword_bonus_for_body_class_etc() {
+        let known_shell = HashSet::new();
+        let known_rule = HashSet::new();
+        let ctx = ctx_with(&known_shell, &known_rule);
+        let line =
+            "<2026-05-17T14:02:30Z> [Notice] <NewMystery> killed body_01_noMagicPocket id [54324]";
+        let score = interest_score(line, Some("NewMystery"), &ctx);
+        // +40 unknown +15 GEID +10 keyword.
+        assert_eq!(score, 65);
+    }
+
+    #[test]
+    fn very_short_or_long_lines_penalised() {
+        let known_shell = HashSet::new();
+        let known_rule = HashSet::new();
+        let ctx = ctx_with(&known_shell, &known_rule);
+        let short = "<X> <Foo>";
+        // Unknown tag (+40) but len < 20 (−30) = 10, well below threshold.
+        let score = interest_score(short, Some("Foo"), &ctx);
+        assert!(score < 50);
     }
 }
