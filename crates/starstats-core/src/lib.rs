@@ -44,4 +44,7 @@ pub use unknown_lines::{
     InterestContext, PiiKind, PiiToken, UnknownLine,
 };
 pub use validators::{validate_event, validate_metadata, ValidationError};
-pub use wire::{EventEnvelope, IngestBatch};
+pub use wire::{
+    ContextExample, EventEnvelope, IngestBatch, LogSource, ParserSubmission, ParserSubmissionBatch,
+    ParserSubmissionResponse,
+};

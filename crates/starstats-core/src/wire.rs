@@ -124,6 +124,72 @@ pub struct HangarPushRequest {
     pub ships: Vec<HangarShip>,
 }
 
+/// Context lines that bracketed an unknown line at capture time —
+/// up to five lines from before and after in source order. The tray
+/// builds these from its rolling buffer; the server stores them
+/// verbatim so a reviewer can see how the line sat in its surrounding
+/// log context without needing the original `Game.log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextExample {
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
+/// One unknown-line submission promoted from the tray to the server's
+/// rule-author moderation queue. Mirrors the spec at Phase 4 §4.
+///
+/// Identity is `(shape_hash, client_anon_id)` — repeated submissions
+/// from the same install fold into a single row with bumped occurrence
+/// totals; distinct installs each get their own row so the server can
+/// count *how many distinct users* surfaced the same shape (a stronger
+/// signal than raw occurrence count from one user).
+///
+/// `client_anon_id` is a stable per-install hash — it groups submissions
+/// without identifying the user. The bearer token, not this field,
+/// authoritatively identifies the submitter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParserSubmission {
+    pub shape_hash: String,
+    pub raw_examples: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub partial_structured: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_event_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_field_names: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_examples: Vec<ContextExample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_build: Option<String>,
+    pub channel: LogSource,
+    pub occurrence_count: u32,
+    pub client_anon_id: String,
+}
+
+/// Body of `POST /v1/parser-submissions`. A batch wrapper so the tray
+/// can flush multiple promoted shapes in one round-trip; per-element
+/// dedupe still applies row-by-row on the server side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParserSubmissionBatch {
+    pub submissions: Vec<ParserSubmission>,
+}
+
+/// Server response to a submission batch. `accepted` counts new rows;
+/// `deduped` counts updates to an existing `(shape_hash, client_anon_id)`
+/// row (occurrence bump, payload refresh). `ids` is the row id (as a
+/// string for forward-compat with non-int keys) for each submission in
+/// the batch, in the same order as the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParserSubmissionResponse {
+    pub accepted: u32,
+    pub deduped: u32,
+    pub ids: Vec<String>,
+}
+
 /// Per-user UI preferences. Stored as JSONB on `users.preferences`
 /// and surfaced through `GET/PUT /v1/me/preferences`. Forward-extensible:
 /// every field is optional + skip-on-None so adding new fields
@@ -244,5 +310,93 @@ mod tests {
         assert_eq!(s.matches("\"manufacturer\"").count(), 1);
         assert_eq!(s.matches("\"pledge_id\"").count(), 1);
         assert_eq!(s.matches("\"kind\"").count(), 1);
+    }
+
+    #[test]
+    fn parser_submission_round_trips() {
+        let s = ParserSubmission {
+            shape_hash: "sh_abc".into(),
+            raw_examples: vec!["raw1".into()],
+            partial_structured: Default::default(),
+            shell_tag: Some("Foo".into()),
+            suggested_event_name: None,
+            suggested_field_names: None,
+            notes: None,
+            context_examples: vec![],
+            game_build: Some("4.0".into()),
+            channel: LogSource::Live,
+            occurrence_count: 3,
+            client_anon_id: "anon_xyz".into(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ParserSubmission = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn parser_submission_batch_round_trips() {
+        let mut partial = std::collections::BTreeMap::new();
+        partial.insert("ts".to_string(), "2026-05-17T12:34:56Z".to_string());
+        let batch = ParserSubmissionBatch {
+            submissions: vec![ParserSubmission {
+                shape_hash: "sh_a".into(),
+                raw_examples: vec!["<X> hello".into(), "<X> world".into()],
+                partial_structured: partial,
+                shell_tag: Some("Actor Death".into()),
+                suggested_event_name: Some("actor_death".into()),
+                suggested_field_names: None,
+                notes: Some("looks combat-related".into()),
+                context_examples: vec![ContextExample {
+                    before: vec!["pre-1".into(), "pre-2".into()],
+                    after: vec!["post-1".into()],
+                }],
+                game_build: None,
+                channel: LogSource::Ptu,
+                occurrence_count: 7,
+                client_anon_id: "anon_42".into(),
+            }],
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        let back: ParserSubmissionBatch = serde_json::from_str(&json).unwrap();
+        assert_eq!(batch, back);
+    }
+
+    #[test]
+    fn parser_submission_omits_empty_optional_fields() {
+        let s = ParserSubmission {
+            shape_hash: "sh_min".into(),
+            raw_examples: vec!["only".into()],
+            partial_structured: Default::default(),
+            shell_tag: None,
+            suggested_event_name: None,
+            suggested_field_names: None,
+            notes: None,
+            context_examples: vec![],
+            game_build: None,
+            channel: LogSource::Live,
+            occurrence_count: 1,
+            client_anon_id: "anon_min".into(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        // skip_serializing_if must keep the wire form clean.
+        assert!(!json.contains("partial_structured"));
+        assert!(!json.contains("shell_tag"));
+        assert!(!json.contains("suggested_event_name"));
+        assert!(!json.contains("suggested_field_names"));
+        assert!(!json.contains("notes"));
+        assert!(!json.contains("context_examples"));
+        assert!(!json.contains("game_build"));
+    }
+
+    #[test]
+    fn parser_submission_response_round_trips() {
+        let r = ParserSubmissionResponse {
+            accepted: 2,
+            deduped: 1,
+            ids: vec!["1".into(), "2".into(), "3".into()],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ParserSubmissionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
     }
 }
