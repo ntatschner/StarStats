@@ -32,8 +32,8 @@ pub use metadata::{
     EntityKind, EntityRef, EventMetadata, EventSource, FieldProvenance,
 };
 pub use parser::{
-    classify, classify_launcher_message, classify_with_metadata, parse_launcher_line,
-    structural_parse, LauncherLogLine, LogLine, ParseStats,
+    classify, classify_launcher_message, classify_or_capture, classify_with_metadata,
+    parse_launcher_line, structural_parse, ClassifyOutcome, LauncherLogLine, LogLine, ParseStats,
 };
 pub use parser_defs::{
     apply_remote_rules, compile_rules, CompiledRemoteRule, Manifest, RemoteRule, RuleMatchKind,

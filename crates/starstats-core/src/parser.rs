@@ -826,6 +826,45 @@ pub fn classify_with_metadata(
     (event, meta)
 }
 
+/// Outcome of [`classify_or_capture`]. Variants are exclusive: every
+/// line resolves to exactly one of {classified, remote-matched,
+/// unknown}. Callers that only care about the event payload can match
+/// on the first two and ignore `Unknown`; callers that want to grow
+/// rule coverage hold onto the `Unknown` for the user review queue.
+#[derive(Debug)]
+pub enum ClassifyOutcome {
+    /// Built-in classifier matched.
+    Classified(GameEvent),
+    /// A remote parser rule matched.
+    RemoteMatched(GameEvent),
+    /// Neither matched — line is captured for review.
+    Unknown(crate::unknown_lines::UnknownLine),
+}
+
+/// One-stop entry point: classify the line with both built-in and
+/// remote rules; if neither matches, capture it as an unknown line for
+/// the local review queue.
+///
+/// Built-ins are tried first so a remote rule can never override a
+/// shipped classifier — see the note on [`apply_remote_rules`].
+pub fn classify_or_capture(
+    line: &LogLine<'_>,
+    remote_rules: &[crate::parser_defs::CompiledRemoteRule],
+    capture_ctx: &crate::unknown_lines::CaptureContextDefault,
+    raw_line: &str,
+    now_rfc3339: &str,
+) -> ClassifyOutcome {
+    if let Some(event) = classify(line) {
+        return ClassifyOutcome::Classified(event);
+    }
+    if let Some(event) = crate::parser_defs::apply_remote_rules(line, remote_rules) {
+        return ClassifyOutcome::RemoteMatched(event);
+    }
+    let captured =
+        crate::unknown_lines::capture(raw_line, line.event_name, capture_ctx, now_rfc3339);
+    ClassifyOutcome::Unknown(captured)
+}
+
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -1501,5 +1540,63 @@ mod tests {
         let (event, meta) = classify_with_metadata(&parsed, None);
         assert!(event.is_none());
         assert!(meta.is_none());
+    }
+
+    #[test]
+    fn classify_or_capture_returns_classified_for_known_line() {
+        // Reuse the modern PlayerDeath fixture from this file's own
+        // classifier tests — a built-in match short-circuits before
+        // any capture work happens.
+        let line = "<2026-05-01T18:46:15.085Z> [Notice] <Adding non kept item [CSCActorCorpseUtils::PopulateItemPortForItemRecoveryEntitlement]> Item 'body_01_noMagicPocket_9754924365641 - Class(body_01_noMagicPocket) - Context(Streamable Runtime-spawned) - Socpak()', Recorded data is: Port Name 'Body_ItemPort', Class GUID: 'dbaa8a7d-755f-4104-8b24-7b58fd1e76f6', KeptId: '9754924365641' [Team_CoreGameplayFeatures][Unknown]";
+        let parsed = structural_parse(line).expect("structural parse");
+        let ctx = crate::unknown_lines::CaptureContextDefault::default();
+        let outcome = classify_or_capture(&parsed, &[], &ctx, line, "2026-05-01T18:46:15Z");
+        match outcome {
+            ClassifyOutcome::Classified(GameEvent::PlayerDeath(_)) => {}
+            other => panic!("expected Classified(PlayerDeath), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_or_capture_returns_unknown_for_mystery_line() {
+        // Shell parses fine, but no built-in matches and no remote
+        // rule provided — the line is captured for review.
+        let line = "<2026-05-17T14:02:30Z> [Notice] <NewMysteryEvent> something something [54324]";
+        let parsed = structural_parse(line).expect("structural parse");
+        let ctx = crate::unknown_lines::CaptureContextDefault::default();
+        let outcome = classify_or_capture(&parsed, &[], &ctx, line, "2026-05-17T14:02:30Z");
+        let captured = match outcome {
+            ClassifyOutcome::Unknown(u) => u,
+            other => panic!("expected Unknown, got {other:?}"),
+        };
+        assert!(captured.interest_score > 0);
+        assert_eq!(captured.shell_tag.as_deref(), Some("NewMysteryEvent"));
+        assert_eq!(captured.raw_line, line);
+    }
+
+    #[test]
+    fn classify_or_capture_does_not_capture_when_remote_match_succeeds() {
+        use crate::parser_defs::{compile_rules, RemoteRule, RuleMatchKind};
+        // Remote rule matches "PlayerDance" lines; the same line is not
+        // a built-in, so the remote arm fires and we never capture.
+        let rules = vec![RemoteRule {
+            id: "r-dance".to_string(),
+            event_name: "PlayerDance".to_string(),
+            match_kind: RuleMatchKind::EventName,
+            body_regex: r"emote=(?P<emote>\w+)".to_string(),
+            fields: vec!["emote".to_string()],
+        }];
+        let (compiled, bad) = compile_rules(&rules);
+        assert!(bad.is_empty());
+        let line = "<2026-05-17T15:00:00.000Z> [Notice] <PlayerDance> emote=salute [Team_X]";
+        let parsed = structural_parse(line).expect("structural parse");
+        let ctx = crate::unknown_lines::CaptureContextDefault::default();
+        let outcome = classify_or_capture(&parsed, &compiled, &ctx, line, "2026-05-17T15:00:00Z");
+        match outcome {
+            ClassifyOutcome::RemoteMatched(GameEvent::RemoteMatch(m)) => {
+                assert_eq!(m.event_name, "PlayerDance");
+            }
+            other => panic!("expected RemoteMatched, got {other:?}"),
+        }
     }
 }
