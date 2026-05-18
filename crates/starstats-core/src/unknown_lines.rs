@@ -87,6 +87,8 @@ static IPPORT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b").expect("IPPORT_RE compiles")
 });
 static QUOTED_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""[^"]+""#).expect("QUOTED_RE compiles"));
+static SHARD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"shard[\[\s=:]+([A-Za-z0-9_-]+)").expect("SHARD_RE compiles"));
 
 /// Collapse a raw log line to its shape: identifiers and timestamps
 /// become tokens like `<TS>`, `<GEID>`, etc. Same template → same shape.
@@ -170,6 +172,80 @@ pub fn interest_score(line: &str, shell_tag: Option<&str>, ctx: &InterestContext
         score -= 30;
     }
     score.clamp(0, 100) as u8
+}
+
+// ─── PII detection ──────────────────────────────────────────────────
+
+/// Auto-detect potentially sensitive tokens in a raw line. The detector
+/// errs on the side of false positives — the user reviews and toggles
+/// per-token before submission. `default_redact = true` for the
+/// player's own handle and shard ID (high re-identification risk);
+/// other kinds default off because they're often part of the signal
+/// the rule author needs to see.
+pub fn detect_pii(line: &str, own_handle: &str, known_friends: &[String]) -> Vec<PiiToken> {
+    let mut tokens = Vec::new();
+
+    if !own_handle.is_empty() {
+        for idx in line.match_indices(own_handle).map(|(i, _)| i) {
+            tokens.push(PiiToken {
+                kind: PiiKind::OwnHandle,
+                start: idx,
+                end: idx + own_handle.len(),
+                suggested_redaction: "[HANDLE]".into(),
+                default_redact: true,
+            });
+        }
+    }
+
+    for friend in known_friends {
+        if friend.is_empty() {
+            continue;
+        }
+        for idx in line.match_indices(friend.as_str()).map(|(i, _)| i) {
+            tokens.push(PiiToken {
+                kind: PiiKind::FriendHandle,
+                start: idx,
+                end: idx + friend.len(),
+                suggested_redaction: "[FRIEND]".into(),
+                default_redact: false,
+            });
+        }
+    }
+
+    for m in GEID_RE.find_iter(line) {
+        tokens.push(PiiToken {
+            kind: PiiKind::Geid,
+            start: m.start(),
+            end: m.end(),
+            suggested_redaction: "[GEID]".into(),
+            default_redact: false,
+        });
+    }
+    for m in IPPORT_RE.find_iter(line) {
+        tokens.push(PiiToken {
+            kind: PiiKind::IpPort,
+            start: m.start(),
+            end: m.end(),
+            suggested_redaction: "[IPPORT]".into(),
+            default_redact: false,
+        });
+    }
+
+    for cap in SHARD_RE.captures_iter(line) {
+        let m = cap
+            .get(1)
+            .expect("SHARD_RE capture group 1 is always present on a match");
+        tokens.push(PiiToken {
+            kind: PiiKind::ShardId,
+            start: m.start(),
+            end: m.end(),
+            suggested_redaction: "[SHARD]".into(),
+            default_redact: true,
+        });
+    }
+
+    tokens.sort_by_key(|t| t.start);
+    tokens
 }
 
 #[cfg(test)]
@@ -308,5 +384,78 @@ mod tests {
         // Unknown tag (+40) but len < 20 (−30) = 10, well below threshold.
         let score = interest_score(short, Some("Foo"), &ctx);
         assert!(score < 50);
+    }
+
+    // ─── PII detection ───────────────────────────────────────────────
+
+    #[test]
+    fn detects_own_handle_with_default_redact_on() {
+        let line = "Notice: TheCodeSaiyan joined the PU";
+        let tokens = detect_pii(line, "TheCodeSaiyan", &[]);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, PiiKind::OwnHandle);
+        assert!(tokens[0].default_redact);
+        assert_eq!(&line[tokens[0].start..tokens[0].end], "TheCodeSaiyan");
+    }
+
+    #[test]
+    fn detects_friend_handle_with_default_redact_off() {
+        let line = "alice killed bob";
+        let friends = vec!["bob".to_string()];
+        let tokens = detect_pii(line, "", &friends);
+        let friend = tokens
+            .iter()
+            .find(|t| t.kind == PiiKind::FriendHandle)
+            .expect("friend handle detected");
+        assert!(!friend.default_redact);
+        assert_eq!(&line[friend.start..friend.end], "bob");
+    }
+
+    #[test]
+    fn detects_geid_in_brackets() {
+        let line = "spawned id [54324] in zone";
+        let tokens = detect_pii(line, "", &[]);
+        let geid = tokens
+            .iter()
+            .find(|t| t.kind == PiiKind::Geid)
+            .expect("GEID detected");
+        assert_eq!(&line[geid.start..geid.end], "[54324]");
+    }
+
+    #[test]
+    fn detects_ip_port() {
+        let line = "connect 1.2.3.4:64300 to shard";
+        let tokens = detect_pii(line, "", &[]);
+        let ip = tokens
+            .iter()
+            .find(|t| t.kind == PiiKind::IpPort)
+            .expect("IP:port detected");
+        assert_eq!(&line[ip.start..ip.end], "1.2.3.4:64300");
+    }
+
+    #[test]
+    fn detects_shard_id_with_default_redact_on() {
+        let line = "address[1.2.3.4] port[64300] shard[pub_euw1b] locationId[1]";
+        let tokens = detect_pii(line, "", &[]);
+        let shard = tokens
+            .iter()
+            .find(|t| t.kind == PiiKind::ShardId)
+            .expect("shard id detected");
+        assert!(shard.default_redact);
+        assert_eq!(&line[shard.start..shard.end], "pub_euw1b");
+    }
+
+    #[test]
+    fn multi_token_line_sorted_by_start() {
+        let line = "TheCodeSaiyan connected to 1.2.3.4:64300 shard[pub_euw1b] id [54324]";
+        let tokens = detect_pii(line, "TheCodeSaiyan", &[]);
+        for win in tokens.windows(2) {
+            assert!(win[0].start <= win[1].start);
+        }
+        let kinds: HashSet<_> = tokens.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&PiiKind::OwnHandle));
+        assert!(kinds.contains(&PiiKind::IpPort));
+        assert!(kinds.contains(&PiiKind::ShardId));
+        assert!(kinds.contains(&PiiKind::Geid));
     }
 }
