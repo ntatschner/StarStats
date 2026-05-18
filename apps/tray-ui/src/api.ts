@@ -371,15 +371,19 @@ export interface ApiUrlCheck {
 
 /**
  * Log channel an unknown-line capture came from. Mirrors the Rust
- * `LogSource` enum (snake_case serde). Tray currently captures only
- * from `channel_live`, but the wire type carries the channel so the
- * server can scope rule promotion correctly.
+ * `LogSource` enum (`#[serde(rename_all = "lowercase")]`) so the strings
+ * the Tauri bridge hands back deserialise cleanly. Tray captures from
+ * the live channel today; the enum carries the other branches so a
+ * future PTU/Eptu/etc. capture surfaces the correct channel server-side
+ * for rule-scope decisions.
  */
 export type LogSource =
-  | 'channel_live'
-  | 'channel_archived'
-  | 'crash_report'
-  | 'launcher_log';
+  | 'live'
+  | 'ptu'
+  | 'eptu'
+  | 'hotfix'
+  | 'tech'
+  | 'other';
 
 export type PiiKind =
   | 'own_handle'

@@ -26,16 +26,21 @@ interface Props {
 }
 
 export function SubmissionsPane({ refreshKey, onCountChange }: Props) {
-  const [shapes, setShapes] = useState<UnknownShape[]>([]);
+  // Keep the full `UnknownLine[]` (not just the derived `UnknownShape[]`)
+  // so the submit adapter can read fields the review pane intentionally
+  // doesn't surface — channel, partial_structured, context_before/after,
+  // game_build. Deriving shapes at render-time is cheap; refetching just
+  // to recover those fields would be wasteful and racy.
+  const [rows, setRows] = useState<UnknownLine[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const shapes: UnknownShape[] = rows.map(rowToShape);
 
   const refresh = useCallback(async () => {
     try {
-      const rows = await api.listUnknownLines();
-      const adapted = rows.map(rowToShape);
-      setShapes(adapted);
+      const fresh = await api.listUnknownLines();
+      setRows(fresh);
       setError(null);
-      onCountChange?.(adapted.length);
+      onCountChange?.(fresh.length);
     } catch (e) {
       setError(String(e));
     }
@@ -49,24 +54,36 @@ export function SubmissionsPane({ refreshKey, onCountChange }: Props) {
     async (payload: SubmitPayload) => {
       // Find the source row so we can carry through the fields the
       // server expects but the review UI doesn't surface (channel,
-      // partial_structured, context, etc.). The user only edited
+      // partial_structured, context, game_build). The user only edited
       // `raw_example`, `suggested_event_name`, and `notes`.
-      const row = shapes.find((s) => s.shape_hash === payload.shape_hash);
+      const row = rows.find((r) => r.shape_hash === payload.shape_hash);
       if (!row) return;
       try {
         await api.submitUnknownLines([
           {
             shape_hash: payload.shape_hash,
             raw_examples: [payload.raw_example],
+            partial_structured: row.partial_structured ?? {},
             shell_tag: row.shell_tag ?? undefined,
             suggested_event_name: payload.suggested_event_name,
             notes: payload.notes,
-            channel: 'channel_live',
+            context_examples: [
+              {
+                before: row.context_before ?? [],
+                after: row.context_after ?? [],
+              },
+            ],
+            game_build: row.game_build ?? undefined,
+            // `LogSource` is lowercase on the wire (`live`/`ptu`/...)
+            // — `'live'` is the conservative default if a row somehow
+            // arrived without a channel set.
+            channel: row.channel ?? 'live',
             occurrence_count: row.occurrence_count,
-            // `client_anon_id` is owned by the server submission
-            // surface in a later phase — empty string here lets the
-            // wire shape round-trip; the bearer token already
-            // identifies the device for dedup purposes.
+            // `client_anon_id` is filled in server-side inside the
+            // Tauri command (see `commands::submit_unknown_lines`).
+            // The frontend value is ignored — we send an empty string
+            // here purely to satisfy the TS type; the Rust path
+            // overwrites it before it hits the network.
             client_anon_id: '',
           },
         ]);
@@ -75,7 +92,7 @@ export function SubmissionsPane({ refreshKey, onCountChange }: Props) {
         setError(String(e));
       }
     },
-    [shapes, refresh]
+    [rows, refresh]
   );
 
   const onDismiss = useCallback(
