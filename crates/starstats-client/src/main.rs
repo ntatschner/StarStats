@@ -340,6 +340,10 @@ fn main() {
             commands::check_api_url,
             commands::check_rsi_cookie,
             commands::set_update_available,
+            commands::list_unknown_lines,
+            commands::count_unknown_lines,
+            commands::dismiss_unknown_line,
+            commands::submit_unknown_lines,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

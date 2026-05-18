@@ -4,9 +4,15 @@ import { StatusPane } from './components/StatusPane';
 import { SettingsPane } from './components/SettingsPane';
 import { LogsPane } from './components/LogsPane';
 import { TrayHeader, type TrayView } from './components/TrayHeader';
+import { SubmissionsPane } from './submissions/SubmissionsPane';
 import { useStatusPolling } from './hooks/useStatusPolling';
 import { FieldFocusProvider, useFieldFocus } from './hooks/useFieldFocus';
 import './styles.css';
+
+/** How often the unknown-line badge polls storage. Cheap query
+ *  (single indexed COUNT) so 30s is comfortable; tweak down if a
+ *  flood of unknowns mid-session feels stale. */
+const UNKNOWN_BADGE_REFRESH_MS = 30_000;
 
 function AppInner() {
   const [view, setView] = useState<TrayView>('status');
@@ -35,6 +41,29 @@ function AppInner() {
     active: view === 'status',
     onError: setError,
   });
+
+  // Local count of unknown shapes pending review. Drives the badge on
+  // the Review tab; SubmissionsPane reports back via `onCountChange`
+  // when it refetches after a Submit/Dismiss so we don't double-poll.
+  const [unknownCount, setUnknownCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const n = await api.countUnknownLines();
+        if (!cancelled) setUnknownCount(n);
+      } catch {
+        // Badge is informational — silent fallback keeps the
+        // header noise-free if the IPC layer hiccups.
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, UNKNOWN_BADGE_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   const refreshConfig = useCallback(async () => {
     try {
@@ -91,6 +120,7 @@ function AppInner() {
         onView={setView}
         isTailing={isTailing}
         version={appVersion}
+        reviewBadge={unknownCount}
       />
       <main className="app__main">
         {error && <div className="error">Error: {error}</div>}
@@ -114,6 +144,9 @@ function AppInner() {
               <div className="loading">Loading…</div>
             ))}
           {view === 'logs' && <LogsPane />}
+          {view === 'review' && (
+            <SubmissionsPane onCountChange={setUnknownCount} />
+          )}
           {view === 'settings' &&
             (config ? (
               <SettingsPane config={config} onSave={onSaveConfig} />

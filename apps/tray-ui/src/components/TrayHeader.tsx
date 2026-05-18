@@ -6,7 +6,7 @@
 
 import { StatusDot } from './tray/primitives';
 
-export type TrayView = 'status' | 'logs' | 'settings';
+export type TrayView = 'status' | 'logs' | 'review' | 'settings';
 
 interface Props {
   view: TrayView;
@@ -19,11 +19,14 @@ interface Props {
    * stale fallback.
    */
   version: string | null;
+  /** Number of unknown shapes pending review. Shown as a small
+   *  badge on the Review tab. 0 hides the badge. */
+  reviewBadge?: number;
 }
 
-const TABS: ReadonlyArray<TrayView> = ['status', 'logs', 'settings'];
+const TABS: ReadonlyArray<TrayView> = ['status', 'logs', 'review', 'settings'];
 
-export function TrayHeader({ view, onView, isTailing, version }: Props) {
+export function TrayHeader({ view, onView, isTailing, version, reviewBadge = 0 }: Props) {
   return (
     <header
       style={{
@@ -69,11 +72,13 @@ export function TrayHeader({ view, onView, isTailing, version }: Props) {
       <nav style={{ display: 'flex', gap: 4, justifyContent: 'center' }} aria-label="Pane">
         {TABS.map((tab) => {
           const active = view === tab;
+          const showBadge = tab === 'review' && reviewBadge > 0;
           return (
             <button
               key={tab}
               type="button"
               onClick={() => onView(tab)}
+              aria-label={tab === 'review' ? 'unknown lines' : undefined}
               style={{
                 background: active ? 'var(--accent-soft)' : 'transparent',
                 color: active ? 'var(--accent)' : 'var(--fg-muted)',
@@ -86,9 +91,28 @@ export function TrayHeader({ view, onView, isTailing, version }: Props) {
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
               }}
             >
               {tab}
+              {showBadge && (
+                <span
+                  data-testid="review-badge"
+                  style={{
+                    background: 'var(--accent)',
+                    color: 'var(--bg)',
+                    borderRadius: 'var(--r-pill, 999px)',
+                    fontSize: 10,
+                    lineHeight: 1,
+                    padding: '2px 6px',
+                    fontWeight: 700,
+                  }}
+                >
+                  {reviewBadge}
+                </span>
+              )}
             </button>
           );
         })}

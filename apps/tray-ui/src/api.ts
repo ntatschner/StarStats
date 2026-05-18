@@ -367,6 +367,87 @@ export interface ApiUrlCheck {
   error: string | null;
 }
 
+// === Parser submissions ===
+
+/**
+ * Log channel an unknown-line capture came from. Mirrors the Rust
+ * `LogSource` enum (snake_case serde). Tray currently captures only
+ * from `channel_live`, but the wire type carries the channel so the
+ * server can scope rule promotion correctly.
+ */
+export type LogSource =
+  | 'channel_live'
+  | 'channel_archived'
+  | 'crash_report'
+  | 'launcher_log';
+
+export type PiiKind =
+  | 'own_handle'
+  | 'friend_handle'
+  | 'shard_id'
+  | 'geid'
+  | 'ip_port';
+
+export interface PiiToken {
+  kind: PiiKind;
+  start: number;
+  end: number;
+  suggested_redaction: string;
+  default_redact: boolean;
+}
+
+/**
+ * One unknown-line row out of the local SQLite cache. Mirrors the
+ * Rust `UnknownLine` struct (snake_case serde). The review pane only
+ * needs a subset of these fields; the rest are passed through to the
+ * submission payload so the server-side reviewer has full context.
+ */
+export interface UnknownLine {
+  id: string;
+  raw_line: string;
+  timestamp: string | null;
+  shell_tag: string | null;
+  partial_structured: Record<string, string>;
+  context_before: string[];
+  context_after: string[];
+  game_build: string | null;
+  channel: LogSource;
+  interest_score: number;
+  shape_hash: string;
+  occurrence_count: number;
+  first_seen: string;
+  last_seen: string;
+  detected_pii: PiiToken[];
+  dismissed: boolean;
+}
+
+/**
+ * One element of the `POST /v1/parser-submissions` batch. Mirrors the
+ * Rust `ParserSubmission` struct. `client_anon_id` is a stable hash
+ * the server uses to dedupe submissions from the same anonymous user
+ * without identifying them — the bearer token does the auth.
+ */
+export interface ParserSubmission {
+  shape_hash: string;
+  raw_examples: string[];
+  partial_structured?: Record<string, string>;
+  shell_tag?: string;
+  suggested_event_name?: string;
+  suggested_field_names?: Record<string, string>;
+  notes?: string;
+  context_examples?: Array<{ before: string[]; after: string[] }>;
+  game_build?: string;
+  channel: LogSource;
+  occurrence_count: number;
+  client_anon_id: string;
+}
+
+export interface ParserSubmissionResponse {
+  accepted: number;
+  deduped: number;
+  ids: string[];
+}
+
 export interface CookieCheck {
   ok: boolean;
   handle: string | null;
@@ -414,4 +495,10 @@ export const api = {
   checkApiUrl: (url: string) => invoke<ApiUrlCheck>('check_api_url', { url }),
   checkRsiCookie: (cookie: string) => invoke<CookieCheck>('check_rsi_cookie', { cookie }),
   setUpdateAvailable: (version: string) => invoke<void>('set_update_available', { version }),
+  listUnknownLines: () => invoke<UnknownLine[]>('list_unknown_lines'),
+  countUnknownLines: () => invoke<number>('count_unknown_lines'),
+  dismissUnknownLine: (shapeHash: string) =>
+    invoke<void>('dismiss_unknown_line', { shapeHash }),
+  submitUnknownLines: (payloads: ParserSubmission[]) =>
+    invoke<ParserSubmissionResponse>('submit_unknown_lines', { payloads }),
 };

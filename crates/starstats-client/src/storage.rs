@@ -705,7 +705,6 @@ impl Storage {
     /// desc, last_seen desc so the most actionable shapes float to the
     /// top of the review pane. `min_interest = 50` matches the spec
     /// default; callers can lower the bar for diagnostic views.
-    #[allow(dead_code)]
     pub fn list_unknown_lines(&self, min_interest: u8) -> Result<Vec<UnknownLine>> {
         let conn = self.conn.lock().expect("storage mutex poisoned");
         let mut stmt = conn.prepare(
@@ -729,7 +728,6 @@ impl Storage {
     /// interest cutoff. Tray badge calls this on a timer so it stays
     /// cheap — the dedicated index on `(dismissed, interest_score)`
     /// keeps the scan small.
-    #[allow(dead_code)]
     pub fn count_unknown_lines(&self, min_interest: u8) -> Result<u32> {
         let conn = self.conn.lock().expect("storage mutex poisoned");
         let n: i64 = conn.query_row(
@@ -744,7 +742,6 @@ impl Storage {
     /// Mark a shape as dismissed so it never resurfaces in
     /// `list_unknown_lines`. The row is kept (not deleted) so a future
     /// re-capture of the same shape doesn't re-trigger the badge.
-    #[allow(dead_code)]
     pub fn dismiss_unknown_line(&self, shape_hash: &str) -> Result<()> {
         let conn = self.conn.lock().expect("storage mutex poisoned");
         conn.execute(
@@ -758,7 +755,6 @@ impl Storage {
     /// been shipped to the server's moderation queue. The caller owns
     /// the timestamp format (ISO-8601 by convention) so this method
     /// stays a thin write.
-    #[allow(dead_code)]
     pub fn mark_submitted(&self, shape_hash: &str, submitted_at: &str) -> Result<()> {
         let conn = self.conn.lock().expect("storage mutex poisoned");
         conn.execute(

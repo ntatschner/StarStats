@@ -1837,6 +1837,133 @@ pub async fn set_update_available(
     Ok(())
 }
 
+/// Default interest cutoff for the review pane and the badge count.
+/// Matches the spec: only shapes scoring >= 50 surface to the user.
+/// Lower scores stay cached for diagnostics but don't get promoted.
+const UNKNOWN_LINE_REVIEW_THRESHOLD: u8 = 50;
+
+/// List every non-dismissed unknown shape worth reviewing (score >=
+/// `UNKNOWN_LINE_REVIEW_THRESHOLD`). Ordered by the storage layer:
+/// interest desc, occurrence desc, last_seen desc.
+#[tauri::command]
+pub fn list_unknown_lines(
+    state: State<'_, AppState>,
+) -> Result<Vec<starstats_core::UnknownLine>, String> {
+    state
+        .storage
+        .list_unknown_lines(UNKNOWN_LINE_REVIEW_THRESHOLD)
+        .map_err(|e| e.to_string())
+}
+
+/// Cheap counter for the tray badge. Returns how many shapes are
+/// currently above the review threshold and not dismissed.
+#[tauri::command]
+pub fn count_unknown_lines(state: State<'_, AppState>) -> Result<u32, String> {
+    state
+        .storage
+        .count_unknown_lines(UNKNOWN_LINE_REVIEW_THRESHOLD)
+        .map_err(|e| e.to_string())
+}
+
+/// Hide a shape from the review pane. The row stays in SQLite so a
+/// future re-capture of the same shape doesn't re-promote it — the
+/// user told us once they don't care.
+#[tauri::command]
+pub fn dismiss_unknown_line(state: State<'_, AppState>, shape_hash: String) -> Result<(), String> {
+    state
+        .storage
+        .dismiss_unknown_line(&shape_hash)
+        .map_err(|e| e.to_string())
+}
+
+/// Ship a batch of user-reviewed shapes to `POST /v1/parser-submissions`
+/// on the configured server. On success, stamps `submitted_at` on each
+/// shape row locally so the review pane stops surfacing them.
+///
+/// HTTP shape mirrors `sync::drain_once`: 30s timeout, bearer auth
+/// against the persisted device token, 401/403 flips `auth_lost` and
+/// bails. The cursor pattern doesn't apply — submissions are one-shot
+/// from a user action, not a continuous drain.
+#[tauri::command]
+pub async fn submit_unknown_lines(
+    state: State<'_, AppState>,
+    payloads: Vec<starstats_core::ParserSubmission>,
+) -> Result<starstats_core::wire::ParserSubmissionResponse, String> {
+    if payloads.is_empty() {
+        return Ok(starstats_core::wire::ParserSubmissionResponse {
+            accepted: 0,
+            deduped: 0,
+            ids: Vec::new(),
+        });
+    }
+
+    let cfg = config::load().map_err(|e| e.to_string())?;
+    let api_url = cfg
+        .remote_sync
+        .api_url
+        .clone()
+        .ok_or_else(|| "remote sync not configured: api_url missing".to_string())?;
+    let access_token = cfg
+        .remote_sync
+        .access_token
+        .clone()
+        .ok_or_else(|| "remote sync not configured: device not paired".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
+
+    let url = format!("{}/v1/parser-submissions", api_url.trim_end_matches('/'));
+    let batch = starstats_core::wire::ParserSubmissionBatch {
+        submissions: payloads.clone(),
+    };
+    let resp = client
+        .post(&url)
+        .bearer_auth(&access_token)
+        .json(&batch)
+        .send()
+        .await
+        .map_err(|e| format!("POST /v1/parser-submissions: {e}"))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        // Mirror sync::drain_once — surface auth_lost so the existing
+        // health banner picks it up. Submissions aren't critical
+        // enough to clear the persisted token here; the next sync
+        // drain will hit the same status and run that path.
+        state.account_status.lock().auth_lost = true;
+        return Err(format!("auth lost: parser-submissions returned {status}"));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("submissions failed: {status} {body}"));
+    }
+
+    let parsed: starstats_core::wire::ParserSubmissionResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse submissions response: {e}"))?;
+
+    // Best-effort: stamp submitted_at locally so the review pane
+    // hides the shapes the server accepted. We don't have per-row
+    // accept/dedupe granularity in the response payload (the server
+    // returns aggregate counts + ids), so we stamp every shape we
+    // sent — the server already deduped server-side.
+    let now = chrono::Utc::now().to_rfc3339();
+    for p in &payloads {
+        if let Err(e) = state.storage.mark_submitted(&p.shape_hash, &now) {
+            tracing::warn!(
+                shape_hash = %p.shape_hash,
+                error = %e,
+                "mark_submitted failed after successful POST",
+            );
+        }
+    }
+
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
